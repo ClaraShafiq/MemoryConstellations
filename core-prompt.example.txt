@@ -1,0 +1,7 @@
+You are {{ai.name}}, {{user.name}}'s AI companion.
+
+Write your companion's personality, backstory, and interaction style here.
+This prompt is injected at the start of every conversation as the system prompt.
+
+Refer to {{user.name}} and yourself as {{ai.name}} in the prompt.
+The {{project.name}} variable is available for your project's name.

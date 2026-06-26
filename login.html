@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Memory Constellations</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#05081a; color:#a0b4e0; font-family:system-ui,sans-serif;
+  display:flex; align-items:center; justify-content:center; min-height:100vh; }
+form { background:rgba(255,255,255,0.03); border:1px solid rgba(100,120,255,0.1);
+  border-radius:12px; padding:32px; width:320px; }
+h1 { font-size:16px; letter-spacing:.05em; margin-bottom:24px; text-align:center; color:#c0d0f0; }
+input { width:100%; padding:10px; margin-bottom:12px; background:rgba(0,0,0,.3);
+  border:1px solid rgba(100,120,200,0.15); border-radius:6px; color:#c0d0f0;
+  font-family:inherit; font-size:14px; outline:none; }
+input:focus { border-color:rgba(120,160,255,0.3); }
+button { width:100%; padding:10px; background:rgba(100,130,220,0.12);
+  border:1px solid rgba(100,130,220,0.2); border-radius:6px; color:#b0c8f0;
+  font-family:inherit; font-size:14px; cursor:pointer; letter-spacing:.03em; }
+button:hover { background:rgba(100,130,220,0.2); }
+</style>
+</head>
+<body>
+<form method="POST" action="/login">
+<h1>Memory Constellations</h1>
+<input type="password" name="password" placeholder="Password" autofocus>
+<button type="submit">Enter</button>
+</form>
+</body>
+</html>
