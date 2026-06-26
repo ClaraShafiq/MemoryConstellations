@@ -125,6 +125,18 @@ jiwen ── every minute
 | Cognitive model | `clara_model` + `clara_patterns` | Current states (companion-maintained) + behavior patterns (auto-clustered) | Chat-time writes + deep cycle |
 | Emotional state | jiwen (in-memory) | 5-axis continuous values, persisted to DB | Every minute (math drift + saga bias) |
 
+### Concurrency
+
+Scribe and Archivist both write to `memory_fragments` and `entity_profiles`. SQLite's WAL mode ensures readers don't block writers. In practice the two are naturally staggered: Scribe only triggers after ≥20 minutes of silence, while Archivist runs on a 2-minute tick. Archivist's `consolidateCategory` marks fragments as `consolidated` but never deletes them — the worst case is a fragment gets classified into an entity right before consolidation. No explicit lock is needed at current scale.
+
+### Retrieval design
+
+Librarian uses RRF (Reciprocal Rank Fusion) to merge results from three independent channels: FTS5 keyword, vector similarity, and entity aggregation. Episodes get a 1.5× weight over raw fragments because a consolidated narrative carries more context than a single extracted fact — it tells Draco *what happened* rather than *one thing someone said*. This is a design hypothesis, not a benchmarked result. If you want to tune recall for your use case, the weights live in `services/librarian.js` (`EPISODE_BOOST`, intent weights, vector similarity floor).
+
+### Saga bias
+
+Sagas feed into the `jiwen` emotional state engine as a per-minute bias on each of the five axes. The bias is intentionally small — ~6% of the natural drift rate. An inaccurate Saga won't destabilise the companion's emotional baseline; it'll just nudge it slightly in a direction that can be corrected by real-time conversation. The design prioritises safety over precision: better a weak signal than a wrong strong one. If you're not using jiwen, Sagas still serve as long-term narrative summaries that get injected during extended silence.
+
 ### Optional: Chat summary module
 
 `services/summary.js` — a short-term memory module that compresses recent conversation into timestamped log entries. Runs when message count crosses a threshold, injects the log into the next turn's context. Independent from the memory pipeline — can be enabled or removed without affecting the star map.
