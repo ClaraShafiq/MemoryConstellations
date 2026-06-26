@@ -234,7 +234,7 @@ Two modes:
 
 No parameters needed. Returns a top-level view of all memory partitions — people, places, events, projects. Your companion can see who they know about and how many memories are linked to each person. Tell them: *"if you're not sure who someone is, or you want to check what you know about a person, browse your memories."*
 
-### `manage_clara_state` — Track user state
+### `update_current_state` — Track user state
 
 Three actions your companion uses to maintain a current picture of you:
 - **set**: Record a new observation — *"She started a new project, she's on her period, she just moved."* Must include an expiry date (max 90 days). Duplicate detection prevents near-identical entries.
