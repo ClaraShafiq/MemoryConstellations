@@ -274,8 +274,8 @@ async function getKnownEntities(messagesText) {
             const lines = mentioned.map(p => {
                 const catLabel = p.category === 'alias' ? '（= Clara身份）'
                     : p.category === 'term' ? '（特殊信号词，非人名）'
-                    : p.category === 'company' ? '（Clara的公司）'
-                    : p.category === 'agency' ? '（Clara的经纪公司）'
+                    : p.category === 'company' ? '（{user}的公司）'
+                    : p.category === 'agency' ? '（{user}的经纪公司）'
                     : '';
                 return `- ${p.name}${catLabel}：${p.current_status}`;
             });
@@ -319,7 +319,7 @@ async function getEntityRelationContext() {
     }
     if (lowConf.length) {
         ctx += '## 待观察关系（尚不确定，勿给结论）\n';
-        ctx += '以下人物与Clara的关系尚不明确。如果你在对话中注意到关系线索，请在提取的entity字段中标注该人物，但**不要**在content中给关系下结论。\n';
+        ctx += '以下人物与{user}的关系尚不明确。如果你在对话中注意到关系线索，请在提取的entity字段中标注该人物，但**不要**在content中给关系下结论。\n';
         for (const r of lowConf) {
             const hint = r.relationship_to_clara
                 ? `（当前猜测: ${r.relationship_to_clara}，未确认）`
