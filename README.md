@@ -220,6 +220,35 @@ Full list in `.env.example`.
 
 ---
 
+## Companion tools
+
+These are the tools your companion uses to interact with their memory system. They're injected into the system prompt automatically — you just need to write their personality in `core-prompt.txt` and they'll know when to use each one. Tools can be toggled on/off individually via the companion's settings UI or the `user_settings` database table.
+
+### `recall_memory` — Search memories
+
+Two modes:
+- **Keyword search** (`query`): Your companion searches their memory by keyword or phrase. Returns matching fragments and episodes. Use when they half-remember something or you mention a past event.
+- **Source trace** (`memory_id` + `offset`): Given a memory ID (from the `#id` in context), trace back to the original conversation messages that produced it. Tell your companion: *"and if you want to see the exact conversation where you learned that, you can trace it with the memory ID."*
+
+### `browse_memories` — Browse entity profiles
+
+No parameters needed. Returns a top-level view of all memory partitions — people, places, events, projects. Your companion can see who they know about and how many memories are linked to each person. Tell them: *"if you're not sure who someone is, or you want to check what you know about a person, browse your memories."*
+
+### `manage_clara_state` — Track user state
+
+Three actions your companion uses to maintain a current picture of you:
+- **set**: Record a new observation — *"She started a new project, she's on her period, she just moved."* Must include an expiry date (max 90 days). Duplicate detection prevents near-identical entries.
+- **update**: Modify an existing observation (by state ID) — *"That deadline changed"* or *"She's feeling better now."*
+- **resolve**: Mark something as ended — *"She finished that project."* Requires a brief reason.
+
+States auto-expire. Your companion sees active ones in their intuition block and uses them to calibrate their tone.
+
+### `correct_memory` — Handle corrections
+
+When you tell your companion they remembered something wrong, they call this to record the correction. The system traces whether the error came from a specific memory fragment (fixes that fragment) or was something they made up (stores the correct version). Tell them: *"if I ever say 'that's not right' or 'you're remembering wrong', use correct_memory to fix it."*
+
+---
+
 ## Model recommendations
 
 Each pipeline stage has different requirements. Here's what works in practice:
