@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>Memory Constellations</title>
+<link rel="stylesheet" href="/styles/memory.css">
+</head>
+<body>
+<canvas id="bg"></canvas>
+<canvas id="mc"></canvas>
+
+<div id="breadcrumb"></div>
+
+<div id="topbar">
+  <span class="tb-title">Memory Universe</span>
+  <nav class="galaxy-pills" id="galaxy-pills">
+    <button class="gpill active" data-galaxy="">全部</button>
+  </nav>
+  <div class="tb-sep"></div>
+  <button class="stardust-btn" id="stardust-btn" title="星尘 · 观测日志">✦</button>
+  <span class="tb-count" id="tb-count">— fragments</span>
+</div>
+
+<div id="panel">
+  <button id="panel-close">✕</button>
+  <div class="p-accent" id="p-accent"></div>
+  <div class="p-cat" id="p-cat"></div>
+  <div class="p-title" id="p-title"></div>
+  <div class="p-body" id="p-body"></div>
+  <div class="p-tags" id="p-tags"></div>
+  <div id="p-meta"></div>
+  <div class="p-date" id="p-date"></div>
+</div>
+
+<div id="archlog" class="collapsed">
+  <div id="arch-header">
+    <div class="arch-pulse"></div>
+    <span class="arch-title">观星手记</span>
+    <span class="arch-sub">Draco · 归档代理</span>
+    <span class="arch-chevron">▲</span>
+  </div>
+  <div id="arch-body"></div>
+</div>
+
+<div id="model-panel" class="collapsed">
+  <div class="mp-header" id="mp-header">
+    <div class="mp-dot"></div>
+    <span class="mp-title">认知模型</span>
+    <span class="mp-chevron">▲</span>
+  </div>
+  <div id="mp-body"></div>
+</div>
+
+<div id="model-detail">
+  <div id="md-content"></div>
+</div>
+
+<div id="core-insight-panel" class="collapsed">
+  <div class="mp-header" id="ci-header">
+    <div class="mp-dot" style="background:#c9a96e"></div>
+    <span class="mp-title">核心洞察</span>
+    <span class="mp-chevron">▲</span>
+  </div>
+  <div id="ci-body" style="display:none">
+    <textarea id="ci-editor" rows="4" placeholder="Draco 对 Clara 当前最深的理解……"></textarea>
+    <div style="margin-top:6px;font-size:11px;color:#888">
+      <span id="ci-updated"></span>
+      <button id="ci-save" style="margin-left:8px;padding:2px 10px">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="merge-proposals" style="display:none">
+  <div class="mq-header">
+    <div class="mq-dot"></div>
+    <span class="mq-title">Draco 的疑问</span>
+    <span class="mq-count" id="mq-count"></span>
+  </div>
+  <div id="mq-body"></div>
+</div>
+
+<div id="tt"></div>
+<div id="hint">scroll to zoom · drag to pan<br>click to dive in · Esc to surface</div>
+
+<!-- 星尘透镜 -->
+<div id="stardust-overlay">
+  <div id="stardust-lens">
+    <div id="stardust-header">
+      <span class="sd-title">✦ 星尘 · 观测日志</span>
+      <input id="sd-search" placeholder="搜索信号..." autocomplete="off">
+      <select id="sd-filter">
+        <option value="1">最近24小时</option>
+        <option value="3">最近3天</option>
+        <option value="7" selected>最近7天</option>
+        <option value="30">最近30天</option>
+      </select>
+      <button id="sd-close">✕</button>
+    </div>
+    <div id="stardust-body"></div>
+    <div id="stardust-hint">点击信号展开详情 · 点击星座名跳转星图 · 点击空白处关闭</div>
+  </div>
+</div>
+<script type="module" src="/js/memory/main.js"></script>
+</body>
+</html>
