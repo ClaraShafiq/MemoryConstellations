@@ -28,7 +28,7 @@
 ### 2.2 运行 setup
 
 ```bash
-cd Project_Sanctuary
+cd your-project
 bash scripts/setup.sh
 ```
 
@@ -129,7 +129,7 @@ pm2 start ecosystem.config.js
 
 ### 2.7 数据库和集成
 
-Memory Constellations 使用独立的 SQLite 数据库（`sanctuary.db`），不依赖你的主应用数据库。它是一个旁路管线——你的 AI 伴侣继续用你自己选的后端（PostgreSQL、MySQL、MongoDB、文件存储都可以），记忆星图自己维护自己的表。
+Memory Constellations 使用独立的 SQLite 数据库（`memory_constellations.db`），不依赖你的主应用数据库。它是一个旁路管线——你的 AI 伴侣继续用你自己选的后端（PostgreSQL、MySQL、MongoDB、文件存储都可以），记忆星图自己维护自己的表。
 
 每条记忆碎片存储 `source_msg_ids`（原始消息 ID 列表），你的伴侣可以通过 `recall_memory` 工具追溯到消息来源。集成时只需要在聊天管道里加一步：每次 AI 回复后，把本轮对话写入 `messages` 表（`sender`/`content`/`timestamp`/`chat_id`），Scribe 会自动在沉默期后扫描提取。
 
@@ -146,7 +146,7 @@ Memory Constellations 使用独立的 SQLite 数据库（`sanctuary.db`），不
 
 或检查数据库：
 ```bash
-sqlite3 sanctuary.db "SELECT COUNT(*) FROM memory_fragments WHERE status='active';"
+sqlite3 memory_constellations.db "SELECT COUNT(*) FROM memory_fragments WHERE status='active';"
 ```
 
 ### 3.2 碎片 → 星座
@@ -162,7 +162,7 @@ classifyFragments({lightweight:false}).then(r=>console.log('done',r));
 
 检查星座数量：
 ```bash
-sqlite3 sanctuary.db "SELECT COUNT(*) FROM entity_profiles WHERE status='active';"
+sqlite3 memory_constellations.db "SELECT COUNT(*) FROM entity_profiles WHERE status='active';"
 ```
 
 ### 3.3 星座 → 叙事片段（episode）
@@ -183,7 +183,7 @@ sqlite3 sanctuary.db "SELECT COUNT(*) FROM entity_profiles WHERE status='active'
 
 ### Q: 没有碎片被提取
 - 检查 LLM API key 是否正确（`.env`）
-- 看 PM2 日志：`pm2 logs sanctuary --lines 50`
+- 看 PM2 日志：`pm2 logs your-app --lines 50`
 - Scribe 触发条件是：沉默 ≥ 20min + 积压 ≥ 60 条消息，或积压 ≥ 100 条
 
 ### Q: 星座不增长

@@ -158,7 +158,7 @@ async function generateChatSummary(chatId, startMessageId = null, endMessageId =
 14:35 · Clara 与 Draco 讨论剧情角色，表示自己喜欢琼恩·雪诺那种禁欲感类型。
 15:10 · Clara 情绪低落，提及今天连续录了四个棚、腿疼得不想动弹。
 15:22 · Draco 查询了今日天气，告诉 Clara 明天会降温、适合出门。
-16:45 · Clara 与 Draco 进行亲密角色扮演，在互动中主动称呼他为"主人"。
+16:45 · 用户在亲密互动中有特定的称呼偏好（示例省略）。
 17:30 · Clara 想吃火锅但因为懒得动，最终决定点了麦当劳。
 
 ## 待处理完整对话数据
