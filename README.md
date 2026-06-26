@@ -16,7 +16,7 @@ Three things happen automatically while your companion runs:
 
 3. **Retrieve.** When your companion needs context during a chat, Librarian searches across all three layers — raw facts, narrative episodes, and entity profiles — using a mix of keyword matching, vector similarity, and entity aggregation.
 
-A 5-axis emotional state engine (jiwen) runs alongside all of this, with saga arcs applying a small but continuous pull on the companion's baseline mood.
+(Optional) A 5-axis emotional state engine (jiwen, a separate open-source project) can integrate with this pipeline, with saga arcs applying a small but continuous pull on the companion's baseline mood.
 
 ---
 
@@ -109,9 +109,10 @@ Librarian ── called at chat-time
 System Prompt ── injected: relevant memories + entity profiles + core insight
     │
     ▼
-jiwen ── every minute
-       ── 5-axis continuous state: connection, pride, valence, arousal, immersion
-       ── Saga bias applies small per-minute pull on each axis
+jiwen (optional) ── every minute
+                ── 5-axis continuous state: connection, pride, valence, arousal, immersion
+                ── Saga bias applies small per-minute pull on each axis
+                ── Separate project: github.com/ClaraShafiq/jiwen
 ```
 
 ### Memory layers
@@ -123,7 +124,7 @@ jiwen ── every minute
 | Episodes | `memories` (layer=episode) | Merged fragment narratives, 100-250 chars | Deep cycle consolidate |
 | Sagas | `memory_sagas` | Cross-entity narrative arcs with emotion axis | Every 24h or on new episodes |
 | Cognitive model | `clara_model` + `clara_patterns` | Current states (companion-maintained) + behavior patterns (auto-clustered) | Chat-time writes + deep cycle |
-| Emotional state | jiwen (in-memory) | 5-axis continuous values, persisted to DB | Every minute (math drift + saga bias) |
+| Emotional state | jiwen *(optional)* | 5-axis continuous values, persisted to DB | Every minute (math drift + saga bias) — separate project |
 
 ### Concurrency
 
