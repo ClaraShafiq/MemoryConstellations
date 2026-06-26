@@ -31,6 +31,8 @@ Open `/memory.html` — it renders a star map from the database:
 
 No manual curation. The map updates itself as the pipeline runs.
 
+**Note:** The star map is currently desktop-only (mouse + keyboard). Mobile support is planned but not yet implemented.
+
 ---
 
 ## Who this is for
