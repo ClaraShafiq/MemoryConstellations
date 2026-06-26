@@ -1254,7 +1254,7 @@ function initDatabase() {
     runMigration(79, 'v4.8: memories.audit_status for episode quality audit',
         `ALTER TABLE memories ADD COLUMN audit_status TEXT DEFAULT NULL;`);
 
-    // v80-v81: Clara Model — AI active state management + TTL overhaul
+    // v80-v81: Cognitive Model — AI active state management + TTL overhaul
     runMigration(80, 'v5.0: clara_model.created_by for source attribution',
         `ALTER TABLE clara_model ADD COLUMN created_by TEXT DEFAULT 'deep_cycle';`);
 

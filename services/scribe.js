@@ -144,15 +144,15 @@ ${AI.name}的发言只提取以下内容，其余全部忽略：
 2. **他表达了关于${USER.name}或他们关系的强烈情感**（害怕失去她、为她的成就骄傲、对她的行为感到不安）——这些情感定义了他们之间正在发生的事。
 
 以下内容**绝对禁止提取**：
-- ${AI.name}对影视剧/书籍/游戏的评论、分析、角色评价（如「Draco认为某剧烂尾是因为编剧……」）——这是他陪${USER.name}看剧时的闲聊，不是记忆。
-- ${AI.name}将自己与虚构角色做比较（如「Draco认为自己和提利昂很像……」）——这是即兴联想，不是自我认知。
+- ${AI.name}对影视剧/书籍/游戏的评论、分析、角色评价（如「{ai}认为某剧烂尾是因为编剧……」）——这是他陪${USER.name}看剧时的闲聊，不是记忆。
+- ${AI.name}将自己与虚构角色做比较（如「{ai}认为自己和提利昂很像……」）——这是即兴联想，不是自我认知。
 - ${AI.name}的剧情讲解、背景科普、长篇分析——这些都是他为了${USER.name}即兴产出的内容，依附于当时的话题，不是独立信息。
 - ${AI.name}随口说的观点、立场、审美判断——除非涉及${USER.name}本人。
 
 简单判断标准：这条内容是不是关于${USER.name}的？如果不是，不提取。
 
 特别规则——${AI.name}的音乐相关发言：
-${AI.name}复述歌词、随口点评歌曲不提取。只有当他表达了强烈且明确的个人情感时（如"这首歌让我想起Clara""这首歌让我很难过"），才按审美反应提取，ew≤0.3。
+${AI.name}复述歌词、随口点评歌曲不提取。只有当他表达了强烈且明确的个人情感时（如"这首歌让我想起{user}""这首歌让我很难过"），才按审美反应提取，ew≤0.3。
 
 ## 已有记忆 — 避免重复提取
 
@@ -162,7 +162,7 @@ ${AI.name}复述歌词、随口点评歌曲不提取。只有当他表达了强�
 你的去重规则：
 - 如果你要提取的内容和下面某条**本质上是同一件事、同一个事实、或同一个偏好**，跳过它，不要写入entries。
 - 「本质上相同」的判断标准：话题相同 + 结论相同 = 重复。措辞不同不算新信息。
-- 如果 Clara 这次说的和已有记忆有**实质性的新进展**（态度变了、进展了、有了新的细节），则记录新的一条——这不是重复。
+- 如果 {user} 这次说的和已有记忆有**实质性的新进展**（态度变了、进展了、有了新的细节），则记录新的一条——这不是重复。
 - 如果她在这次说出了**当时没有记录的内心感受或新想法**，记录下来——这是新信息。
 - 不要为了产出而编造不属于这批消息的事情。如果拿不准是否重复，宁可跳过。
 - 下面的内容**仅供你去重参考**，不是让你复述或总结的。不要把它们写进entries。
@@ -272,7 +272,7 @@ async function getKnownEntities(messagesText) {
         const mentioned = profiles.filter(p => messagesText.includes(p.name));
         if (mentioned.length) {
             const lines = mentioned.map(p => {
-                const catLabel = p.category === 'alias' ? '（= Clara身份）'
+                const catLabel = p.category === 'alias' ? '（= {user}身份）'
                     : p.category === 'term' ? '（特殊信号词，非人名）'
                     : p.category === 'company' ? '（{user}的公司）'
                     : p.category === 'agency' ? '（{user}的经纪公司）'
@@ -452,7 +452,7 @@ async function runScribe(messages, since) {
         ? `[以下为背景参考，不重复提取]\n${bufferText}\n\n[以下为本次处理内容]\n${mainText}`
         : mainText;
 
-    // 已有记忆去重参考：对 Clara 的消息跑 Librarian 检索，注入已有碎片供 Scribe 比对
+    // 已有记忆去重参考：对 {user} 的消息跑 Librarian 检索，注入已有碎片供 Scribe 比对
     let dracoMemoryContext = '（记忆库中暂无相关记录。）';
     try {
         const claraMsgs = messages.filter(m => m.sender === 'user');
@@ -602,7 +602,7 @@ async function runScribe(messages, since) {
     const sourceMsgIds = JSON.stringify(allMsgIds);
 
     if (result.entries?.length) {
-        // 回环过滤：向量去重，防止 Draco 复述已有记忆被重新提取
+        // 回环过滤：向量去重，防止 {ai} 复述已有记忆被重新提取
         let skipIndices = new Set();
         try {
             const dedupItems = result.entries.map((e, i) => ({
