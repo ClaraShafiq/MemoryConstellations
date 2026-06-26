@@ -14,7 +14,11 @@ const { USER, AI, SKIP_NAMES } = require('./memoryConfig');
  */
 function fillPrompt(str) {
     if (typeof str !== 'string') return str;
-    return str.replace(/Clara/g, USER.name).replace(/Draco/g, AI.name);
+    return str
+        .replace(/\{user\}/g, USER.name)
+        .replace(/\{ai\}/g, AI.name)
+        .replace(/Clara/g, USER.name)      // 向后兼容旧版硬编码
+        .replace(/Draco/g, AI.name);
 }
 
 /**

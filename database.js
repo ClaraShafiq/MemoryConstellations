@@ -1014,7 +1014,7 @@ function initDatabase() {
          ALTER TABLE entity_profiles ADD COLUMN last_mentioned_date TEXT;
          ALTER TABLE memory_fragments ADD COLUMN insight TEXT;
          INSERT OR IGNORE INTO memory_ontology (path, label, parent_id, description)
-         VALUES ('人物', '人物', NULL, '{user} 生活里的人——每个人都是理解 {user} 的一个窗口');`);
+         VALUES ('人物', '人物', NULL, '用户生活里的人——每个人都是理解用户的一个窗口');`);
 
     // v64: 认知进化层 — 自纠错记忆 + 融合规则
     runMigration(64, 'cognitive evolution layer: correction log + cognitive rules',
@@ -1307,9 +1307,9 @@ function initDatabase() {
             const seedBatch = db.transaction(() => {
                 // Root categories
                 const roots = [
-                    ['人际关系', '人际关系', null, '{user}与他人的关系记忆'],
+                    ['人际关系', '人际关系', null, '用户与他人的关系记忆'],
                     ['地点', '地点', null, '与具体地点相关的记忆'],
-                    ['创作', '创作', null, '{user}的写作与创作记忆'],
+                    ['创作', '创作', null, '用户的写作与创作记忆'],
                     ['日常', '日常', null, '日常生活与日记'],
                     ['音乐', '音乐', null, '音乐相关记忆'],
                     ['工作', '工作', null, '配音与工作相关记忆'],
@@ -1320,9 +1320,9 @@ function initDatabase() {
                 }
                 // Child categories: parent_id derived from insertion order (1=人际关系, 2=地点, 3=创作)
                 const children = [
-                    ['人际关系/朋友', '朋友', 1, '{user}的朋友圈'],
-                    ['人际关系/家人', '家人', 1, '{user}的家人'],
-                    ['人际关系/关于我们', '关于我们', 1, '{ai}与{user}的关系记忆'],
+                    ['人际关系/朋友', '朋友', 1, '用户的朋友圈'],
+                    ['人际关系/家人', '家人', 1, '用户的家人'],
+                    ['人际关系/关于我们', '关于我们', 1, 'AI与用户的关系记忆'],
                     ['地点/上海', '上海', 2, '上海相关地点'],
                     ['地点/旅行', '旅行', 2, '旅行记忆'],
                     ['创作/写作', '写作', 3, '小说与写作'],
