@@ -441,8 +441,9 @@ async function searchHybrid(userMessage, limit = 6) {
         : isEntity && vecRank >= 0 ? 'ENTITY+VEC'
         : isEntity ? 'ENTITY'
         : ftsRank >= 0 ? 'FTS5' : 'VEC';
-      // FTS5单字索引太松散，无向量交叉验证 → 降权（fact意图不需要交叉验证）
-      if (source === 'FTS5' && intent !== 'fact') {
+      // FTS5单字索引太松散，无向量交叉验证 → 降权
+      // CJK单字匹配噪音大（"猫"命中所有提到猫的碎片），fact意图同样需要控制
+      if (source === 'FTS5') {
         rrf *= FTS5_ONLY_PENALTY;
         source = 'FTS5*';
       }
@@ -520,7 +521,7 @@ async function searchHybrid(userMessage, limit = 6) {
           .map(r => r.id)
       );
       const before = finalResults.length;
-      filtered = finalResults.filter(r => r.source_table !== 'fragment' || !excludedFragIds.has(r.id));
+      const filtered = finalResults.filter(r => r.source_table !== 'fragment' || !excludedFragIds.has(r.id));
       if (filtered.length < before) {
         console.log(`Hybrid: 排除源过滤 ${before - filtered.length} 条 (${EXCLUDED_SOURCES.join(',')})`);
       }
@@ -548,7 +549,10 @@ async function searchHybridWithCategory(userMessage, categoryId, limit = 8) {
   `).all(categoryId);
 
   const catIdSet = new Set(catFragments.map(r => r.fragment_id));
-  return results.filter(r => r.source_table === 'fragment' && catIdSet.has(r.id)).slice(0, limit);
+  // 过滤：fragment需要在类别内，memory(episode)无法按fragment_id匹配，全部放行
+  return results.filter(r =>
+    r.source_table === 'memory' || (r.source_table === 'fragment' && catIdSet.has(r.id))
+  ).slice(0, limit);
 }
 
 // 计算引用权限（确定性规则，不依赖 LLM）
