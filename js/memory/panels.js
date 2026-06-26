@@ -311,7 +311,7 @@ const MODEL_LAYERS = [
 
 export function renderModelPanel() {
     const counts = {};
-    universe.claraModel.forEach(e => counts[e.type] = (counts[e.type] || 0) + 1);
+    universe.cognitiveModel.forEach(e => counts[e.type] = (counts[e.type] || 0) + 1);
     const patCount = (universe.patterns || []).filter(p => p.status === 'active').length;
     counts['pattern'] = patCount;
     $('mp-body').innerHTML = MODEL_LAYERS.map(l => `
@@ -337,7 +337,7 @@ function showModelDetail(filterType) {
 
     // ── Current State ──
     if (!filterType || filterType === 'current_state') {
-        const states = universe.claraModel.filter(e => e.type === 'current_state');
+        const states = universe.cognitiveModel.filter(e => e.type === 'current_state');
         html += `<div class="md-section"><div class="md-section-title">● 当前状态 (${states.length})</div>`;
         if (!states.length) html += '<div class="md-empty">暂无</div>';
         else states.forEach(e => {

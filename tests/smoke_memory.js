@@ -88,12 +88,12 @@ async function main() {
     // ── 4. Clara Model ──
     console.log('\n── 4. Clara Model ──');
     test('processModelDecay 不抛异常', () => {
-        const { processModelDecay } = require('../services/claraModel');
+        const { processModelDecay } = require('../services/cognitiveModel');
         const r = processModelDecay();
         if (!r || typeof r.resolved !== 'number') throw new Error('返回异常');
     });
     test('resolveExpiredStates 不抛异常', () => {
-        const { resolveExpiredStates } = require('../services/claraModel');
+        const { resolveExpiredStates } = require('../services/cognitiveModel');
         const r = resolveExpiredStates();
         if (typeof r !== 'number') throw new Error('返回异常');
     });

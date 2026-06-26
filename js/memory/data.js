@@ -69,7 +69,7 @@ export function hslToRgbStr(hue, sat, lit) {
 export const universe = {
     constellations: [],   // 普通星座（不含 Clara/Draco）
     core: [],             // 双星核心档案
-    claraModel: [],
+    cognitiveModel: [],
     archlog: [],
     mergeProposals: [],   // 待 Clara 裁决的合并提案
     bridges: [],          // 星座桥 [{a, b, weight}]（conId 对）
@@ -178,7 +178,7 @@ export async function loadUniverse() {
 
     universe.constellations = cons;
     universe.core = data.core || [];
-    universe.claraModel = data.claraModel || [];
+    universe.cognitiveModel = data.cognitiveModel || [];
     universe.patterns = data.patterns || [];
     universe.archlog = data.archlog || [];
     universe.mergeProposals = data.mergeProposals || [];

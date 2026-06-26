@@ -6,7 +6,7 @@ const fs = require('fs');
 const { searchMemoriesByHardTrigger } = require('./memory');
 const { getUserSetting } = require('../utils/settings');
 const { fillPrompt, USER, AI } = require('./nameResolver');
-const { getTriggeredIntuition } = require('./claraIntuition');
+const { getTriggeredIntuition } = require('./intuition');
 
 // =================================================================
 // 健康数据简报生成器
@@ -182,7 +182,7 @@ ${libText}
                 try {
                     const entityCtx = getEntityContext(libFragments);
                     if (entityCtx) {
-                        dynamicParts.push(`<entity_context>\n以下是记忆中涉及人物的最新近况（来自Draco的记忆档案）：\n${entityCtx}\n</entity_context>`);
+                        dynamicParts.push(`<entity_context>\n以下是记忆中涉及人物的最新近况（来自{ai}的记忆档案）：\n${entityCtx}\n</entity_context>`);
                         estimatedTokens += Math.ceil(entityCtx.length / 4);
                     }
                 } catch (_) {}

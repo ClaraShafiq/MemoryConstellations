@@ -77,7 +77,7 @@ async function createSkill(params) {
 }
 
 async function _judgePattern(domain, sourcePattern) {
-    const domainLabel = domain === 'system' ? '记忆系统分类质量' : 'Clara的行为/情绪模式';
+    const domainLabel = domain === 'system' ? '记忆系统分类质量' : '{user}的行为/情绪模式';
 
     const prompt = `你是认知模式分析器。Archivist 观察到一个潜在模式，需要你判断这是真正的规律还是随机巧合。
 
@@ -506,7 +506,7 @@ async function scanForPatterns() {
 
         // Pattern: this entity keeps appearing but relationship stays uncertain
         // → create a skill to monitor for relationship signals
-        const sourcePattern = `${ent.name} 频繁出现在Clara的生活中（${ent.frag_count} 条碎片），但关系仍不确定（当前：${ent.relationship_to_clara || '未知'}，confidence: ${ent.relationship_confidence || 'low'}）`;
+        const sourcePattern = `${ent.name} 频繁出现在{user}的生活中（${ent.frag_count} 条碎片），但关系仍不确定（当前：${ent.relationship_to_clara || '未知'}，confidence: ${ent.relationship_confidence || 'low'}）`;
 
         await createSkill({
             domain: 'clara',
@@ -518,7 +518,7 @@ async function scanForPatterns() {
             },
             analysisConfig: {
                 type: 'llm',
-                prompt: `分析以下与 ${ent.name} 相关的最新碎片，判断是否有足够信息确定TA与Clara的关系。如果有新线索，描述关系的可能方向。如果仍不确定，说明为什么信息不足。`,
+                prompt: `分析以下与 ${ent.name} 相关的最新碎片，判断是否有足够信息确定TA与{user}的关系。如果有新线索，描述关系的可能方向。如果仍不确定，说明为什么信息不足。`,
             },
         });
     }
