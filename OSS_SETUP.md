@@ -127,6 +127,12 @@ pm2 start ecosystem.config.js
 
 打开 `http://localhost:3000/memory.html` 看星图。
 
+### 2.7 数据库和集成
+
+Memory Constellations 使用独立的 SQLite 数据库（`sanctuary.db`），不依赖你的主应用数据库。它是一个旁路管线——你的 AI 伴侣继续用你自己选的后端（PostgreSQL、MySQL、MongoDB、文件存储都可以），记忆星图自己维护自己的表。
+
+每条记忆碎片存储 `source_msg_ids`（原始消息 ID 列表），你的伴侣可以通过 `recall_memory` 工具追溯到消息来源。集成时只需要在聊天管道里加一步：每次 AI 回复后，把本轮对话写入 `messages` 表（`sender`/`content`/`timestamp`/`chat_id`），Scribe 会自动在沉默期后扫描提取。
+
 ---
 
 ## 3. 观察系统是否正常运行
