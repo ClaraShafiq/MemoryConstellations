@@ -151,7 +151,7 @@ sqlite3 sanctuary.db "SELECT COUNT(*) FROM memory_fragments WHERE status='active
 
 ### 3.2 碎片 → 星座
 
-等 Clara（你）空闲 1 小时后，Archivist Deep Cycle 会运行。或者手动触发：
+等你空闲 1 小时后，Archivist Deep Cycle 会自动触发。或者手动运行：
 ```bash
 node -e "
 const{initDatabase}=require('./database');initDatabase();
