@@ -1287,9 +1287,17 @@ function initDatabase() {
             source_fragment_ids TEXT DEFAULT '[]',
             tags TEXT DEFAULT '[]',
             status TEXT DEFAULT 'active' CHECK(status IN ('active','merged','superseded')),
+            strategy TEXT,
+            last_mismatch_at DATETIME,
+            mismatch_count INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );`);
+
+    runMigration(84, 'v5.3: clara_patterns — add strategy + mismatch tracking',
+        `ALTER TABLE clara_patterns ADD COLUMN strategy TEXT;
+         ALTER TABLE clara_patterns ADD COLUMN last_mismatch_at DATETIME;
+         ALTER TABLE clara_patterns ADD COLUMN mismatch_count INTEGER DEFAULT 0;`);
 
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {
