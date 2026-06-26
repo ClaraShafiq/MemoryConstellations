@@ -429,7 +429,7 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
         });
 
         // ── Clara Model 认知模型 ──
-        const claraModel = db.prepare(`
+        const cognitiveModel = db.prepare(`
             SELECT id, type, content, confidence, evidence_count,
                    decay_type, status, last_evidence_at, created_at, decay_params, tags, priority,
                    created_by, expires_at
@@ -557,7 +557,7 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
         res.json({
             constellations,
             core,
-            claraModel,
+            cognitiveModel,
             patterns,
             archlog,
             mergeProposals,

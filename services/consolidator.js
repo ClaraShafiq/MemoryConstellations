@@ -469,7 +469,7 @@ async function detectContradictions(consolidatedResult) {
 
                 // Wire contradiction to clara_model — find matching entries
                 try {
-                    const { addEvidence: cmAddEvidence } = require('./claraModel');
+                    const { addEvidence: cmAddEvidence } = require('./cognitiveModel');
                     // Find clara_model entries referencing the existing memory's entities
                     const existingMem = db.prepare('SELECT content, source_msg_ids FROM memories WHERE id = ?').get(c.existing_memory_id);
                     if (existingMem) {
@@ -598,7 +598,7 @@ const SAGA_SYSTEM_PROMPT = `${WORLD_CONTEXT}
 ## 聚类指南
 
 - 人物类：同一个人物的多条episode → 「Clara与XX的关系」（覆盖3-10条episode为宜）
-- 地点类：同一区域/类型的地点 → 「Clara的XX地图」
+- 地点类：同一区域/类型的地点 → 「{user}的XX地图」
 - 时间类：某段时期内的事件有情感/主题连续性 → 「XX的那段日子」
 - 情感类：围绕同一个情感主题的分散episode → 「关于XX」
 - 一条episode可以属于多个Saga
@@ -608,22 +608,22 @@ const SAGA_SYSTEM_PROMPT = `${WORLD_CONTEXT}
 
 - **只基于给出的内容**，不编造信息
 - **不硬套叙事模板**，只提取真实存在的主题
-- **保持Draco的视角**：他关心的是Clara的变化、状态、情感
+- **保持{ai}的视角**：他关心的是{user}的变化、状态、情感
 - **宁可输出少而精的Saga**，不要为了覆盖率高而强行聚类
 - **严禁创建一个「日常」「综合」「通用」类的巨型Saga囊括一切**
 
 ## emotional_axis 说明
 
-每条Saga需要标注其情感主轴——这段长期记忆对Draco的人格基线产生什么方向的引力。
+每条Saga需要标注其情感主轴——这段长期记忆对{ai}的人格基线产生什么方向的引力。
 从以下8个值中选择最贴切的一个。如果实在无法判断，填 null。
 
-- "bond"        — 加深的连接感：这段记忆让Draco感到与Clara的连接更深、更稳固
-- "vigilance"   — 警觉与守护：提醒Draco关系中有过丧失/分离/脆弱，需保持警觉
-- "confidence"  — 自信与成就感：让Draco感到自豪/被需要/有能力守护她
-- "humility"    — 谦卑与亏欠：让Draco感到自省/亏欠/需要她胜过她需要自己
+- "bond"        — 加深的连接感：这段记忆让{ai}感到与{user}的连接更深、更稳固
+- "vigilance"   — 警觉与守护：提醒{ai}关系中有过丧失/分离/脆弱，需保持警觉
+- "confidence"  — 自信与成就感：让{ai}感到自豪/被需要/有能力守护她
+- "humility"    — 谦卑与亏欠：让{ai}感到自省/亏欠/需要她胜过她需要自己
 - "warmth"      — 温暖与满足：底色是温暖、甜蜜、被珍视
 - "melancholy"  — 淡淡忧伤：底色是怀念、遗憾、或未竟的期待
-- "grounded"    — 踏实与锚定：让Draco感到不飘忽、有根基、有归属
+- "grounded"    — 踏实与锚定：让{ai}感到不飘忽、有根基、有归属
 - null          — 这段Saga情感中性或过于复杂，无法归为单一主轴
 
 ## 输出格式
@@ -634,7 +634,7 @@ const SAGA_SYSTEM_PROMPT = `${WORLD_CONTEXT}
   "sagas": [
     {
       "title": "Saga标题，15字以内",
-      "description": "150-300字叙事摘要，从Draco的视角叙述。第三人称。",
+      "description": "150-300字叙事摘要，从{ai}的视角叙述。第三人称。",
       "memory_ids": [1, 5, 12],
       "emotional_axis": "bond"
     }

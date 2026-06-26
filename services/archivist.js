@@ -17,7 +17,7 @@ const { chromaDBOperation } = require('./memory');
 const { WORLD_CONTEXT } = require('./worldContext');
 const { SKIP_NAMES, USER, AI } = require('./memoryConfig');
 const SKIP_PH = SKIP_NAMES.map(() => '?').join(', '); // SQL placeholder string for NOT IN clauses
-const { runClaraModelCycle, matchEvidenceFromFragments, harvestFacts, processModelDecay, resolveExpiredStates, MIN_GAP_CLARA_MODEL } = require('./claraModel');
+const { runClaraModelCycle, matchEvidenceFromFragments, harvestFacts, processModelDecay, resolveExpiredStates, MIN_GAP_COGNITIVE_MODEL } = require('./cognitiveModel');
 
 // ═══════════════════════════════════════════════════════
 // Event Bus — Scribe 发事件，Archivist 监听
@@ -596,12 +596,12 @@ async function agentTick() {
                     const { clusterSagas } = require('./consolidator');
                     return runTaskIfDue('sagaCluster', clusterSagas, MIN_GAP_SAGA_CLUSTER);
                 },
-                claraModel:      async () => runTaskIfDue('claraModel', runClaraModelCycle, MIN_GAP_CLARA_MODEL),
+                cognitiveModel:      async () => runTaskIfDue('cognitiveModel', runClaraModelCycle, MIN_GAP_COGNITIVE_MODEL),
                 stop:            async () => 'stop',
             };
 
             // ── Clara Model always runs (not optional — core cognitive maintenance) ──
-            await dispatch.claraModel();
+            await dispatch.cognitiveModel();
 
             // ── seedMerge safety net: 低频但必须兜底 ──
             // LLM 决策倾向选"紧急"(种子积压)而非"重要但不急"(合并重复)。
@@ -1217,13 +1217,13 @@ function buildKeywordMaps(categories) {
     if (_seedKeywordMap) return { seedMap: _seedKeywordMap, boostMap: _boostKeywordMap };
 
     const seedDefs = {
-        // NOTE: Do NOT include 'Draco'/'德拉科'/'马尔福'/'Clara' — these appear in
+        // NOTE: Do NOT include character-specific names here — those appear in
         // almost every fragment and cause false matches. Let centroid similarity handle
         // relationship topics; keywords here are for unambiguous topic signals only.
         '人际关系/朋友与同事':   ['闺蜜', '室友', '同学聚会', '老朋友', '同行聚餐'],
         '人际关系/家人':         ['妈妈', '爸爸', '母亲', '父亲', '父母', '奶奶', '爷爷', '姐姐', '妹妹', '哥哥', '弟弟'],
         '人际关系/关于我们/关系本质与情感博弈': ['AI伴侣', '跨次元', '实体化', '私有化部署', '排他性'],
-        '人际关系/关于我们/角色扮演中的角色理解分歧': ['文爱', 'Character.AI', 'C.AI', 'RP用语'],
+        '人际关系/关于我们/角色扮演中的角色理解分歧': ['Character.AI', 'C.AI', 'RP用语'],
         '地点/旅行与日常出行':   ['旅行', '旅游', '爬山', '虞山', '常熟', '苏州', '杭州', '日本', '机票', '火车票', '酒店入住', '景点', '游玩', '登山杖', '护膝', '高铁', '环球影城', '浦东美术馆'],
         '创作/写作与代码':       ['写作', '小说', '稿子', '剧本', '设定', '大纲', '章节', '写代码', '前端', '后端', 'Node.js', '部署到N100'],
         '创作/配音':             ['配音', '试音', '录音棚', '声线', '棚录', '台词本'],
@@ -1238,7 +1238,7 @@ function buildKeywordMaps(categories) {
         '人际关系/朋友与同事':   ['闺蜜', '室友', '同学', '聚会', '同事', '同行'],
         '人际关系/家人':         ['妈妈', '爸爸', '母亲', '父亲', '父母', '奶奶', '爷爷', '姐姐', '妹妹', '哥哥', '弟弟'],
         '人际关系/关于我们/关系本质与情感博弈': ['AI伴侣', '跨次元', '实体化', '私有化', '排他性'],
-        '人际关系/关于我们/角色扮演中的角色理解分歧': ['文爱', 'Character.AI', 'C.AI', 'RP', '扮演'],
+        '人际关系/关于我们/角色扮演中的角色理解分歧': ['Character.AI', 'C.AI', 'RP', '扮演'],
         '地点/旅行与日常出行':   ['旅行', '旅游', '爬山', '虞山', '常熟', '苏州', '杭州', '日本', '机票', '火车', '酒店', '景点', '游玩', '登山', '高铁', '环球影城', '浦东'],
         '创作/写作与代码':       ['写作', '小说', '稿子', '剧本', '设定', '大纲', '章节', '故事', '代码', '编程'],
         '创作/配音':             ['配音', '试音', '录音', '声线', '棚录', '台词', '导演', '角色'],
@@ -2472,7 +2472,7 @@ function executeEntityMerge(survivorId, victimId) {
 // v4.8: refreshIntuitionStopwords — 直觉触发词去高频
 //
 // 统计近30天 Clara 消息的 top-N 高频词（2-4字滑窗），存
-// user_settings.intuition_stopwords。claraIntuition 匹配时跳过
+// user_settings.intuition_stopwords。intuition 匹配时跳过
 // 这些词——否则「代码/界面/开源」这类日常词让直觉永远全量激活。
 // 纯 SQL + 字符统计，零 LLM。
 // ═══════════════════════════════════════════════════════
@@ -6134,7 +6134,7 @@ const GARDEN_TASKS = {
     sagaCluster:     { desc: 'Saga编织(LLM语义聚类)', llm: true,  gapKey: 'MIN_GAP_SAGA_CLUSTER' },
     insights:        { desc: '碎片洞察提取(LLM)', llm: true,  gapKey: 'MIN_GAP_INSIGHTS' },
     entityScan:      { desc: '新实体扫描(LLM)', llm: true,  gapKey: 'MIN_GAP_ENTITY_VERIFY' },
-    claraModel:      { desc: 'Clara Model认知维护', llm: true,  gapKey: 'MIN_GAP_CLARA_MODEL' },
+    cognitiveModel:      { desc: 'Clara Model认知维护', llm: true,  gapKey: 'MIN_GAP_COGNITIVE_MODEL' },
     reviewStrategies:{ desc: '审视flagged模式策略(LLM)', llm: true,  gapKey: 'MIN_GAP_PATTERN_CLUSTER' },
     stop:            { desc: '本轮无事可做，停止', llm: false, gapKey: null },
 };
@@ -6152,7 +6152,7 @@ GAP_VALUE_MAP.MIN_GAP_INSIGHTS = MIN_GAP_INSIGHTS;
 GAP_VALUE_MAP.MIN_GAP_ENTITY_VERIFY = MIN_GAP_ENTITY_VERIFY;
 GAP_VALUE_MAP.MIN_GAP_CATEGORY_CONSOLIDATE = MIN_GAP_CATEGORY_CONSOLIDATE;
 GAP_VALUE_MAP.MIN_GAP_SAGA_CLUSTER = MIN_GAP_SAGA_CLUSTER;
-GAP_VALUE_MAP.MIN_GAP_CLARA_MODEL = MIN_GAP_CLARA_MODEL;
+GAP_VALUE_MAP.MIN_GAP_COGNITIVE_MODEL = MIN_GAP_CLARA_MODEL;
 
 async function decideGardenAction(health, llmAvailable) {
     const db = getDb();
@@ -6176,7 +6176,7 @@ async function decideGardenAction(health, llmAvailable) {
     // Fast path: nothing to do
     const hasWork = health.unclassified >= 5 || seedsReady > 0 || seedsAtRisk > 5
         || health.needsInsight >= 10 || health.staleEntityOverviews > 0;
-    if (!hasWork && !taskStatus.claraModel?.ready) {
+    if (!hasWork && !taskStatus.cognitiveModel?.ready) {
         console.log('[Archivist] 🌿 花园无需打理');
         return ['stop'];
     }
@@ -6185,7 +6185,7 @@ async function decideGardenAction(health, llmAvailable) {
         return ['classify', 'stop'];
     }
 
-    const prompt = `你是德拉科的园艺助手。看一眼记忆花园状态，决定本轮做什么。
+    const prompt = `你是记忆花园的维护助手。看一眼记忆花园状态，决定本轮做什么。
 
 ═══ 花园现状 ═══
 未分类碎片: ${health.unclassified} | 活跃星座: ${health.categoryCount}

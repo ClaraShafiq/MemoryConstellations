@@ -610,7 +610,7 @@ function formatHybridContext(fragments) {
       try { f.content = encryption.decrypt(f.content); } catch (_) {}
     }
 
-    // 权限标签前置，让 Draco 第一时间看到他能怎么用这条记忆
+    // 权限标签前置，让 AI 第一时间看到他能怎么用这条记忆
     return `※ ${permission} · #${f.id} · ${daysStr}\n${f.content}`.trim();
   });
 

@@ -1,6 +1,6 @@
 // Clara Intuition — 上下文触发的认知直觉引擎
 // ================================================================
-// 替代 claraModel.getModelContext() 的「全量 dump」模式。
+// 替代 cognitiveModel.getModelContext() 的「全量 dump」模式。
 // 只在 Clara 的当前对话触发了某个行为模式时，才注入对应的直觉条目。
 // 自包含模块，可插拔替换——开源后每个 user 可挂自己的直觉数据源。
 //

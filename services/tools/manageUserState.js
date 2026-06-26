@@ -1,5 +1,5 @@
 // services/tools/manageUserState.js
-// 德拉科主动维护对 User 的认知 — v5.2
+// {ai} 主动维护对 User 的认知 — v5.2
 //
 // 四个操作：
 //   set             — 新建 current_state（content + expires_at 必填）
@@ -14,7 +14,7 @@ const { getDb } = require('../../database');
 
 const SETTINGS_KEY = 'tool-memory-search-enabled';
 
-// ── bigram tokenizer (same as claraIntuition.js + anchorEntriesToFragments) ──
+// ── bigram tokenizer (same as intuition.js + anchorEntriesToFragments) ──
 function tokenize(text) {
     const segments = (text || '')
         .replace(/[，。、！？\n,.\s]+/g, '\n')
@@ -159,7 +159,7 @@ const manageUserState = {
                     console.log(`[manageUserState] auto-resolved #${supersededId} (superseded by new set)`);
                 }
 
-                const { createEntry } = require('../claraModel');
+                const { createEntry } = require('../cognitiveModel');
                 const id = createEntry('current_state', content, {
                     confidence: 0.85,
                     source_quality: 'direct_statement',
@@ -215,7 +215,7 @@ const manageUserState = {
                     updates.expires_at = expiresDate > maxExpiry ? maxExpiry.toISOString() : args.expires_at;
                 }
 
-                const { updateEntry } = require('../claraModel');
+                const { updateEntry } = require('../cognitiveModel');
                 updateEntry(args.state_id, updates);
 
                 const changed = Object.keys(updates).join(', ');
