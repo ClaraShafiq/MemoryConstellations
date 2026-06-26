@@ -1,0 +1,29 @@
+{
+  "name": "memory-constellations",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "setup": "bash scripts/setup.sh"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "A self-organizing memory system for AI companions",
+  "dependencies": {
+    "axios": "^1.13.5",
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^11.10.0",
+    "chromadb": "^3.0.0",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "express-session": "^1.18.1",
+    "helmet": "^8.1.0",
+    "morgan": "^1.10.1",
+    "node-cron": "^4.2.1",
+    "sharp": "^0.34.5",
+    "tiktoken": "^1.0.21",
+    "undici": "^6.24.1"
+  },
+  "repository": "github.com/ClaraShafiq/MemoryConstellations"
+}
