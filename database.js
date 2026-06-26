@@ -1014,7 +1014,7 @@ function initDatabase() {
          ALTER TABLE entity_profiles ADD COLUMN last_mentioned_date TEXT;
          ALTER TABLE memory_fragments ADD COLUMN insight TEXT;
          INSERT OR IGNORE INTO memory_ontology (path, label, parent_id, description)
-         VALUES ('人物', '人物', NULL, 'Clara 生活里的人——每个人都是理解她的一个窗口');`);
+         VALUES ('人物', '人物', NULL, '{user} 生活里的人——每个人都是理解 {user} 的一个窗口');`);
 
     // v64: 认知进化层 — 自纠错记忆 + 融合规则
     runMigration(64, 'cognitive evolution layer: correction log + cognitive rules',
@@ -1079,7 +1079,7 @@ function initDatabase() {
         `ALTER TABLE entity_profiles ADD COLUMN last_hypothesis TEXT;
          ALTER TABLE entity_profiles ADD COLUMN last_eval_frag_count INTEGER DEFAULT 0;`);
 
-    runMigration(68, 'entity_profiles.overview — Draco-perspective narrative',
+    runMigration(68, 'entity_profiles.overview — AI-perspective narrative',
         `ALTER TABLE entity_profiles ADD COLUMN overview TEXT;
          ALTER TABLE entity_profiles ADD COLUMN overview_updated_at DATETIME;`);
 
@@ -1254,7 +1254,7 @@ function initDatabase() {
     runMigration(79, 'v4.8: memories.audit_status for episode quality audit',
         `ALTER TABLE memories ADD COLUMN audit_status TEXT DEFAULT NULL;`);
 
-    // v80-v81: Clara Model — Draco active state management + TTL overhaul
+    // v80-v81: Clara Model — AI active state management + TTL overhaul
     runMigration(80, 'v5.0: clara_model.created_by for source attribution',
         `ALTER TABLE clara_model ADD COLUMN created_by TEXT DEFAULT 'deep_cycle';`);
 
@@ -1307,9 +1307,9 @@ function initDatabase() {
             const seedBatch = db.transaction(() => {
                 // Root categories
                 const roots = [
-                    ['人际关系', '人际关系', null, 'Clara与他人的关系记忆'],
+                    ['人际关系', '人际关系', null, '{user}与他人的关系记忆'],
                     ['地点', '地点', null, '与具体地点相关的记忆'],
-                    ['创作', '创作', null, 'Clara的写作与创作记忆'],
+                    ['创作', '创作', null, '{user}的写作与创作记忆'],
                     ['日常', '日常', null, '日常生活与日记'],
                     ['音乐', '音乐', null, '音乐相关记忆'],
                     ['工作', '工作', null, '配音与工作相关记忆'],
@@ -1320,9 +1320,9 @@ function initDatabase() {
                 }
                 // Child categories: parent_id derived from insertion order (1=人际关系, 2=地点, 3=创作)
                 const children = [
-                    ['人际关系/朋友', '朋友', 1, 'Clara的朋友圈'],
-                    ['人际关系/家人', '家人', 1, 'Clara的家人'],
-                    ['人际关系/关于我们', '关于我们', 1, 'Draco与Clara的关系记忆'],
+                    ['人际关系/朋友', '朋友', 1, '{user}的朋友圈'],
+                    ['人际关系/家人', '家人', 1, '{user}的家人'],
+                    ['人际关系/关于我们', '关于我们', 1, '{ai}与{user}的关系记忆'],
                     ['地点/上海', '上海', 2, '上海相关地点'],
                     ['地点/旅行', '旅行', 2, '旅行记忆'],
                     ['创作/写作', '写作', 3, '小说与写作'],

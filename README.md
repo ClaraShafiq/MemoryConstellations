@@ -132,7 +132,7 @@ Scribe and Archivist both write to `memory_fragments` and `entity_profiles`. SQL
 
 ### Retrieval design
 
-Librarian uses RRF (Reciprocal Rank Fusion) to merge results from three independent channels: FTS5 keyword, vector similarity, and entity aggregation. Episodes get a 1.5× weight over raw fragments because a consolidated narrative carries more context than a single extracted fact — it tells Draco *what happened* rather than *one thing someone said*. This is a design hypothesis, not a benchmarked result. If you want to tune recall for your use case, the weights live in `services/librarian.js` (`EPISODE_BOOST`, intent weights, vector similarity floor).
+Librarian uses RRF (Reciprocal Rank Fusion) to merge results from three independent channels: FTS5 keyword, vector similarity, and entity aggregation. Episodes get a 1.5× weight over raw fragments because a consolidated narrative carries more context than a single extracted fact — it tells the AI *what happened* rather than *one thing someone said*. This is a design hypothesis, not a benchmarked result. If you want to tune recall for your use case, the weights live in `services/librarian.js` (`EPISODE_BOOST`, intent weights, vector similarity floor).
 
 ### Saga bias
 

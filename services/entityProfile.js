@@ -21,7 +21,7 @@ const ENTITY_EXTRACT_PROMPT = `${WORLD_CONTEXT}
 
 规则：
 - 只提取明确的状态变化，不编造
-- "Clara"和"Draco"的状态也提取（他们是主角）
+- "{user}"和"{ai}"的状态也提取
 - 同一实体多条状态变化取最新一条
 - 没有状态变化的记忆忽略`;
 
