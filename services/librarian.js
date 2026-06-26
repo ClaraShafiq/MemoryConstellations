@@ -78,16 +78,25 @@ function daysAgo(dateLabel) {
 }
 
 // ── 实体聚合辅助：从用户消息中识别已知实体 → 按 entity_id 全量捞碎片 ──
+// 实体名缓存：30秒TTL，避免每次检索都全表扫描 entity_profiles
+let _entityCache = null;
+let _entityCacheAt = 0;
+const ENTITY_CACHE_TTL = 30 * 1000;
+
 function lookupEntityIds(userMessage) {
-    const db = getDb();
-    const entities = db.prepare(`
-        SELECT id, name, aliases FROM entity_profiles
-        WHERE name IS NOT NULL AND status IN ('active','seed')
-    `).all();
+    const now = Date.now();
+    if (!_entityCache || now - _entityCacheAt > ENTITY_CACHE_TTL) {
+        const db = getDb();
+        _entityCache = db.prepare(`
+            SELECT id, name, aliases FROM entity_profiles
+            WHERE name IS NOT NULL AND status IN ('active','seed')
+        `).all();
+        _entityCacheAt = now;
+    }
 
     const ids = [];
     const msgLower = userMessage.toLowerCase();
-    for (const e of entities) {
+    for (const e of _entityCache) {
         // 标准名匹配
         if (msgLower.includes(e.name.toLowerCase())) {
             ids.push(e.id);
@@ -550,6 +559,7 @@ async function searchHybridWithCategory(userMessage, categoryId, limit = 8) {
 
   const catIdSet = new Set(catFragments.map(r => r.fragment_id));
   // 过滤：fragment需要在类别内，memory(episode)无法按fragment_id匹配，全部放行
+  // 注意：放行的episode未经过分类过滤。如果memories表以后加了entity_id列，这里可以收紧。
   return results.filter(r =>
     r.source_table === 'memory' || (r.source_table === 'fragment' && catIdSet.has(r.id))
   ).slice(0, limit);
