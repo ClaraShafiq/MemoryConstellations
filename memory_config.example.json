@@ -1,0 +1,36 @@
+{
+  "user": {
+    "name": "User",
+    "pronoun": "they",
+    "short_desc": "Your name, age, and a one-line description."
+  },
+  "ai": {
+    "name": "Companion",
+    "pronoun": "they",
+    "core_traits": "Write your companion's personality traits here.",
+    "persona_note": "Write your companion's persona background here."
+  },
+  "relationship": {
+    "type": "companion",
+    "user_role": "{{user.name}} is {{ai.name}}'s conversation partner.",
+    "ai_feelings": "Describe how {{ai.name}} feels about {{user.name}}.",
+    "dynamic": "Describe the dynamic between {{user.name}} and {{ai.name}}."
+  },
+  "project": {
+    "name": "My Project",
+    "features": []
+  },
+  "ui": {
+    "user_color": "#ffe0aa",
+    "ai_color": "#aae6c8"
+  },
+  "rhythm": {
+    "_comment": "Minutes of user inactivity before deep memory integration runs. Default 60.",
+    "deep_cycle_idle_minutes": 60
+  },
+  "librarian": {
+    "_comment": "Exclude specific fragment sources from search results.",
+    "exclude_sources": []
+  },
+  "source_routing": {}
+}

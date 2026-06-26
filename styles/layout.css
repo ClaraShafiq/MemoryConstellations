@@ -1,0 +1,139 @@
+/* ========================================
+   布局控制 — L1/L2/L3 三栏flexbox布局
+   ======================================== */
+
+/* ═══════════ Level 1: 服务器图标栏 ═══════════ */
+.server-sidebar {
+  width: 56px;
+  height: 100%;
+  flex-shrink: 0;
+  background: linear-gradient(180deg, var(--gwh), var(--gw));
+  backdrop-filter: blur(40px) saturate(1.6);
+  -webkit-backdrop-filter: blur(40px) saturate(1.6);
+  border-right: 1px solid var(--gb);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 36px 0 28px;
+  gap: 10px;
+  z-index: 1000;
+  box-shadow: 4px 0 24px rgba(0,0,0,0.08);
+}
+
+/* ═══════════ Level 2: 频道列表侧边栏 ═══════════ */
+.channels-sidebar {
+  width: 224px;
+  height: 100%;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: linear-gradient(180deg, var(--gwh) 0%, var(--gw) 100%);
+  backdrop-filter: blur(36px) saturate(1.5);
+  -webkit-backdrop-filter: blur(36px) saturate(1.5);
+  border-right: 1px solid var(--gb);
+  z-index: 999;
+}
+
+/* ═══════════ Level 3: 主聊天区域 ═══════════ */
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+  z-index: 5;
+  background: transparent;
+}
+
+/* ═══════════ 桌面模式 (≥1024px): L1+L2固定左侧，L3右侧flex ═══════════ */
+@media (min-width: 1024px) {
+  body {
+    flex-direction: row;
+  }
+  .server-sidebar {
+    position: relative;
+    left: auto;
+    top: auto;
+    bottom: auto;
+  }
+  .channels-sidebar {
+    position: relative;
+    left: auto;
+    top: auto;
+    bottom: auto;
+  }
+  .main-content {
+    position: relative;
+    left: auto;
+    right: auto;
+    top: auto;
+    bottom: auto;
+  }
+  .back-btn {
+    visibility: hidden;
+    pointer-events: none;
+  }
+}
+
+/* ═══════════ 窄屏模式 (<1024px): L1+L2滑动覆盖 ═══════════ */
+@media (max-width: 1023px) {
+  body {
+    flex-direction: row;
+    position: relative;
+  }
+
+  /* L1+L2合并为overlay容器 */
+  .server-sidebar {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 1000;
+    transform: translateX(-100%);
+    transition: transform .32s cubic-bezier(.32,1.1,.6,1);
+  }
+
+  .channels-sidebar {
+    position: absolute;
+    left: 56px;
+    top: 0;
+    bottom: 0;
+    z-index: 999;
+    transform: translateX(calc(-100% - 56px));
+    transition: transform .32s cubic-bezier(.32,1.1,.6,1) .04s, width .32s ease;
+  }
+
+  .main-content {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+  }
+
+  /* 窄屏下chat-container完全透明，消息气泡与输入栏之间会露出body背景。
+     输入栏负margin上移、以其玻璃背景充当遮罩，覆盖最后一条消息的margin-bottom区域。 */
+  .chat-container {
+    padding-bottom: 0;
+  }
+  .chat-container.streaming {
+    padding-bottom: 0;
+  }
+  .input-container {
+    border-radius: 0;
+    margin-top: -2px;
+  }
+
+  /* 显示侧边栏 */
+  body.show-sidebar .server-sidebar {
+    transform: translateX(0);
+  }
+  body.show-sidebar .channels-sidebar {
+    transform: translateX(0);
+    width: calc(100% - 56px);
+  }
+  body.show-sidebar .main-content {
+    /* stay, but sidebar-ov covers it via z-index */
+  }
+}
