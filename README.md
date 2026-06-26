@@ -140,7 +140,9 @@ Sagas feed into the `jiwen` emotional state engine as a per-minute bias on each 
 
 ### Optional: Chat summary module
 
-`services/summary.js` — a short-term memory module that compresses recent conversation into timestamped log entries. Runs when message count crosses a threshold, injects the log into the next turn's context. Independent from the memory pipeline — can be enabled or removed without affecting the star map.
+`services/summary.js` — a short-term memory module separate from the star map. Every ~50 rounds of conversation, it compresses the exchange into a timestamped log (like a ship's log: "14:10 · 开始看一部新电影，说女主角很像她"), then injects the log into the next turn's system prompt. This gives your companion short-term continuity without bloating context with full message history.
+
+To enable: import and call `generateChatSummary(chatId)` in your chat pipeline, typically after every N messages. The module is self-contained — it reads from the `messages` table and writes to `chat_summaries`. Removing it has no effect on the star map or long-term memory.
 
 ### Lifecycle (automatic cleanup)
 
