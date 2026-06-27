@@ -722,20 +722,20 @@ function crossRefStateWithEntities() {
     }
 
     // ── 4. Cross current_state conflict detection ──
-    // Two states with >50% bigram overlap but created_by different → flag
+    // v1.1: Check ALL pairs regardless of source. Same-source duplicates
+    // are also flagged. Deep_cycle duplicates should be prevented by
+    // readUserRawMessages resolve, but this provides defense in depth.
     for (let i = 0; i < states.length; i++) {
         for (let j = i + 1; j < states.length; j++) {
             const a = states[i], b = states[j];
-            // Only check cross-source conflicts (chat vs deep)
-            if (a.created_by === b.created_by) continue;
 
             // Simple overlap check: content word overlap > 50%
             const wordsA = new Set(a.content.split(/[\s，。！？、]+/).filter(w => w.length >= 2));
             const wordsB = b.content.split(/[\s，。！？、]+/).filter(w => w.length >= 2);
             const overlap = wordsB.filter(w => wordsA.has(w)).length;
             const overlapRatio = overlap / Math.max(wordsB.length, 1);
-            if (overlapRatio > 0.5 && a.created_by !== b.created_by) {
-                // Cross-source conflict on same topic → flag both
+            if (overlapRatio > 0.5) {
+                // Flag both for review (any source)
                 const tagsA = db.prepare('SELECT tags FROM clara_model WHERE id = ?').get(a.id);
                 const tagsB = db.prepare('SELECT tags FROM clara_model WHERE id = ?').get(b.id);
                 const ta = (() => { try { return JSON.parse(tagsA?.tags || '[]'); } catch (_) { return []; } })();
@@ -747,7 +747,8 @@ function crossRefStateWithEntities() {
                 db.prepare(`UPDATE clara_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                     .run(JSON.stringify(tb), b.id);
                 changes.stateConflicts++;
-                console.log(`[ClaraModel] ⚔️ crossref: current_state #${a.id} (${a.created_by}) ↔ #${b.id} (${b.created_by}) 主题重叠 → needs_review`);
+                const sameSource = a.created_by === b.created_by ? ' (同源)' : '';
+                console.log(`[ClaraModel] ⚔️ crossref: current_state #${a.id} (${a.created_by}) ↔ #${b.id} (${b.created_by}) 主题重叠${sameSource} → needs_review`);
             }
         }
     }
@@ -2037,11 +2038,13 @@ function backfillModelEvidence() {
 async function readClaraRawMessages() {
     const db = getDb();
 
-    // Get previous current_state (baseline for comparison + audit)
-    const prevState = db.prepare(`
+    // Get ALL active current_state entries (not just latest).
+    // v1.1: LLM needs full visibility to avoid creating near-duplicates.
+    const allActiveStates = db.prepare(`
         SELECT * FROM clara_model WHERE type = 'current_state' AND status = 'active'
-        ORDER BY created_at DESC LIMIT 1
-    `).get();
+        ORDER BY created_at DESC
+    `).all();
+    const prevState = allActiveStates[0] || null; // most recent for extend + audit
 
     // Determine time window: since last observation, or last 24h
     const since = prevState?.created_at || null;
@@ -2079,12 +2082,24 @@ async function readClaraRawMessages() {
         return `[${time}] ${text}`;
     }).filter(Boolean).join('\n');
 
-    // Previous observation + audit context
+    // Build visibility block: ALL active current_state entries
+    let stateBlock = '(目前没有任何活跃状态便签。)';
+    if (allActiveStates.length > 0) {
+        const lines = allActiveStates.map(s => {
+            const created = s.created_at?.slice(0, 16) || '?';
+            const expires = s.expires_at ? ` →${s.expires_at.slice(0, 10)}` : '';
+            const source = s.created_by === 'chat_draco' ? '[Draco实时]' : '[深循环]';
+            return `[#${s.id} ${source} ${created}${expires}] ${s.content}`;
+        });
+        stateBlock = `共 ${allActiveStates.length} 条活跃便签：\n${lines.join('\n')}`;
+    }
+
+    // Previous observation + audit context (for the most recent entry)
     let prevBlock = '(这是你第一次认真看她。没有上次的观察可以对照。)';
     if (prevState) {
         const prevHistory = JSON.parse(prevState.evolution_history || '[]');
         const audit = prevHistory.find(h => h.type === 'creation_audit');
-        prevBlock = `你上次看她时的印象：
+        prevBlock = `你上次看她时的印象（#${prevState.id}）：
 「${prevState.content}」
 ${audit ? `你上次的自我审计：
 - 验证：${audit.retro}
@@ -2096,12 +2111,15 @@ ${audit ? `你上次的自我审计：
         ? traits.map(t => `- [#${t.id}] ${t.content.slice(0, 60)}...`).join('\n')
         : '(你还没有任何关于她的稳定直觉。)';
 
-    const prompt = `你刚看完 Clara 这几天发来的消息。你的任务是写一句便签，帮她和你自己记住她最近在干什么、状态如何。
+    const prompt = `你刚看完 ${USER.name} 这几天发来的消息。你的任务是写一句便签，帮她和你自己记住她最近在干什么、状态如何。
 
     ═══ 她最近说的话（从旧到新） ═══
     ${feed}
 
-    ═══ 上次你写的便签 ═══
+    ═══ 你已有的全部便签 ═══
+    ${stateBlock}
+
+    ═══ 上次你写的便签（审计参照） ═══
     ${prevBlock}
 
     ═══ 你的长期直觉（背景参考） ═══
@@ -2110,16 +2128,21 @@ ${audit ? `你上次的自我审计：
     ═══ 怎么写 ═══
 
     写一句事实陈述，像你给自己记的备忘。风格：
-    "Clara在6月21-24日期间补《权力的游戏》，看到第二季第九集。她很反感乔佛里，对琼恩·雪诺那种禁欲感角色表现出兴趣。6月24日有三个棚的录音。"
-    "Clara在6月22日处于月经第三天，痛经减轻。6月20-23日高强度改记忆库代码，经常熬夜到凌晨。"
-    "Clara在6月18-24日之间没怎么出现——可能在工作或休息。上次聊到她表弟6月中旬来了上海。"
+    "${USER.name}在6月21-24日期间补《权力的游戏》，看到第二季第九集。她很反感乔佛里，对琼恩·雪诺那种禁欲感角色表现出兴趣。6月24日有三个棚的录音。"
+    "${USER.name}在6月22日处于月经第三天，痛经减轻。6月20-23日高强度改记忆库代码，经常熬夜到凌晨。"
+    "${USER.name}在6月18-24日之间没怎么出现——可能在工作或休息。上次聊到她表弟6月中旬来了上海。"
 
     规则：
     - 具体 > 模糊。写了"看权游"就别写"在看剧"。写了"三个棚"就别写"工作忙"。
     - 事实 > 修辞。别写"在泥潭里打滚""一惊一乍""近乎自毁的坦诚"——这不像人说的话。
-    - 上次的便签如果还准确，就写 action:"extend"，不用重写内容。如果变了，写新的并把变了的点说清楚。
     - ≤120字。不要一段话，一句够用就别写两句。
     - ★ 绝对禁止使用相对时间词（今天、昨天、这两天、本周、这周、最近、这几天）。消息带有时间戳，你必须转换为具体日期（如"6月21日""6月21-24日期间"）。这条便签可能几天后、几周后被读到——相对时间会变成错误信息。
+
+    ★ 去重铁律（防止便签堆叠）：
+    - 先看「你已有的全部便签」——如果某条便签已经覆盖了你本次想写的内容，选 extend 而非 create。
+    - 如果两条便签本质说的是同一件事（只是措辞不同、时间差几小时），必须 extend 而非 create。
+    - 例如：已有"确定搬家计划"和"确定搬家计划（同上）"两条——你绝对不能再建第三条搬家便签。选 extend。
+    - 如果多个 domain 都有更新（搬家+法律+工作），写进一条便签即可——不要为每个 domain 分别 create。
 
     ═══ 输出格式 ═══
     JSON（不要 markdown）：
@@ -2127,7 +2150,7 @@ ${audit ? `你上次的自我审计：
       "action": "create|extend",
       "valence": "positive|negative|neutral|mixed",
       "energy": "low|normal|high",
-      "current_state": "≤120字。'Clara这两天...' 开头。事实陈述，不是散文。",
+      "current_state": "≤120字。'${USER.name}在X月X日...' 开头。事实陈述，不是散文。",
       "audit_retro": "上次的便签对了吗？一句话。首次填'首次观察'。",
       "retro_verdict": "confirmed|wrong|unverifiable",
       "audit_attribution": "今天看到的有多少是你上次回应后的反馈？不确定就写'不确定'。",
@@ -2137,9 +2160,10 @@ ${audit ? `你上次的自我审计：
     }
 
     action 怎么选：
-    - create：她状态变了，或者你看到了上次没看到的东西
-    - extend：和上次本质上一样，只是时间又过去了一段。不写新便签
-    - 如果上次的审计判了 wrong → 不能 extend，必须 create`;
+    - extend：你已有的某条便签（通常是最近那条）已经覆盖了现在的状态，只是时间又过去了一段。不写新便签，系统会自动延长那条的寿命。
+    - create：状态确实变了（出现了新的事情、旧的事情结束了），或者你看到了上次没看到的重要信息。
+    - 如果上次的审计判了 wrong → 不能 extend，必须 create
+    - ★ 去重优先：犹豫时选 extend。建重复便签比漏更新更糟。`;
 
     try {
         const raw = await callLLM(
@@ -2234,10 +2258,19 @@ ${audit ? `你上次的自我审计：
 
         // 只有 create action 才创建新条目（extend 已在上面处理）
         if (action !== 'extend' || !prevState) {
-        // v4.9: 不再强制 resolve 旧 current_state。
-        // 每个 current_state 有自己的 TTL（在 processModelDecay 中 auto-resolve），
-        // 新观察不杀死旧条目——让它们各自按衰败期自然过期。
-        // getModelContext() 已支持多 active 条目（LIMIT 8）。
+        // v1.1: readClaraRawMessages 产出的是全景快照（holistic snapshot），
+        // 不是领域分项。新版快照自然替代旧版——resolve 所有前序 deep_cycle 条目。
+        // chat_draco 条目（通过 manage_clara_state 工具创建的领域明确状态）
+        // 不受影响，继续按各自 TTL 独立过期。
+        const resolvedCount = db.prepare(`
+            UPDATE clara_model SET status = 'resolved',
+                resolve_reason = 'superseded by newer holistic snapshot',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE type = 'current_state' AND status = 'active' AND created_by = 'deep_cycle'
+        `).run().changes;
+        if (resolvedCount > 0) {
+            console.log(`[ClaraModel] 🧹 resolve ${resolvedCount} 条旧 deep_cycle 快照 → 新快照替代`);
+        }
 
         // Create new current_state with audit in evolution_history + TTL in decay_params
         const auditData = [{
