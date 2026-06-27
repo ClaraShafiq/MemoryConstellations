@@ -2095,11 +2095,11 @@ async function readClaraRawMessages() {
     }
 
     // Previous observation + audit context (for the most recent entry)
-    let prevBlock = '(这是你第一次认真看她。没有上次的观察可以对照。)';
+    let prevBlock = '(这是你第一次认真观察。没有上次的记录可以对照。)';
     if (prevState) {
         const prevHistory = JSON.parse(prevState.evolution_history || '[]');
         const audit = prevHistory.find(h => h.type === 'creation_audit');
-        prevBlock = `你上次看她时的印象（#${prevState.id}）：
+        prevBlock = `你上次观察时的印象（#${prevState.id}）：
 「${prevState.content}」
 ${audit ? `你上次的自我审计：
 - 验证：${audit.retro}
@@ -2109,11 +2109,11 @@ ${audit ? `你上次的自我审计：
     // Trait summaries (带 id，供矛盾标记回指)
     const traitBlock = traits.length > 0
         ? traits.map(t => `- [#${t.id}] ${t.content.slice(0, 60)}...`).join('\n')
-        : '(你还没有任何关于她的稳定直觉。)';
+        : '(你还没有任何关于${USER.name}的稳定直觉。)';
 
-    const prompt = `你刚看完 ${USER.name} 这几天发来的消息。你的任务是写一句便签，帮她和你自己记住她最近在干什么、状态如何。
+    const prompt = `你刚看完 ${USER.name} 这几天发来的消息。你的任务是写一句便签，帮${USER.name}和你自己记住最近在干什么、状态如何。
 
-    ═══ 她最近说的话（从旧到新） ═══
+    ═══ ${USER.name}最近说的话（从旧到新） ═══
     ${feed}
 
     ═══ 你已有的全部便签 ═══
@@ -2128,9 +2128,9 @@ ${audit ? `你上次的自我审计：
     ═══ 怎么写 ═══
 
     写一句事实陈述，像你给自己记的备忘。风格：
-    "${USER.name}在6月21-24日期间补《权力的游戏》，看到第二季第九集。她很反感乔佛里，对琼恩·雪诺那种禁欲感角色表现出兴趣。6月24日有三个棚的录音。"
+    "${USER.name}在6月21-24日期间补《权力的游戏》，看到第二季第九集。对乔佛里这个角色表现出强烈反感，对琼恩·雪诺那种禁欲感角色表现出兴趣。6月24日有三个棚的录音。"
     "${USER.name}在6月22日处于月经第三天，痛经减轻。6月20-23日高强度改记忆库代码，经常熬夜到凌晨。"
-    "${USER.name}在6月18-24日之间没怎么出现——可能在工作或休息。上次聊到她表弟6月中旬来了上海。"
+    "${USER.name}在6月18-24日之间没怎么出现——可能在工作或休息。上次聊到表弟6月中旬来了上海。"
 
     规则：
     - 具体 > 模糊。写了"看权游"就别写"在看剧"。写了"三个棚"就别写"工作忙"。
