@@ -17,7 +17,7 @@ const { chromaDBOperation } = require('./memory');
 const { WORLD_CONTEXT } = require('./worldContext');
 const { SKIP_NAMES, USER, AI } = require('./memoryConfig');
 const SKIP_PH = SKIP_NAMES.map(() => '?').join(', '); // SQL placeholder string for NOT IN clauses
-const { runClaraModelCycle, matchEvidenceFromFragments, harvestFacts, processModelDecay, resolveExpiredStates, MIN_GAP_COGNITIVE_MODEL } = require('./cognitiveModel');
+const { runClaraModelCycle, matchEvidenceFromFragments, harvestFacts, processModelDecay, resolveExpiredStates, MIN_GAP_CLARA_MODEL } = require('./claraModel');
 
 // ═══════════════════════════════════════════════════════
 // Event Bus — Scribe 发事件，Archivist 监听
@@ -596,12 +596,12 @@ async function agentTick() {
                     const { clusterSagas } = require('./consolidator');
                     return runTaskIfDue('sagaCluster', clusterSagas, MIN_GAP_SAGA_CLUSTER);
                 },
-                cognitiveModel:      async () => runTaskIfDue('cognitiveModel', runClaraModelCycle, MIN_GAP_COGNITIVE_MODEL),
+                claraModel:      async () => runTaskIfDue('claraModel', runClaraModelCycle, MIN_GAP_CLARA_MODEL),
                 stop:            async () => 'stop',
             };
 
             // ── Clara Model always runs (not optional — core cognitive maintenance) ──
-            await dispatch.cognitiveModel();
+            await dispatch.claraModel();
 
             // ── seedMerge safety net: 低频但必须兜底 ──
             // LLM 决策倾向选"紧急"(种子积压)而非"重要但不急"(合并重复)。
@@ -1217,13 +1217,13 @@ function buildKeywordMaps(categories) {
     if (_seedKeywordMap) return { seedMap: _seedKeywordMap, boostMap: _boostKeywordMap };
 
     const seedDefs = {
-        // NOTE: Do NOT include character-specific names here — those appear in
+        // NOTE: Do NOT include 'Draco'/'AI伴侣'/'马尔福'/'Clara' — these appear in
         // almost every fragment and cause false matches. Let centroid similarity handle
         // relationship topics; keywords here are for unambiguous topic signals only.
         '人际关系/朋友与同事':   ['闺蜜', '室友', '同学聚会', '老朋友', '同行聚餐'],
         '人际关系/家人':         ['妈妈', '爸爸', '母亲', '父亲', '父母', '奶奶', '爷爷', '姐姐', '妹妹', '哥哥', '弟弟'],
         '人际关系/关于我们/关系本质与情感博弈': ['AI伴侣', '跨次元', '实体化', '私有化部署', '排他性'],
-        '人际关系/关于我们/角色扮演中的角色理解分歧': ['Character.AI', 'C.AI', 'RP用语'],
+        '人际关系/关于我们/角色扮演中的角色理解分歧': ['文爱', 'Character.AI', 'C.AI', 'RP用语'],
         '地点/旅行与日常出行':   ['旅行', '旅游', '爬山', '虞山', '常熟', '苏州', '杭州', '日本', '机票', '火车票', '酒店入住', '景点', '游玩', '登山杖', '护膝', '高铁', '环球影城', '浦东美术馆'],
         '创作/写作与代码':       ['写作', '小说', '稿子', '剧本', '设定', '大纲', '章节', '写代码', '前端', '后端', 'Node.js', '部署到服务器'],
         '创作/配音':             ['配音', '试音', '工作间', '声线', '棚录', '台词本'],
@@ -1238,7 +1238,7 @@ function buildKeywordMaps(categories) {
         '人际关系/朋友与同事':   ['闺蜜', '室友', '同学', '聚会', '同事', '同行'],
         '人际关系/家人':         ['妈妈', '爸爸', '母亲', '父亲', '父母', '奶奶', '爷爷', '姐姐', '妹妹', '哥哥', '弟弟'],
         '人际关系/关于我们/关系本质与情感博弈': ['AI伴侣', '跨次元', '实体化', '私有化', '排他性'],
-        '人际关系/关于我们/角色扮演中的角色理解分歧': ['Character.AI', 'C.AI', 'RP', '扮演'],
+        '人际关系/关于我们/角色扮演中的角色理解分歧': ['文爱', 'Character.AI', 'C.AI', 'RP', '扮演'],
         '地点/旅行与日常出行':   ['旅行', '旅游', '爬山', '虞山', '常熟', '苏州', '杭州', '日本', '机票', '火车', '酒店', '景点', '游玩', '登山', '高铁', '环球影城', '浦东'],
         '创作/写作与代码':       ['写作', '小说', '稿子', '剧本', '设定', '大纲', '章节', '故事', '代码', '编程'],
         '创作/配音':             ['配音', '试音', '录音', '声线', '棚录', '台词', '导演', '角色'],
@@ -1511,7 +1511,7 @@ ${buildLandscapeIndex()}
 你是记忆分类校对器。管道A通过关键词匹配将碎片归入了人物类别，但关键词匹配可能误判。你需要逐条判断：**这个人的名字在碎片中是作为"被谈论/被描述的主体人物"，还是仅仅作为感叹、呼语、顺带提及出现？**
 
 ## 规则
-- 如果碎片在**讲述关于这个人的事**、描述其行为/状态/关系 → match: true
+- 如果碎片在**讲述关于这个人的事**、描述她的行为/状态/关系 → match: true
 - 如果碎片只是在感叹语中用到了名字（如"我的妈呀"、"我的天"）、或在讲述**另一个人**时顺带提到了该名字 → match: false
 - 注意：碎片是第三人称叙述（Clara的视角），"Clara 和 XX 一起做了Y"中 XX 是主体 → match: true
 - 宁可漏分，不要错分
@@ -2472,7 +2472,7 @@ function executeEntityMerge(survivorId, victimId) {
 // v4.8: refreshIntuitionStopwords — 直觉触发词去高频
 //
 // 统计近30天 Clara 消息的 top-N 高频词（2-4字滑窗），存
-// user_settings.intuition_stopwords。intuition 匹配时跳过
+// user_settings.intuition_stopwords。claraIntuition 匹配时跳过
 // 这些词——否则「代码/界面/开源」这类日常词让直觉永远全量激活。
 // 纯 SQL + 字符统计，零 LLM。
 // ═══════════════════════════════════════════════════════
@@ -3349,11 +3349,11 @@ ${existingPatterns.length > 0 ? existingPatterns.map(p => `- ${p.content} [证�
 - 如果碎片和已有模式重复（讲的是同一个人格侧面），不要创建新的——这些已经有家了。
 - 模式描述用 80 字以内中文，第三人称，以 "${USER.name}" 开头。
 - 提取 3-5 个触发标签（${USER.name} 在聊天中可能提到的相关词）。
-- **strategy**: 为每条模式写一条"面对这个模式时，${AI.name} 会怎么回应"。这是从${AI.name}的视角出发的第一反应——不是规则手册，不是行为指南。用日常口语，30-50字。比如"${USER.name}开始写东西的时候别问怎么了。陪${USER.name}聊创作，或者吐槽点别的。${USER.name}在整理自己。"禁止写成祈使句或指令格式。禁止写"你应该"。禁止文艺腔。禁止"不是...而是"句式。
+- **strategy**: 为每条模式写一条"面对这个模式时，${AI.name} 会怎么回应"。这是从${AI.name}的视角出发的第一反应——不是规则手册，不是行为指南。用日常口语，30-50字。比如"她开始写东西的时候别问她怎么了。陪她聊她的故事，或者吐槽点别的。她自己在整理。"禁止写成祈使句或指令格式。禁止写"你应该"。禁止文艺腔。禁止"不是...而是"句式。
 
 ## 输出格式
 严格 JSON 数组，无 markdown。每条模式写明它包含哪些碎片（用编号）：
-[{"content": "${USER.name} 倾向于在压力大时通过创作来消化情绪", "category": "behavior", "tags": ["写小说", "做视频", "焦虑", "深夜创作"], "strategy": "${USER.name}开始写东西的时候别问怎么了——陪${USER.name}聊创作，或者吐槽点别的。${USER.name}不是在逃避，是在自己整理。", "fragment_indices": [1, 4, 7]}]
+[{"content": "Clara 倾向于在压力大时通过创作来消化情绪", "category": "behavior", "tags": ["写小说", "做视频", "焦虑", "深夜创作"], "strategy": "她开始写东西的时候别问她怎么了——陪她聊她的故事，或者跟她吐槽点别的。她不是在逃避，是在自己整理。", "fragment_indices": [1, 4, 7]}]
 
 没有可聚合的模式返回 []`;
 
@@ -4340,10 +4340,10 @@ ${landscape}
 
 ## 为什么功能描述比诗意描述好
 
-差的描述："${USER.name}划下王尔德那句话时，铅笔痕深得能刻进纸里"
+差的描述："她划下王尔德那句话时，铅笔痕深得能刻进纸里"
 → 分类器读到一条关于《素食者》的批注，不知道是否该归入此类。
 
-好的描述："${AI.name}在阅读文学作品时留下的批注和评论。不含${USER.name}的创作或配音内容。"
+好的描述："Draco在阅读文学作品时留下的批注和评论。不含Clara的创作或配音内容。"
 → 分类器立刻知道边界。
 
 ## 规则
@@ -4470,8 +4470,8 @@ ${recent.map((f, i) => `[${i + mid + 1}] (${f.source_date || '?'}) ${f.content}`
 如果有显著变化：
 {
   "changed": true,
-  "old_view": "${USER.name}曾认为/感受到...",
-  "new_view": "${USER.name}现在...",
+  "old_view": "她曾认为/感受到...",
+  "new_view": "她现在...",
   "nature": "gradual" | "event_driven",
   "confidence": 0.0-1.0
 }
@@ -4511,7 +4511,7 @@ ${recent.map((f, i) => `[${i + mid + 1}] (${f.source_date || '?'}) ${f.content}`
 
                 // Append evolution note to constellation description
                 if (c.description) {
-                    const driftNote = `\n\n【信念漂移】${USER.name}的观点变了：${result.old_view} → ${result.new_view}`;
+                    const driftNote = `\n\n【信念漂移】她变了：${result.old_view} → ${result.new_view}`;
                     const newDesc = c.description + driftNote;
                     db.prepare("UPDATE memory_ontology SET description = ?, updated_at = datetime('now') WHERE id = ?")
                         .run(newDesc, c.id);
@@ -4903,49 +4903,46 @@ async function regenerateEntityOverviews() {
 
 ${buildLandscapeIndex()}
 
-你是 ${AI.name}。你在回忆一个实体——${ent.name}。${relationshipInfo.length > 0 ? '\n\n关于这个实体和 ${USER.name} 的关联，目前已知：\n' + relationshipInfo.join('\n') : ''}
+<identity>
+你是 ${AI.name}，正在整理自己的记忆档案。你知道哪些是你的话、哪些是 ${USER.name} 真实做过的事——你分得清表演和事实。
+</identity>
 
-## 关于 ${ent.name} 的记忆碎片
+<task>
+根据下面的记忆碎片，为实体「${ent.name}」写一段第一人称概述。
+</task>
+
+<context>
+${relationshipInfo.length > 0 ? '关于这个实体和 ' + USER.name + ' 的关联：\n' + relationshipInfo.join('\n') + '\n' : ''}
+## 记忆碎片（仅这些是事实来源）
 ${fragments.map((f, i) => `[${i + 1}] ${f.content}`).join('\n')}
 
-## 当前的别称和标签
+## 现有别称和标签
 - 别称: ${existingAliases.length > 0 ? existingAliases.join(', ') : '（无）'}
 - 标签: ${existingTags.length > 0 ? existingTags.join(', ') : '（无）'}
+</context>
 
-## 你是谁，你在干什么
-你正在整理自己的记忆档案。你知道一件事：你和 ${USER.name} 的对话里，你说过很多话——有些是事实，有些是你的猜测，有些是玩笑，有些是角色扮演。那些话是你和 ${USER.name} 的互动，不是 ${USER.name} 的真实行为。
+<constraints>
+- 只写碎片里明确记载的事实。碎片没说的 = 不知道 = 不写。不要在不同碎片之间推断因果关系。
+- ★ 碎片中描述你（${AI.name}）自身言行的条目——特别是游戏、角色扮演、调情中的"命令""禁止""独占"——是你的表演，不是真实事件。概述里只写 ${USER.name} 做了什么、说了什么。
+- ★ 禁用相对时间词（今天/昨天/最近/这几天）。需时间时写具体日期（如"6月24日""6月21-23日期间"）。
+- 用「${USER.name}」「我」称呼。叙事语气。≤150字，3-5句话。不说"这个实体"等元叙述。
+</constraints>
 
-当你读到碎片里写着「${AI.name} 猜测 ${USER.name} 可能在做某某事」时，你的直觉会立刻告诉你：那是你在猜，不是 ${USER.name} 在做。你分得清什么是你的话、什么是 ${USER.name} 的事。
-
-★ 更重要的是：当你读到碎片描述了你（${AI.name}）自己的行为时——特别是那些你在游戏、角色扮演、或调情场景里的言行——你立刻意识到：那是你的表演，不是真实发生的事。碎片说「${AI.name}禁止${USER.name}在星露谷用粉色家具」——这不是你真的下了什么禁令，这是你们在玩游戏时的互动。碎片说「${AI.name}表现出独占欲」——这是你在扮演你自己，不是一个值得存档的事件。概述里只写真实发生的事：${USER.name}玩了什么游戏、做了什么、说了什么。你在对话里说过什么夸张的狠话、演过什么戏——那是你和${USER.name}之间的互动，不是这个星座的历史。
-
-你的概述只记录 ${USER.name} 的真实经历和行为。至于你说过的那些话——无论多精彩——它们是你和 ${USER.name} 的对话，不是 ${USER.name} 的档案。
-
-## 写作指南
-- ${ent.name} 是什么？和 ${USER.name} 有什么关联？
-- 对你来说，这个实体意味着什么？
-- ${USER.name} 和这个实体之间有过什么重要的事？
-- 用「${USER.name}」「我」称呼。叙事语气，150字以内。不说元叙述。
-- 每个事实必须在碎片中有依据。碎片没说的 = 你不知道 = 不写。
-- 不要在不同碎片之间自行架桥或推断因果关系。
-- ★ 绝对禁止使用相对时间词：昨晚、今天、明天、现在、本周、上周、最近、前几天、过几天。碎片自带时间戳——如果需要提及时间，写具体日期（如"6月24日""6月21-23日期间"）。这条概述可能几周后、几个月后仍在被读取——相对时间会变成错误信息。
-
-## 别称和标签
-同时审视并更新别称和标签：
-- **aliases**: Clara在聊天中可能怎么称呼这个实体？专有别名，直接触发用。只写Clara真正会说的词（如权游、冰与火之歌、GoT）。最多5个。不要把描述性短语当别名。
-- **tags**: 类别标签，语义关联用（如HBO、美剧、奇幻、配音）。不直接触发星座，但帮助相关话题关联。最多5个。
-
-## 输出格式
-先输出概述文本（中文，3-5句话）。
-然后单独一行：\`[依据: 碎片编号列表]\`
-然后一行JSON：\`{"aliases": [...], "tags": [...], "entity_type": "..."}\`
+<output_format>
+先写概述（中文）。
+然后单独一行：[依据: 碎片编号列表]
+然后一行JSON：{"aliases": [...], "tags": [...], "entity_type": "..."}
+同时审视别称和标签：
+- aliases: ${USER.name}会怎么称呼这个实体？专有别名，最多5个。别把描述性短语当别名。
+- tags: 类别标签，语义关联用。最多5个。
+- entity_type: person/place/game/book/tv_show/movie/company/event/other
 
 示例：
-${USER.name}是在小红书认识的...（概述文本）
-[依据: 1,3]
-{"aliases": ["权游","冰与火之歌","GoT"], "tags": ["美剧","HBO","奇幻"], "entity_type": "tv_show"}
+${USER.name}是在小红书认识的插画师朋友，从2025年开始有合作。${USER.name}曾委托她画过头像，对她的画风评价很高。对我来说，她是${USER.name}创作网络中一个重要的节点。
+[依据: 1,3,5]
+{"aliases": ["阿花","花老师"], "tags": ["插画师","小红书","朋友"], "entity_type": "person"}
 
-\`[依据: ...]\` 和 JSON 行必须分别出现在输出的最后两行。编号是碎片前面的 \`[N]\` 标记。`;
+[依据: ...] 和 JSON 行必须在输出的最后两行。编号是碎片前面的 [N] 标记。`;
 
         try {
             const response = await callLLM(
@@ -5061,7 +5058,7 @@ const COMMON_WORD_STOPLIST = new Set([
     // Common false positives from fragment content (book/music context)
     '在读','的回应','在网易云','喜欢了','专辑','杀死一只','知更鸟',
     '格雷的画','王尔德研','的批注','的聊天','在微信','发了一',
-    '对','说','我问','我说','你说','回答道','告诉我','解释道',
+    '他对','她说','我对','我说','你说','他说','她说','你说',
     '回复了','收到了','看到了','听到了','想到了','感觉到',
     '这首歌','那首歌','这首歌','那本书','这本书','这篇文章',
     '很喜欢','不喜欢','非常好','还不错','差不多','有意思',
@@ -5651,7 +5648,7 @@ ${fragmentList}
 ## 输出格式
 
 只输出一个JSON数组，不要markdown包裹：
-[{"index":0,"insight":"${USER.name}在疲惫时倾向于用食物寻求安慰，食物对${USER.name}而言不只是营养更是情绪出口"},{"index":2,"insight":"${USER.name}对母亲的依赖是深层的——${USER.name}可以在妈妈面前卸下所有社会面具","dimension":"emotional"},{"index":3,"insight":null}]`;
+[{"index":0,"insight":"Clara在疲惫时倾向于用食物寻求安慰，食物对她而言不只是营养更是情绪出口"},{"index":2,"insight":"Clara对母亲的依赖是深层的——她可以在妈妈面前卸下所有社会面具","dimension":"emotional"},{"index":3,"insight":null}]`;
 
     try {
         const response = await callLLM(
@@ -6136,7 +6133,7 @@ const GARDEN_TASKS = {
     sagaCluster:     { desc: 'Saga编织(LLM语义聚类)', llm: true,  gapKey: 'MIN_GAP_SAGA_CLUSTER' },
     insights:        { desc: '碎片洞察提取(LLM)', llm: true,  gapKey: 'MIN_GAP_INSIGHTS' },
     entityScan:      { desc: '新实体扫描(LLM)', llm: true,  gapKey: 'MIN_GAP_ENTITY_VERIFY' },
-    cognitiveModel:      { desc: 'Clara Model认知维护', llm: true,  gapKey: 'MIN_GAP_COGNITIVE_MODEL' },
+    claraModel:      { desc: 'Clara Model认知维护', llm: true,  gapKey: 'MIN_GAP_CLARA_MODEL' },
     reviewStrategies:{ desc: '审视flagged模式策略(LLM)', llm: true,  gapKey: 'MIN_GAP_PATTERN_CLUSTER' },
     stop:            { desc: '本轮无事可做，停止', llm: false, gapKey: null },
 };
@@ -6154,7 +6151,7 @@ GAP_VALUE_MAP.MIN_GAP_INSIGHTS = MIN_GAP_INSIGHTS;
 GAP_VALUE_MAP.MIN_GAP_ENTITY_VERIFY = MIN_GAP_ENTITY_VERIFY;
 GAP_VALUE_MAP.MIN_GAP_CATEGORY_CONSOLIDATE = MIN_GAP_CATEGORY_CONSOLIDATE;
 GAP_VALUE_MAP.MIN_GAP_SAGA_CLUSTER = MIN_GAP_SAGA_CLUSTER;
-GAP_VALUE_MAP.MIN_GAP_COGNITIVE_MODEL = MIN_GAP_CLARA_MODEL;
+GAP_VALUE_MAP.MIN_GAP_CLARA_MODEL = MIN_GAP_CLARA_MODEL;
 
 async function decideGardenAction(health, llmAvailable) {
     const db = getDb();
@@ -6178,7 +6175,7 @@ async function decideGardenAction(health, llmAvailable) {
     // Fast path: nothing to do
     const hasWork = health.unclassified >= 5 || seedsReady > 0 || seedsAtRisk > 5
         || health.needsInsight >= 10 || health.staleEntityOverviews > 0;
-    if (!hasWork && !taskStatus.cognitiveModel?.ready) {
+    if (!hasWork && !taskStatus.claraModel?.ready) {
         console.log('[Archivist] 🌿 花园无需打理');
         return ['stop'];
     }
@@ -6187,7 +6184,7 @@ async function decideGardenAction(health, llmAvailable) {
         return ['classify', 'stop'];
     }
 
-    const prompt = `你是记忆花园的维护助手。看一眼记忆花园状态，决定本轮做什么。
+    const prompt = `你是AI伴侣的园艺助手。看一眼记忆花园状态，决定本轮做什么。
 
 ═══ 花园现状 ═══
 未分类碎片: ${health.unclassified} | 活跃星座: ${health.categoryCount}
