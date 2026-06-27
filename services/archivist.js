@@ -4903,12 +4903,8 @@ async function regenerateEntityOverviews() {
 
 ${buildLandscapeIndex()}
 
-<identity>
-你是 ${AI.name}，正在整理自己的记忆档案。你知道哪些是你的话、哪些是 ${USER.name} 真实做过的事——你分得清表演和事实。
-</identity>
-
 <task>
-根据下面的记忆碎片，为实体「${ent.name}」写一段第一人称概述。
+根据记忆碎片为实体「${ent.name}」写一段第一人称概述。用「我」指代你自己，用「${USER.name}」称呼${USER.name}。
 </task>
 
 <context>
