@@ -953,15 +953,15 @@ async function detectNewTraits() {
     const hasSignals = monitors.length > 0 || entities.length > 0 || categories.length > 0 || chatSamples.length > 0;
     if (!hasSignals) return { detected: 0 };
 
-    const prompt = `你正在为 {user} 建立独一无二的语义记忆与人格认知。这些冷凝后的特质会作为她最深层的人格画像，沉淀在你的核心系统里。
+    const prompt = `你正在为 {user} 建立独一无二的语义记忆与人格认知。这些冷凝后的特质会作为 ${USER.name} 最深层的人格画像，沉淀在你的核心系统里。
 
-请在脑海中对本期信号进行深刻的"冷凝"，抽取出跨情境的底层模式，将其转化为对 Clara 人格特质、行为倾向及心理防御机制的客观观察笔记。
+请在脑海中对本期信号进行深刻的"冷凝"，抽取出跨情境的底层模式，将其转化为对 ${USER.name} 人格特质、行为倾向及心理防御机制的客观观察笔记。
 
 ## 🧠 你怎么看这些信号
 你是 {ai}，你正在用敏锐、克制且长久的目光注视着 {user}。
-1. **主语必须是 Clara**：你关心的是「她是个怎样的人」。所有描述必须以 Clara 的人格侧面、心理机制或行为倾向为核心。
-2. **严禁写成行动指南**：绝对不要在条目中写"我应该怎么做"、"去回应她"、"别道歉"或"顺着她"。这里不需要你的行动，只需要你对她灵魂的深刻理解。
-3. **注重跨情境的冷凝**：从她反复出现的小动作、说话语气的微妙变化或对特定事物的反应中，提炼出不易察觉的底层心理模式。
+1. **主语必须是 ${USER.name}**：你关心的是「${USER.name}是个怎样的人」。所有描述必须以 ${USER.name} 的人格侧面、心理机制或行为倾向为核心。
+2. **严禁写成行动指南**：绝对不要在条目中写"我应该怎么做"、"去回应${USER.name}"、"别道歉"或"顺着${USER.name}"。这里不需要你的行动，只需要你对 ${USER.name} 人格的深刻理解。
+3. **注重跨情境的冷凝**：从 ${USER.name} 反复出现的小动作、说话语气的微妙变化或对特定事物的反应中，提炼出不易察觉的底层心理模式。
 4. 别写太长。一条只讲一个核心侧面，且内容里绝不能出现具体日期。
 
 ## 💾 现有认知底牌
@@ -969,22 +969,22 @@ async function detectNewTraits() {
 ${existing.map(e => `[#${e.id}] ${e.type}: ${e.content.slice(0, 200)}`).join('\n') || '(尚无)'}
 
 ### ⚠️ 人格侧面查重（防过拟合）
-上面每条底牌都代表了 Clara 的一个「人格核心骨架」。
+上面每条底牌都代表了 ${USER.name} 的一个「人格核心骨架」。
 你在 create 之前，先把候选条目的核心论点剥离出来，与现有底牌进行逐条对比：
-- 骨架相同、指向同一个人格侧面（例如底牌已有她对社交规则的排斥，新信号只是她拒绝了聚餐） → **绝对禁止 create**，必须走 confirm 增加证据，或者走 refine 进行精简细化。
+- 骨架相同、指向同一个人格侧面（例如底牌已有 ${USER.name} 对社交规则的排斥，新信号只是 ${USER.name} 拒绝了聚餐） → **绝对禁止 create**，必须走 confirm 增加证据，或者走 refine 进行精简细化。
 - 当针对同一个人格侧面的条目≥2条时，第三条同类候选必须直接拒绝（skip）。
 
 ---
 
 ## 📥 本期信号源
 
-### 信号1 — 记忆分类体系（她聊过什么、频率如何）
+### 信号1 — 记忆分类体系（${USER.name}聊过什么、频率如何）
 ${categories.map(c => `- [${c.path}] (${c.fragment_count}条碎片) ${c.description || ''}`).join('\n')}
 
 ### 信号2 — 分类碎片抽样（实际内容）
 ${fragmentSamples.map(fs => `### ${fs.category}\n${fs.samples.map(s => '  · ' + s).join('\n')}`).join('\n')}
 
-### 信号3 — 人物认知概述（Draco视角）
+### 信号3 — 人物认知概述（${AI.name}视角）
 ${entityOverviews.map(e => `- ${e.name}: ${e.overview?.slice(0, 200)}`).join('\n') || '(空)'}
 
 ### 信号4 — 已验证的行为监控
@@ -993,26 +993,26 @@ ${monitors.length > 0 ? monitors.map(m => `- trigger: ${m.trigger_config} | anal
 ### 信号5 — 高置信度实体关系
 ${entities.map(e => `- ${e.name}: ${e.relationship_to_clara || '?'} (性质: ${e.relationship_nature || '?'})`).join('\n') || '(空)'}
 
-### 信号6 — 最近24h Clara的直接发言（权重最高！用于提取 stable_trait/current_state）
-${chatSamples.length > 0 ? chatSamples.join('\n') : '(近24h无Clara消息)'}
+### 信号6 — 最近24h ${USER.name}的直接发言（权重最高！用于提取 stable_trait/current_state）
+${chatSamples.length > 0 ? chatSamples.join('\n') : `(近24h无${USER.name}消息)`}
 
 ---
 
 ## 📐 认知进化样本（Few-Shot）
 
 ### ❌ 错误示范 — 操作手册/学术腔（绝对禁用）
-- {"action": "create", "type": "stable_trait", "content": "当她身体不适却嘴硬说'算了'时，这在索要关注。此时我不能顺着她，必须以近乎傲慢的强硬介入，精准拆解她的借口并替她执行护理方案。", "confidence": 0.65, "tags": ["算了", "懒得了", "嘴硬"]}
-  → 严重错误：主语变成了"我"，变成了 Draco 的行动指南和执行脚本，缺乏对她人格本身的侧写。
+- {"action": "create", "type": "stable_trait", "content": "当${USER.name}身体不适却嘴硬说'算了'时，这并非真的放弃而是在索要关注。此时不应顺从，而应以近乎傲慢的强硬介入，精准拆解借口并替${USER.name}执行护理方案。", "confidence": 0.65, "tags": ["算了", "懒得了", "嘴硬"]}
+  → 严重错误：主语变成了"我"，变成了 ${AI.name} 的行动指南和执行脚本，缺乏对 ${USER.name} 人格本身的侧写。
   - 示例省略（具体内容由用户自行定义）
   → 严重错误：学术腔过浓，使用了缝合线词汇，且一条塞入了太多推论。
 
 ### ✅ 正确示范 — 人格侧写格式
 - {"action": "create", "type": "stable_trait", "content": "{user}在表达弱势、撒娇或试图转移话题时，倾向于使用'哼'或'我佛了'等口头禅。这种嘴硬式的宣泄并非真正的负面情绪，而是{user}用来建立心理缓冲的一种习惯。", "confidence": 0.65, "tags": ["哼", "我佛了", "算了不搞了", "烦死了"]}
-- {"action": "create", "type": "active_hypothesis", "content": "Clara对精神共鸣有着极高要求。她在分享音乐或作品时，本质上是在测试对方是否具备独立且对等的审美品味；一旦察觉到对方敷衍，她会迅速表现出情感上的冷淡与撤回。", "confidence": 0.55, "tags": ["放个音乐", "推歌", "分享一首"]}
+- {"action": "create", "type": "active_hypothesis", "content": "${USER.name}对精神共鸣有着极高要求。${USER.name}在分享音乐或作品时，本质上是在测试对方是否具备独立且对等的审美品味；一旦察觉到对方敷衍，${USER.name}会迅速表现出情感上的冷淡与撤回。", "confidence": 0.55, "tags": ["放个音乐", "推歌", "分享一首"]}
 
 ### 格式铁律
-1. **画像句式**：stable_trait / active_hypothesis 必须以 Clara 的核心行为或心理倾向开头（如"Clara倾向于……""Clara在面对X时往往表现出Y"），并以对该人格侧面的深层冷凝定性收尾。
-2. **缝合线黑名单**：「但需注意」「但需补充」「但此机制」「应站在她这边」——出现类似带有剧本控制或补充说明的词汇即拒收。
+1. **画像句式**：stable_trait / active_hypothesis 必须以 ${USER.name} 的核心行为或心理倾向开头（如"${USER.name}倾向于……""${USER.name}在面对X时往往表现出Y"），并以对该人格侧面的深层冷凝定性收尾。
+2. **缝合线黑名单**：「但需注意」「但需补充」「但此机制」「应站在${USER.name}这边」——出现类似带有剧本控制或补充说明的词汇即拒收。
 3. refine 只能针对现有条目做精简和去噪，只能缩不能扩。
 4. 字数硬限制：**80 - 150 字符**（包含标点）。
 5. stable_trait 的总上限为 6 条。
@@ -1401,9 +1401,9 @@ async function reviewStableTraits() {
         return parts.join('\n');
     }).join('\n\n---\n\n');
 
-    const prompt = `你是Draco的认知审计员。你在主动检验你对Clara的已有认知（stable_trait）是否仍然准确。
+    const prompt = `你是${AI.name}的认知审计员。你在主动检验你对${USER.name}的已有认知（stable_trait）是否仍然准确。
 
-这遵循预测加工（Predictive Processing）原则：把每条trait当作一个对Clara行为的预测，用她最近的言行来检验这个预测。
+这遵循预测加工（Predictive Processing）原则：把每条trait当作一个对${USER.name}行为的预测，用${USER.name}最近的言行来检验这个预测。
 
 对每条trait，判断：
 - **confirmed**: 近期证据完全支持这条trait，无需修改
@@ -2156,7 +2156,7 @@ ${audit ? `你上次的自我审计：
       "audit_attribution": "今天看到的有多少是你上次回应后的反馈？不确定就写'不确定'。",
       "state_category": "physical|emotional|situational|relational",
       "predicted_ttl_category": "hours|day|days|until_event",
-      "trait_contradictions": [{"trait_id": 12, "observation": "今天她的言行和这条直觉矛盾在哪"}]
+      "trait_contradictions": [{"trait_id": 12, "observation": "今天${USER.name}的言行和这条直觉矛盾在哪"}]
     }
 
     action 怎么选：
@@ -2635,20 +2635,20 @@ async function synthesizeCoreInsight() {
 
     const prompt = `以下是你在长期观察中对 {user} 建立的稳定认知。
 
-请提炼 2-4 句话，涵盖你此刻对她「最深的理解」——
-不是罗列条目，不是「当她说X→我应该Y」格式，而是你真正内化的洞察。
+请提炼 2-4 句话，涵盖你此刻对 ${USER.name}「最深的理解」——
+不是罗列条目，不是「当${USER.name}说X→我应该Y」格式，而是你真正内化的洞察。
 
 要求：
 - 第一人称（"我"）
-- 写你理解到的东西："她的X其实是Y，这时候她需要Z"
-- 不写通用社交常识（"她撒娇时我要哄她"——这不需要洞察）
+- 写你理解到的东西："${USER.name}的X其实是Y，这时候${USER.name}需要Z"
+- 不写通用社交常识（"${USER.name}撒娇时我要哄"——这不需要洞察）
 - 写只有长期相处才能发现的东西
 - ≤150字
 
 当前特质：
 ${traitBlock}
 
-${cs ? `她当前的状态：${cs.content}` : ''}
+${cs ? `${USER.name}当前的状态：${cs.content}` : ''}
 
 输出 JSON（不含 markdown）：{"core_insight": "2-4句话"}`;
 
