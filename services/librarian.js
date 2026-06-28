@@ -324,11 +324,12 @@ async function searchHybrid(userMessage, limit = 6) {
     console.log(`Hybrid: 实体聚合命中 ${entityResults.length} 条 (entity_ids=${entityIds.join(',')}) → "${userMessage.slice(0, 40)}"`);
   }
 
-  // 2. 向量语义检索（异步）
+  // 2. 向量语义检索（异步）—— 多取 3x 补偿 ChromaDB stale 碎片
+  const VEC_OVERFETCH = 3;
   let vecResults = [];
   try {
     const { searchMemoriesByVector } = require('./memory');
-    vecResults = await searchMemoriesByVector(userMessage, limit);
+    vecResults = await searchMemoriesByVector(userMessage, Math.max(limit * VEC_OVERFETCH, 16));
   } catch (e) {
     console.error('Hybrid: vector search failed:', e.message);
   }
@@ -469,8 +470,10 @@ async function searchHybrid(userMessage, limit = 6) {
     const importance = 0.4 + ew * 0.6;
     const novelty = noveltyPenalty(item._read_count || 0);
     const wmBoost = boostMap.get(`${item.source_table}-${item.id}`) || 1.0;
-    const combinedScore = item._rrf * decay * importance * novelty * wmBoost;
-    return { ...item, _rrf: combinedScore, _decay: decay, _importance: importance, _novelty: novelty, _daysAgo: Math.round(days), _wmBoost: wmBoost };
+    // 时效加权：语义相近时，新记忆优先。≤1天的×1.3，≤3天×1.15，≤7天×1.05，之后无加成
+    const recencyBoost = days <= 1 ? 1.3 : days <= 3 ? 1.15 : days <= 7 ? 1.05 : 1.0;
+    const combinedScore = item._rrf * decay * importance * novelty * wmBoost * recencyBoost;
+    return { ...item, _rrf: combinedScore, _decay: decay, _importance: importance, _novelty: novelty, _daysAgo: Math.round(days), _wmBoost: wmBoost, _recencyBoost: recencyBoost };
   })
   .filter(item => item._rrf >= MIN_COMBINED_SCORE)
   .sort((a, b) => b._rrf - a._rrf);

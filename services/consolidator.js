@@ -342,7 +342,31 @@ async function consolidateGroup(group) {
     );
     const memoryId = info.lastInsertRowid;
 
-    // 索引到 ChromaDB（语义检索路径）
+    // ❶ 先清理 ChromaDB 中旧碎片嵌入（必须在 embed 新记忆之前，防止误判 duplicate）
+    try {
+        let cleaned = 0;
+        for (const fid of fragmentIds) {
+            try {
+                await chromaDBOperation('delete', { id: `fragment_${fid}` });
+                cleaned++;
+            } catch (_) { /* individual delete failure is non-fatal */ }
+        }
+        if (cleaned > 0) {
+            console.log(`[Consolidator] ChromaDB 清理: ${cleaned}/${fragmentIds.length} 条旧碎片嵌入已删除`);
+        }
+    } catch (e) {
+        console.warn(`[Consolidator] ChromaDB 清理失败（非致命）: ${e.message}`);
+    }
+
+    // ❷ 标记原碎片为已整合
+    const markConsolidated = db.prepare(`
+        UPDATE memory_fragments SET status = 'consolidated' WHERE id = ?
+    `);
+    for (const fid of fragmentIds) {
+        markConsolidated.run(fid);
+    }
+
+    // ❸ 索引新记忆到 ChromaDB（旧碎片已删，不会冲突判重）
     let chromaId = null;
     try {
         const indexResult = await chromaDBOperation('index_batch', {
@@ -356,38 +380,11 @@ async function consolidateGroup(group) {
             chromaId = `memory_${memoryId}`;
             db.prepare('UPDATE memories SET chroma_id = ? WHERE id = ?').run(chromaId, memoryId);
             console.log(`[Consolidator] ChromaDB indexed: memory_${memoryId}`);
-        } else if (indexResult.duplicates?.length > 0) {
-            const dupId = indexResult.duplicates[0].existing_id;
-            chromaId = `dup_of_${dupId}`;
-            db.prepare('UPDATE memories SET chroma_id = ? WHERE id = ?').run(chromaId, memoryId);
-            console.log(`[Consolidator] ChromaDB duplicate: memory_${memoryId} ≈ ${dupId}`);
         }
+        // 不再使用 dup_of_ 回退：旧碎片已删，若仍判重说明 ChromaDB 有孤儿向量
+        // → 静默跳过，memory 保留 chroma_id=NULL，后续生命周期维护会补索引
     } catch (e) {
         console.error(`[Consolidator] ChromaDB index failed for memory_${memoryId}:`, e.message);
-    }
-
-    // 标记原碎片为已整合
-    const markConsolidated = db.prepare(`
-        UPDATE memory_fragments SET status = 'consolidated' WHERE id = ?
-    `);
-    for (const fid of fragmentIds) {
-        markConsolidated.run(fid);
-    }
-
-    // 清理 ChromaDB 中已合并的碎片嵌入（防止向量检索返回 stale 碎片）
-    try {
-        let cleaned = 0;
-        for (const fid of fragmentIds) {
-            try {
-                await chromaDBOperation('delete', { chroma_id: `fragment_${fid}` });
-                cleaned++;
-            } catch (_) { /* individual delete failure is non-fatal */ }
-        }
-        if (cleaned > 0) {
-            console.log(`[Consolidator] ChromaDB 清理: ${cleaned}/${fragmentIds.length} 条旧碎片嵌入已删除`);
-        }
-    } catch (e) {
-        console.warn(`[Consolidator] ChromaDB 清理失败（非致命）: ${e.message}`);
     }
 
     console.log(`[Consolidator] 整合完成: ${fragmentIds.length}个碎片 → memory #${memoryId} (sig=${significance}, w=${mergedWeight}${chromaId ? ', chroma: ' + chromaId : ''})`);
