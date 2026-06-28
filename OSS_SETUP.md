@@ -195,6 +195,12 @@ sqlite3 memory_constellations.db "SELECT COUNT(*) FROM entity_profiles WHERE sta
 - 可以定期重启 ChromaDB：`pm2 restart chroma-service`
 - `scripts/setup.sh` 会自动安装 ChromaDB
 
+### Q: 记忆搜索总是返回很早之前的结果，看不到新记忆
+- 检查 ChromaDB 查询上限：如果你使用 `chroma_service.py`（FastAPI 封装），确保 `/query` 端点的 `n_results` 未硬编码上限。原版代码为 `min(n * 3, 10)`（最多 10 条）——如果陈旧碎片较多，有效结果可能只剩 2-3 条
+- **修复：** 改为 `max(n * 3, 30)`，确保过滤陈旧碎片后仍有足够有效条目
+- 同时检查 Librarian 的向量搜索是否 overfetch（建议 `limit * 3`，最少 16 条）
+- 确认 `memory_fragments` 中 status 为 `consolidated` / `inactive` 的碎片已从 ChromaDB 中删除（否则会污染搜索结果）
+
 ### Q: 想用自己的 LLM provider
 - 数据库 `api_configs` 表存储 LLM 配置
 - 默认创建的是 Gemini 官方渠道
