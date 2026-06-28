@@ -191,7 +191,7 @@ async function cleanupStaleChromaEntries() {
     let cleaned = 0;
     for (const s of stale) {
         try {
-            await chromaDBOperation('delete', { chroma_id: `fragment_${s.id}` });
+            await chromaDBOperation('delete', { id: `fragment_${s.id}` });
             db.prepare('UPDATE memory_fragments SET chroma_id = NULL WHERE id = ?').run(s.id);
             cleaned++;
         } catch (_) { /* non-fatal */ }
