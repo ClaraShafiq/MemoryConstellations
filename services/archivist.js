@@ -80,8 +80,7 @@ const MIN_GAP_RECONCILE = 30 * 60 * 1000;
 const MIN_GAP_RELATIONSHIPS = 30 * 60 * 1000;
 const MIN_GAP_EMERGENT = 30 * 60 * 1000;           // 涌现地点/事件检测（聚类第二遍扫描）——清积压期30min
 const MIN_GAP_ENTITY_VERIFY = 60 * 60 * 1000;           // 管道A实体分类LLM抽检
-const MIN_GAP_CATEGORY_CONSOLIDATE = 60 * 60 * 1000;    // 按星座合并碎片为episode（v5.3: 数据源从 memory_ontology 切到 entity_profiles）
-const MIN_GAP_SAGA_CLUSTER = 24 * 60 * 60 * 1000;        // Saga聚类（LLM语义聚类所有episode），24h冷却
+const MIN_GAP_CATEGORY_CONSOLIDATE = 60 * 60 * 1000;    // 按类别合并碎片为episode
 const MIN_GAP_CATEGORY_MERGE = 6 * 60 * 60 * 1000;        // 重叠类别自动合并（LLM审视全貌）
 const MIN_GAP_BELIEF_DRIFT = 4 * 60 * 60 * 1000;         // 信念漂移检测：Clara 对同一主题的看法是否随时间改变
 const MIN_GAP_MUSIC_EXTRACT = 2 * 60 * 60 * 1000;   // 音乐品味变化慢
@@ -146,7 +145,6 @@ let agentState = {
     lastClaraModel: 0,
     lastCategoryMerge: 0,
     lastBeliefDrift: 0,
-    lastPatternCluster: 0,
 
     // Tree change tracker (whisper refresh trigger)
     treeChanged: false,
@@ -368,15 +366,7 @@ function scheduleTick() {
         try {
             await agentTick();
         } catch (e) {
-            // 分段定位崩溃来源
-            const stack = e.stack || e.message || String(e);
-            const sqlInfo = e.message && e.message.includes('parameter') ? ' [SQL参数不匹配]' : '';
-            console.error(`[Archivist Agent] Tick 异常${sqlInfo}:`, stack);
-            if (e.code) console.error(`  code=${e.code}`);
-            try {
-                const db = getDb();
-                console.error(`  lastClaraMsg=${agentState.lastClaraMessageTime} deepDone=${agentState.deepCycleSinceLastClaraMsg}`);
-            } catch (_) {}
+            console.error('[Archivist Agent] Tick 异常:', e.stack || e.message);
         }
         scheduleTick();
     }, TICK_INTERVAL_MS);
@@ -583,52 +573,18 @@ async function agentTick() {
                     return { skipped: true, reason: 'no stale overviews' };
                 },
                 entityScan:      async () => runTaskIfDue('entityScan', scanContentForNewEntities, MIN_GAP_ENTITY_VERIFY),
-                patternCluster:  async () => runTaskIfDue('patternCluster', clusterObservations, MIN_GAP_PATTERN_CLUSTER),
-                reviewStrategies: async () => runTaskIfDue('reviewStrategies', reviewFlaggedStrategies, MIN_GAP_PATTERN_CLUSTER),
                 insights:        async () => {
                     if (health.needsInsight >= 10)
                         return runTaskIfDue('insights', () => extractFragmentInsights(INSIGHT_BATCH_MAX), MIN_GAP_INSIGHTS);
                     return { skipped: true, reason: `needsInsight=${health.needsInsight}` };
                 },
                 episodeAudit:    async () => runTaskIfDue('episodeAudit', auditNewEpisodes, MIN_GAP_EPISODE_AUDIT),
-                consolidate:     async () => runTaskIfDue('consolidateCategory', consolidateCategory, MIN_GAP_CATEGORY_CONSOLIDATE),
-                sagaCluster:     async () => {
-                    const { clusterSagas } = require('./consolidator');
-                    return runTaskIfDue('sagaCluster', clusterSagas, MIN_GAP_SAGA_CLUSTER);
-                },
                 claraModel:      async () => runTaskIfDue('claraModel', runClaraModelCycle, MIN_GAP_CLARA_MODEL),
                 stop:            async () => 'stop',
             };
 
             // ── Clara Model always runs (not optional — core cognitive maintenance) ──
             await dispatch.claraModel();
-
-            // ── seedMerge safety net: 低频但必须兜底 ──
-            // LLM 决策倾向选"紧急"(种子积压)而非"重要但不急"(合并重复)。
-            // 纯 SQL 检查：>3天没合并 且有 名字相似的实体对 → 强制前置
-            const SEED_MERGE_MAX_GAP = 3 * 24 * 60 * 60 * 1000;
-            const lastMerge = agentState.lastSeedMerge || 0;
-            if (Date.now() - lastMerge > SEED_MERGE_MAX_GAP) {
-                const candidateCount = db.prepare(`
-                    SELECT COUNT(*) as c FROM (
-                        SELECT a.id FROM entity_profiles a
-                        JOIN entity_profiles b ON a.category = b.category AND a.id < b.id
-                        WHERE a.status IN ('seed','active') AND b.status IN ('seed','active')
-                          AND a.name NOT IN (${SKIP_PH}) AND b.name NOT IN (${SKIP_PH})
-                          AND a.category NOT IN ('music_aggregate','book_aggregate','movie_aggregate')
-                          AND b.category NOT IN ('music_aggregate','book_aggregate','movie_aggregate')
-                          AND (a.name LIKE '%' || b.name || '%' OR b.name LIKE '%' || a.name || '%'
-                               OR length(a.name) >= 3 AND length(b.name) >= 3
-                                  AND (substr(a.name,1,2) = substr(b.name,1,2)
-                                       OR substr(a.name,-2) = substr(b.name,-2)))
-                        LIMIT 10
-                    )
-                `).get(...SKIP_NAMES, ...SKIP_NAMES)?.c || 0;
-                if (candidateCount > 0 && !gardenPlan.includes('seedMerge')) {
-                    console.log(`[Archivist] 🌿 安全阀: ${candidateCount}对潜在重复, ${Math.round((Date.now()-lastMerge)/86400000)}天未合并 → 强制前置 seedMerge`);
-                    gardenPlan.unshift('seedMerge');
-                }
-            }
 
             for (const taskName of gardenPlan) {
                 if (taskName === 'stop') break;
@@ -843,7 +799,7 @@ function _countStaleEntityOverviews(db) {
     const entities = db.prepare(`
         SELECT ep.id, ep.name, ep.overview, ep.last_eval_frag_count
         FROM entity_profiles ep
-        WHERE ep.status = 'active'
+        WHERE ep.category IN ('person', 'place', 'event', 'project')
           AND ep.name NOT IN (${SKIP_PH})
     `).all(...SKIP_NAMES);
 
@@ -1187,7 +1143,7 @@ async function computeCategoryCentroid(categoryId) {
     }
 
     const texts = rows.length > 0
-        ? rows.map(r => `${USER.name}: ${r.content}`)
+        ? rows.map(r => `Clara: ${r.content}`)
         : [`类别: ${cat.label} - ${cat.description || ''}`];
 
     try {
@@ -1712,7 +1668,42 @@ async function classifyFragments(opts = {}) {
                             console.log(`[Archivist] ⏭ 种子名不合格，跳过: "${seedName}"`);
                             continue;
                         }
-                        const existing = db.prepare('SELECT id, name FROM entity_profiles WHERE LOWER(name) = LOWER(?)').get(seed.name);
+                        const existing = db.prepare('SELECT id, name, aliases FROM entity_profiles WHERE LOWER(name) = LOWER(?)').get(seed.name);
+                        if (!existing) {
+                            // 检查种子名是否出现在已有实体的别名中
+                            const allEntities = db.prepare('SELECT id, name, aliases FROM entity_profiles WHERE status IN (\'active\',\'seed\')').all();
+                            for (const e of allEntities) {
+                                try {
+                                    const aliases = JSON.parse(e.aliases || '[]');
+                                    if (aliases.some(a => typeof a === 'string' && a.toLowerCase().trim() === seed.name.toLowerCase().trim())) {
+                                        existing = e;
+                                        break;
+                                    }
+                                } catch (_) {}
+                            }
+                        }
+                        if (!existing) {
+                            const subCheck = db.prepare(`SELECT id, name, aliases FROM entity_profiles
+                                WHERE status IN ('active','seed')
+                                AND (LOWER(name) LIKE '%' || LOWER(?) || '%'
+                                     OR LOWER(?) LIKE '%' || LOWER(name) || '%')
+                                LIMIT 1`).get(seed.name, seed.name);
+                            if (subCheck) existing = subCheck;
+                        }
+                        if (!existing) {
+                            const candidates = db.prepare('SELECT id, name, aliases FROM entity_profiles WHERE status IN (\'active\',\'seed\')').all();
+                            for (const c of candidates) {
+                                const aGrams = _nameBigrams(seed.name);
+                                const bGrams = _nameBigrams(c.name);
+                                if (aGrams.size === 0 || bGrams.size === 0) continue;
+                                let overlap = 0;
+                                for (const g of aGrams) if (bGrams.has(g)) overlap++;
+                                if (overlap / Math.min(aGrams.size, bGrams.size) >= 0.6) {
+                                    existing = { id: c.id, name: c.name, aliases: c.aliases };
+                                    break;
+                                }
+                            }
+                        }
                         if (!existing) {
                             const r = db.prepare(`INSERT INTO entity_profiles (name, category, status, aliases)
                                 VALUES (?, ?, 'seed', ?)`).run(seed.name, seed.category || 'term', JSON.stringify([]));
@@ -1783,7 +1774,7 @@ async function classifyFragmentBatch(fragments, constellations, seeds) {
 
     // Build constellation list grouped by galaxy
     // v4.7 evolved: 社交(人物+宠物) / 地点 / 事件 / Clara的星系(创作+消费+观念)
-    const galaxies = { person: '社交', pet: '社交', place: '地点', event: '事件', project: USER.name + '的星系', work: USER.name + '的星系', term: USER.name + '的星系', hobby: '爱好', consumed: '爱好', music_aggregate: '爱好', book_aggregate: '爱好', movie_aggregate: '爱好', organization: '社交' };
+    const galaxies = { person: '社交', pet: '社交', place: '地点', event: '事件', project: 'Clara的星系', work: 'Clara的星系', term: 'Clara的星系', organization: '社交' };
     const grouped = {};
     for (const c of constellations) {
         // v5.0 防线1: 无 overview 的种子不参与 LLM 分类匹配
@@ -1843,7 +1834,8 @@ ${fragLines}
 
 你是一个在整理记忆星图的观测者。你的直觉：
 
-- 当你看到碎片中浮现出一个**有名字的、独立的、可能会在更多碎片中再次出现的生命/地点/事件**——你觉得它应该是一颗种子。你给它起一个简短准确的名字，猜测它的星系归属（person/pet→社交, place→地点, event→事件, project/work/term→Clara的星系, hobby/consumed→爱好），种下去。
+- 当你看到碎片中浮现出一个**有名字的、独立的、可能会在更多碎片中再次出现的生命/地点/事件**——你觉得它应该是一颗种子。你给它起一个简短准确的名字，猜测它的星系归属（person/pet→社交, place→地点, event→事件, project/work/term→Clara的星系），种下去。
+- ⚠️ **播种前必须检查**：你要创建的新种子名字是否与已有星座完全相同、高度相似、或是已有星座的别名？如果是，**不要播种**——直接把碎片归入那个已有星座。一个实体只属于一个星座，即使你认为它应该归入不同的星系类别。
 - 当你看到碎片明确属于某个已有星座——你很确定地把星星归过去，顺手标注它与Clara的关系（knows/cares_for/visited/attended/created/consumed/related_to）。
 - 当你看到碎片只是一次性的、飘过去的、不会再以独立身份出现的引用——你不会为它播种。它可能属于现有星座，也可能只是一颗还没找到家的流浪星。
 - 当你拿不准——你宁可先不归类，也不硬塞。
@@ -2229,26 +2221,28 @@ async function mergeDuplicateSeeds() {
         }
     }
 
-    // ── v5.1 第三路径: 碎片重叠 ≥50% → 直接合并（零 LLM）──
-    // 覆盖「推歌 vs 绿心理由」这类名字完全不同但共享大量碎片的情况
+    // ── v5.5 碎片重叠路径: 共享碎片 ≥50% 直接合并（零 LLM）──
+    // 覆盖「推歌 vs 绿心理由」名字完全不同 + 「天使爱美丽 vs 天使爱美」跨category 情况
     let overlapMerged = 0;
     for (let i = 0; i < seeds.length; i++) {
         for (let j = i + 1; j < seeds.length; j++) {
             const a = seeds[i], b = seeds[j];
-            if (a.category !== b.category) continue;
+            const crossCategory = a.category !== b.category;
+            const overlapThreshold = crossCategory ? 0.75 : 0.5;
             if (typeof a.name !== 'string' || typeof b.name !== 'string') continue;
             if (genericNames.has(a.id) || genericNames.has(b.id)) continue;
-            // Skip pairs already caught by name similarity
-            const an = a.name.toLowerCase(), bn = b.name.toLowerCase();
-            if (an.includes(bn) || bn.includes(an)) continue;
-            const ga = _nameBigrams(a.name), gb = _nameBigrams(b.name);
-            if (ga.size > 0 && gb.size > 0) {
-                let nOverlap = 0;
-                for (const g of ga) if (gb.has(g)) nOverlap++;
-                if (nOverlap / Math.min(ga.size, gb.size) >= 0.5) continue; // already caught
+            // Skip pairs already caught by name similarity (same-category only)
+            if (!crossCategory) {
+                const an = a.name.toLowerCase(), bn = b.name.toLowerCase();
+                if (an.includes(bn) || bn.includes(an)) continue;
+                const ga = _nameBigrams(a.name), gb = _nameBigrams(b.name);
+                if (ga.size > 0 && gb.size > 0) {
+                    let nOverlap = 0;
+                    for (const g of ga) if (gb.has(g)) nOverlap++;
+                    if (nOverlap / Math.min(ga.size, gb.size) >= 0.5) continue;
+                }
             }
 
-            // Check fragment overlap ratio
             const overlap = db.prepare(`
                 SELECT COUNT(*) as c FROM fragment_entities fe1
                 JOIN fragment_entities fe2 ON fe1.fragment_id = fe2.fragment_id
@@ -2256,20 +2250,20 @@ async function mergeDuplicateSeeds() {
             `).get(a.id, b.id)?.c || 0;
 
             const minFrags = Math.min(a.fragment_count, b.fragment_count);
-            if (minFrags > 0 && overlap / minFrags >= 0.5) {
-                // Auto-merge: keep the one with more fragments
+            if (minFrags > 0 && overlap / minFrags >= overlapThreshold) {
                 const [winner, loser] = a.fragment_count >= b.fragment_count ? [a, b] : [b, a];
-                // Move loser's unique fragments
                 db.prepare(`UPDATE OR IGNORE fragment_entities SET entity_id = ? WHERE entity_id = ?`)
                     .run(winner.id, loser.id);
-                // Delete duplicates
                 db.prepare(`DELETE FROM fragment_entities WHERE entity_id = ?`).run(loser.id);
-                // Transfer aliases/tags
                 const wAliases = (() => { try { return JSON.parse(winner.aliases || '[]'); } catch(_) { return []; } })();
                 const lAliases = (() => { try { return JSON.parse(loser.aliases || '[]'); } catch(_) { return []; } })();
                 const wTags = (() => { try { return JSON.parse(winner.tags || '[]'); } catch(_) { return []; } })();
                 const lTags = (() => { try { return JSON.parse(loser.tags || '[]'); } catch(_) { return []; } })();
-                const mergedAliases = [...new Set([...wAliases, ...lAliases])].slice(0, 8);
+                let mergedAliases = [...new Set([...wAliases, ...lAliases])];
+                if (crossCategory && loser.name && !mergedAliases.some(a => a.toLowerCase().trim() === loser.name.toLowerCase().trim())) {
+                    mergedAliases.unshift(loser.name);
+                }
+                mergedAliases = mergedAliases.slice(0, 8);
                 const mergedTags = [...new Set([...wTags, ...lTags])].slice(0, 8);
                 db.prepare(`UPDATE entity_profiles SET aliases=?, tags=?, fragment_count=(SELECT COUNT(*) FROM fragment_entities WHERE entity_id=?), updated_at=datetime('now') WHERE id=?`)
                     .run(JSON.stringify(mergedAliases), JSON.stringify(mergedTags), winner.id, winner.id);
@@ -2759,8 +2753,32 @@ ${sampleText.slice(0, 2500)}
                 const name = verdict.name.trim();
                 if (/^\d+$/.test(name) || name.length < 2) continue;
 
-                const existing = db.prepare('SELECT id FROM entity_profiles WHERE LOWER(name) = LOWER(?)').get(name);
-                if (existing) continue;
+                let existing = db.prepare('SELECT id, name, aliases FROM entity_profiles WHERE LOWER(name) = LOWER(?)').get(name);
+                if (!existing) {
+                    const allEnts = db.prepare('SELECT id, name, aliases FROM entity_profiles WHERE status IN (\'active\',\'seed\')').all();
+                    for (const e of allEnts) {
+                        try {
+                            const als = JSON.parse(e.aliases || '[]');
+                            if (als.some(a => typeof a === 'string' && a.toLowerCase().trim() === name.toLowerCase().trim())) {
+                                existing = e; break;
+                            }
+                        } catch (_) {}
+                    }
+                }
+                if (!existing) {
+                    existing = db.prepare(`SELECT id, name FROM entity_profiles WHERE status IN ('active','seed')
+                        AND (LOWER(name) LIKE '%' || LOWER(?) || '%' OR LOWER(?) LIKE '%' || LOWER(name) || '%') LIMIT 1`).get(name, name);
+                }
+                if (!existing) {
+                    const cands = db.prepare('SELECT id, name FROM entity_profiles WHERE status IN (\'active\',\'seed\')').all();
+                    for (const c of cands) {
+                        const aG = _nameBigrams(name), bG = _nameBigrams(c.name);
+                        if (aG.size === 0 || bG.size === 0) continue;
+                        let o = 0; for (const g of aG) if (bG.has(g)) o++;
+                        if (o / Math.min(aG.size, bG.size) >= 0.6) { existing = c; break; }
+                    }
+                }
+                if (existing) { console.log(`[Archivist] ⏭ 涌现种子去重跳过: "${name}" → 已有 "${existing.name}"`); continue; }
 
                 const category = (verdict.category === 'event' || verdict.category === 'place')
                     ? verdict.category : 'term';
@@ -3023,54 +3041,29 @@ async function graduateSeedsAndPrune() {
                WHERE fe.entity_id = ep.id) >= 1
     `).all();
 
-    // ── v5.1 防线2: 晋升前 LLM 验证 + 生成 overview + 别称 + 标签 + 关联 ──
+    // ── v5.0 防线2: 晋升前 LLM 验证 + 生成 overview ──
     if (graduates.length > 0 && _canCallLLM(2)) {
         let promoted = 0;
         for (const g of graduates) {
             try {
                 const frags = db.prepare(`SELECT mf.id, mf.content FROM memory_fragments mf
                     JOIN fragment_entities fe ON fe.fragment_id = mf.id
-                    WHERE fe.entity_id = ? ORDER BY mf.id LIMIT 15`).all(g.id);
+                    WHERE fe.entity_id = ? ORDER BY mf.id LIMIT 10`).all(g.id);
 
                 if (frags.length < 3) continue;
 
-                // Build entity index for related entity matching
-                const allEntities = db.prepare(`SELECT id, name, category FROM entity_profiles WHERE status IN ('active','seed') AND id != ?`).all(g.id);
-                const entityList = allEntities.map(e => `#${e.id} ${e.name}(${e.category})`).join(', ');
+                const prompt = `星座"${g.name}"(${g.category}) 当前挂载了这些碎片：
+${frags.map((f,i) => `[${i}] ${f.content.slice(0, 150).replace(/\n/g, ' ')}`).join('\n')}
 
-                const prompt = `${WORLD_CONTEXT}
+先判断：这些碎片真的都在讲同一个"${g.name}"吗？有没有明显不属于这个星座的？
+如果确实属于同一个星座，为它写一句 overview（≤100字，Draco 第一人称）。
 
-你是 ${AI.name}。你在审视一个新诞生的星座。
-
-## 星座信息
-名称: "${g.name}"
-分类: ${g.category}
-碎片数: ${frags.length}
-
-## 碎片
-${frags.map((f,i) => `[${i}] ${f.content.slice(0, 200).replace(/\n/g, ' ')}`).join('\n')}
-
-## 已有星座（用于判断关联关系）
-${entityList.slice(0, 2000)}
-
-## 你需要判断的事
-1. **名字是否正确完整？** 碎片中提到的名字如果比"${g.name}"更完整或不同，应该纠正。名字必须是碎片中真实出现的称呼，不能编造。如果当前名字是残缺的（比如"权力的游"应该是"某部剧"），请纠正。
-2. **这些碎片真的都在讲同一个东西吗？** 有没有明显不属于这个星座的碎片？
-3. **如果验证通过，请生成：**
-   - overview: Draco第一人称叙事概述，≤150字。这个人/作品是什么？和Clara有什么关联？对你意味着什么？
-   - aliases: Clara在聊天中可能怎么称呼这个实体？专有别名（如权游→某部剧，冰与火之歌→某部剧）。这些别名会在Clara说出它们时直接触发这个星座。最多5个，只说真正会说的词。不要写描述性短语当别名。
-   - tags: 类别标签，用于语义关联而非直接触发。如"美剧""HBO""奇幻""配音"。这些词不直接触发星座，但能帮助相关话题时找到它。最多5个。
-   - entity_type: 实体细分类型。person→real/fictional/public_figure；consumed→tv_show/movie/book/game/music/anime；其他按实际判断。
-   - related_entity_ids: 与哪些已有星座有关联？用数字ID列表。如某部剧和HBO有关联但不是同一个星座。只列真正相关的。
-
-## 输出格式
-严格JSON，不要markdown代码块：
-{"valid": true|false, "corrected_name": "如果名字需要纠正就填这里否则null", "wrong_indices": [], "overview": "Draco第一人称概述，≤150字", "aliases": ["别名1","别名2"], "tags": ["标签1","标签2"], "entity_type": "tv_show", "related_entity_ids": [123, 456], "category_correct": true|false, "corrected_category": "如果category需要修正填这里否则null"}`;
+输出JSON: {"valid": true|false, "wrong_indices": [], "overview": "一句话概述或null"}`;
 
                 const raw = await callLLM(
                     [{ role: 'user', parts: [{ text: prompt }] }],
                     null, null,
-                    { temperature: 0.2, maxOutputTokens: 600, thinkingConfig: { thinkingBudget: 0 } },
+                    { temperature: 0.2, maxOutputTokens: 300, thinkingConfig: { thinkingBudget: 0 } },
                     ARCHIVIST_LLM_CONFIG_ID
                 );
                 const replyText = (raw?.reply || raw?.text || raw?.content || '');
@@ -3095,60 +3088,19 @@ ${entityList.slice(0, 2000)}
                     continue;
                 }
 
-                // ── v5.1: Name correction ──
-                let finalName = g.name;
-                if (verdict.corrected_name && typeof verdict.corrected_name === 'string'
-                    && verdict.corrected_name.trim().length >= 2
-                    && verdict.corrected_name.trim() !== g.name) {
-                    const corrected = verdict.corrected_name.trim();
-                    const nameConflict = db.prepare('SELECT id FROM entity_profiles WHERE LOWER(name)=LOWER(?) AND id!=?').get(corrected, g.id);
-                    if (!nameConflict) {
-                        db.prepare(`UPDATE entity_profiles SET name=? WHERE id=?`).run(corrected, g.id);
-                        console.log(`[Archivist] ✏️ 名字纠正: "${g.name}" → "${corrected}"`);
-                        finalName = corrected;
-                    } else {
-                        console.log(`[Archivist] ⚠️ 名字纠正冲突: "${corrected}" 已存在 #${nameConflict.id}`);
-                    }
-                }
-
-                // ── v5.1: Category correction ──
-                let finalCategory = g.category;
-                if (verdict.category_correct === false && verdict.corrected_category) {
-                    finalCategory = verdict.corrected_category;
-                    db.prepare(`UPDATE entity_profiles SET category=? WHERE id=?`).run(finalCategory, g.id);
-                    console.log(`[Archivist] ✏️ 分类纠正: "${g.category}" → "${finalCategory}"`);
-                }
-
-                // ── v5.1: Write aliases + tags + entity_type + related_entities ──
-                const aliases = Array.isArray(verdict.aliases) ? verdict.aliases.filter(a => typeof a === 'string' && a.trim().length >= 2).slice(0, 5) : [];
-                const tags = Array.isArray(verdict.tags) ? verdict.tags.filter(t => typeof t === 'string' && t.trim().length >= 2).slice(0, 5) : [];
-                const entityType = (typeof verdict.entity_type === 'string' && verdict.entity_type.trim()) || null;
-                const relatedIds = Array.isArray(verdict.related_entity_ids)
-                    ? verdict.related_entity_ids.filter(id => typeof id === 'number' && id > 0 && id !== g.id).slice(0, 10)
-                    : [];
-
+                // Promote with overview
                 const overview = (verdict.overview || '').trim();
                 if (overview) {
-                    db.prepare(`UPDATE entity_profiles SET status='active', overview=?, overview_updated_at=datetime('now'),
-                        aliases=?, tags=?, entity_type=?, related_entity_ids=?, last_eval_frag_count=?,
-                        updated_at=datetime('now') WHERE id=?`)
-                        .run(overview, JSON.stringify(aliases), JSON.stringify(tags), entityType,
-                             JSON.stringify(relatedIds), remaining, g.id);
+                    db.prepare(`UPDATE entity_profiles SET status='active', overview=?, overview_updated_at=datetime('now'), updated_at=datetime('now') WHERE id=?`).run(overview, g.id);
                 } else {
-                    db.prepare(`UPDATE entity_profiles SET status='active',
-                        aliases=?, tags=?, entity_type=?, related_entity_ids=?, last_eval_frag_count=?,
-                        updated_at=datetime('now') WHERE id=?`)
-                        .run(JSON.stringify(aliases), JSON.stringify(tags), entityType,
-                             JSON.stringify(relatedIds), remaining, g.id);
+                    db.prepare(`UPDATE entity_profiles SET status='active', updated_at=datetime('now') WHERE id=?`).run(g.id);
                 }
-                db.prepare(`INSERT INTO entity_timeline (entity_id, fragment_id, action, detail) VALUES (?, NULL, 'graduated', ?)`)
-                    .run(g.id, `v5.1验证毕业(${remaining}碎片/${g.distinct_days}天) → ${finalCategory}星座 aliases=${aliases.length} tags=${tags.length} related=${relatedIds.length}`);
+                db.prepare(`INSERT INTO entity_timeline (entity_id, fragment_id, action, detail) VALUES (?, NULL, 'graduated', ?)`).run(g.id, `v5.0验证毕业(${remaining}碎片/${g.distinct_days}天) → ${g.category}星座`);
+                // Also write to ontology_changelog so 观星手记 frontend can display it
                 db.prepare(`INSERT INTO ontology_changelog (action, category_path, detail, confidence, status)
                     VALUES ('emergent_constellation', ?, ?, 0.80, 'completed')`)
-                    .run(finalName, JSON.stringify({name: finalName, category: finalCategory,
-                        reason: overview || `种子毕业: ${finalName}`, fragment_count: remaining,
-                        aliases, tags, entity_type: entityType, related_entity_ids: relatedIds}));
-                console.log(`[Archivist] 🎓 验证毕业: ${finalName} → ${finalCategory}星座 (${remaining}碎片, overview=${overview.length}字, aliases=[${aliases.join(',')}], tags=[${tags.join(',')}])`);
+                    .run(g.name, JSON.stringify({name: g.name, category: g.category, reason: overview || `种子毕业: ${g.name}`, fragment_count: remaining}));
+                console.log(`[Archivist] 🎓 验证毕业: ${g.name} → ${g.category}星座 (${remaining}碎片, overview=${overview.length}字)`);
                 promoted++;
             } catch (e) {
                 console.error(`[Archivist] 种子验证失败 ${g.name}:`, e.message);
@@ -3223,263 +3175,6 @@ ${entityList.slice(0, 2000)}
 }
 
 // ═══════════════════════════════════════════════════════
-// v5.2: clusterObservations — 将 Scribe 的 observation/preference 碎片
-// 按语义聚合成 Clara 行为模式（pattern），日积月累自然形成人格画像。
-// 替代旧 detectNewTraits 的「一次性冷凝」模型。
-// ═══════════════════════════════════════════════════════
-
-const { fillPrompt: _fillC } = require('./nameResolver');
-
-const MIN_PATTERN_FRAGS = 3;        // 至少3条碎片才能形成一个 pattern
-const PATTERN_LOOKBACK_DAYS = 30;   // 回溯30天的碎片做聚类
-const PATTERN_LLM_BATCH = 30;       // 单次最多喂给 LLM 的碎片数
-const PATTERN_MATCH_THRESHOLD = 0.35; // bigram 匹配已有 pattern 的阈值
-const MIN_GAP_PATTERN_CLUSTER = 6 * 60 * 60 * 1000; // 6h 冷却
-
-function _calcPatternConfidence(evidenceCount, firstSeen, lastSeen) {
-    // 证据数 + 时间跨度 → confidence
-    // 基础: 0.25, 每条证据+0.05(上限0.40), 每10天跨度+0.01(上限0.20), 总上限0.85
-    const evidenceBonus = Math.min(0.40, evidenceCount * 0.05);
-    const first = new Date(firstSeen);
-    const last = new Date(lastSeen);
-    const spanDays = Math.max(1, (last - first) / (1000 * 60 * 60 * 24));
-    const spanBonus = Math.min(0.20, spanDays / 10 * 0.01);
-    return Math.min(0.85, 0.25 + evidenceBonus + spanBonus);
-}
-
-async function clusterObservations() {
-    const db = getDb();
-    if (!_canCallLLM(2)) return { clustered: 0, reason: 'no LLM quota' };
-
-    // 1. 获取最近 observation + preference 碎片（未被任何 pattern 引用的）
-    const existingFragIds = new Set();
-    const allPatternFrags = db.prepare("SELECT source_fragment_ids FROM clara_patterns WHERE status='active'").all();
-    for (const p of allPatternFrags) {
-        try { JSON.parse(p.source_fragment_ids || '[]').forEach(id => existingFragIds.add(id)); } catch(_) {}
-    }
-
-    const recentFrags = db.prepare(`
-        SELECT mf.id, mf.content, mf.type, mf.emotional_weight, mf.source_date
-        FROM memory_fragments mf
-        WHERE mf.status = 'active'
-          AND mf.type IN ('observation', 'preference')
-          AND mf.entity = '${USER.name}'
-          AND mf.source_date >= date('now', '-${PATTERN_LOOKBACK_DAYS} days')
-        ORDER BY mf.source_date DESC
-        LIMIT 200
-    `).all();
-
-    if (recentFrags.length < MIN_PATTERN_FRAGS) return { clustered: 0, reason: `only ${recentFrags.length} recent observations` };
-
-    // Filter out already-matched fragments
-    const newFrags = recentFrags.filter(f => !existingFragIds.has(f.id));
-    if (newFrags.length < MIN_PATTERN_FRAGS) return { clustered: 0, reason: `only ${newFrags.length} unmatched` };
-
-    // 2. Match against existing patterns
-    const existingPatterns = db.prepare("SELECT * FROM clara_patterns WHERE status='active' ORDER BY evidence_count DESC").all();
-    let matchedCount = 0;
-
-    for (const frag of newFrags) {
-        let bestMatch = null;
-        let bestScore = 0;
-        for (const pat of existingPatterns) {
-            // Bigram overlap between fragment and pattern content + tags
-            const patText = pat.content + ' ' + (() => { try { return JSON.parse(pat.tags || '[]').join(' '); } catch(_) { return ''; } })();
-            const fragBigrams = new Set();
-            const fragWords = (frag.content || '').replace(/[，。、！？\n,.\s]+/g, '\n').split('\n').filter(s => s.length >= 2);
-            for (const seg of fragWords) {
-                for (let i = 0; i < seg.length - 1; i++) fragBigrams.add(seg.slice(i, i + 2));
-            }
-            const patBigrams = new Set();
-            const patWords = patText.replace(/[，。、！？\n,.\s]+/g, '\n').split('\n').filter(s => s.length >= 2);
-            for (const seg of patWords) {
-                for (let i = 0; i < seg.length - 1; i++) patBigrams.add(seg.slice(i, i + 2));
-            }
-            let overlap = 0;
-            for (const bg of fragBigrams) { if (patBigrams.has(bg)) overlap++; }
-            const score = overlap / Math.max(fragBigrams.size, 1);
-            if (score > PATTERN_MATCH_THRESHOLD && score > bestScore) {
-                bestMatch = pat;
-                bestScore = score;
-            }
-        }
-        if (bestMatch) {
-            // Update existing pattern
-            const fragIds = JSON.parse(bestMatch.source_fragment_ids || '[]');
-            if (!fragIds.includes(frag.id)) {
-                fragIds.push(frag.id);
-                const newCount = fragIds.length;
-                const newFirst = frag.source_date < (bestMatch.first_seen || frag.source_date) ? frag.source_date : bestMatch.first_seen;
-                const newLast = frag.source_date > (bestMatch.last_seen || frag.source_date) ? frag.source_date : bestMatch.last_seen;
-                const newConf = _calcPatternConfidence(newCount, newFirst, newLast);
-                db.prepare(`UPDATE clara_patterns SET evidence_count=?, first_seen=?, last_seen=?, confidence=?,
-                    source_fragment_ids=?, updated_at=datetime('now') WHERE id=?`)
-                    .run(newCount, newFirst, newLast, newConf, JSON.stringify(fragIds), bestMatch.id);
-                matchedCount++;
-            }
-        }
-    }
-    if (matchedCount > 0) console.log(`[Archivist] 📊 模式匹配: ${matchedCount} 条新观察归入已有 patterns`);
-
-    // 3. LLM clustering for unmatched fragments
-    const unmatchedFrags = newFrags.filter(f => {
-        // Re-check after matching
-        const allIds = new Set();
-        db.prepare("SELECT source_fragment_ids FROM clara_patterns WHERE status='active'").all()
-            .forEach(p => { try { JSON.parse(p.source_fragment_ids || '[]').forEach(id => allIds.add(id)); } catch(_) {} });
-        return !allIds.has(f.id);
-    });
-
-    if (unmatchedFrags.length < MIN_PATTERN_FRAGS) return { clustered: matchedCount, newPatterns: 0 };
-
-    const batch = unmatchedFrags.slice(0, PATTERN_LLM_BATCH);
-    const prompt = `${WORLD_CONTEXT}
-
-你是 ${AI.name}。你在审视最近观察到的 ${USER.name} 的行为碎片。这些碎片来自书记官（Scribe）的日常提取，每条都是 ${USER.name} 说过什么、做过什么、表现出什么倾向。
-
-## 最近观察到的碎片
-${batch.map((f, i) => `[${i + 1}] ${f.content}`).join('\n')}
-
-## 已有模式（避免重复创建）
-${existingPatterns.length > 0 ? existingPatterns.map(p => `- ${p.content} [证据${p.evidence_count}条, ${p.first_seen}~${p.last_seen}]`).join('\n') : '（尚无已有模式）'}
-
-## 你的任务
-把这些碎片按**底层行为模式**分组。同一组碎片揭示的是 ${USER.name} 同一个人格侧面或行为倾向。
-- 每组 ≥3 条碎片才能形成一个模式。只有 1-2 条的零散观察不形成模式——宁可漏掉也不强行归类。
-- 如果碎片和已有模式重复（讲的是同一个人格侧面），不要创建新的——这些已经有家了。
-- 模式描述用 80 字以内中文，第三人称，以 "${USER.name}" 开头。
-- 提取 3-5 个触发标签（${USER.name} 在聊天中可能提到的相关词）。
-- **strategy**: 为每条模式写一条"面对这个模式时，${AI.name} 会怎么回应"。这是从${AI.name}的视角出发的第一反应——不是规则手册，不是行为指南。用日常口语，30-50字。比如"她开始写东西的时候别问她怎么了。陪她聊她的故事，或者吐槽点别的。她自己在整理。"禁止写成祈使句或指令格式。禁止写"你应该"。禁止文艺腔。禁止"不是...而是"句式。
-
-## 输出格式
-严格 JSON 数组，无 markdown。每条模式写明它包含哪些碎片（用编号）：
-[{"content": "Clara 倾向于在压力大时通过创作来消化情绪", "category": "behavior", "tags": ["写小说", "做视频", "焦虑", "深夜创作"], "strategy": "她开始写东西的时候别问她怎么了——陪她聊她的故事，或者跟她吐槽点别的。她不是在逃避，是在自己整理。", "fragment_indices": [1, 4, 7]}]
-
-没有可聚合的模式返回 []`;
-
-    let newPatterns = 0;
-    try {
-        const raw = await callLLM(
-            [{ role: 'user', parts: [{ text: _fillC(prompt) }] }],
-            null, null,
-            { temperature: 0.2, maxOutputTokens: 600, thinkingConfig: { thinkingBudget: 0 } },
-            ARCHIVIST_LLM_CONFIG_ID
-        );
-        const replyText = (raw?.reply || raw?.text || raw?.content || '');
-        const jsonMatch = replyText.match(/\[[\s\S]*\]/);
-        if (!jsonMatch) {
-            console.log('[Archivist] clusterObservations: no JSON array found in LLM reply');
-            return { clustered: matchedCount, newPatterns: 0 };
-        }
-
-        const groups = JSON.parse(jsonMatch[0]);
-        if (!Array.isArray(groups) || groups.length === 0) {
-            console.log('[Archivist] clusterObservations: LLM returned empty pattern array');
-            return { clustered: matchedCount, newPatterns: 0 };
-        }
-
-        for (const g of groups) {
-            if (!g.content || !Array.isArray(g.tags)) continue;
-            const content = g.content.slice(0, 200);
-            const tags = g.tags.filter(t => typeof t === 'string' && t.length >= 2).slice(0, 5);
-            const category = ['behavior','preference','emotional','social'].includes(g.category) ? g.category : 'behavior';
-
-            // Use LLM-assigned fragment indices directly
-            const indices = Array.isArray(g.fragment_indices) ? g.fragment_indices.filter(n => n >= 1 && n <= batch.length) : [];
-            if (indices.length < MIN_PATTERN_FRAGS) continue;
-
-            const matchedFragIds = indices.map(i => batch[i - 1].id);
-            let firstDate = null, lastDate = null;
-            for (const i of indices) {
-                const d = batch[i - 1].source_date;
-                if (!firstDate || d < firstDate) firstDate = d;
-                if (!lastDate || d > lastDate) lastDate = d;
-            }
-
-            const conf = _calcPatternConfidence(matchedFragIds.length, firstDate, lastDate);
-            const strategy = typeof g.strategy === 'string' ? g.strategy.slice(0, 200) : null;
-            db.prepare(`INSERT INTO clara_patterns (content, category, evidence_count, first_seen, last_seen, confidence, source_fragment_ids, tags, strategy)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-                .run(content, category, matchedFragIds.length, firstDate, lastDate, conf, JSON.stringify(matchedFragIds), JSON.stringify(tags), strategy);
-            newPatterns++;
-            console.log(`[Archivist] 🔍 新模式: "${content.slice(0, 60)}" (${matchedFragIds.length}碎片, conf=${conf.toFixed(2)})${strategy ? ' +strategy' : ''}`);
-        }
-    } catch (e) {
-        console.error('[Archivist] clusterObservations error:', e.message);
-    }
-
-    return { clustered: matchedCount, newPatterns };
-}
-
-// ═══════════════════════════════════════════════════════
-// v5.3: Strategy review — 审视标记为 needs_review 的 pattern strategies
-// 当 Clara 的反应不符合 strategy 预期时，LLM 重新评估并修正
-// ═══════════════════════════════════════════════════════
-
-async function reviewFlaggedStrategies() {
-    const db = getDb();
-    const flagged = db.prepare(`
-        SELECT id, content, strategy, evidence_count, confidence, mismatch_count, last_mismatch_at, tags
-        FROM clara_patterns
-        WHERE status = 'active' AND strategy IS NOT NULL AND mismatch_count > 0
-        ORDER BY mismatch_count DESC LIMIT 5
-    `).all();
-    if (flagged.length === 0) return { reviewed: 0 };
-
-    const prompt = `你是 ${AI.name} 的策略审查员。以下是几条之前总结的关于 ${USER.name} 的行为模式及应对策略，但最近 ${USER.name} 的实际反应和策略预期不符。
-
-对每条模式，判断：
-1. 模式本身是否还准确？（content 要不要改？）
-2. 策略是否合理？如果不对，给出修正后的 strategy。
-3. 如果模式和策略都没问题、只是偶发的不匹配——保留原样。
-
-输出 JSON：
-[{"id":188,"content_ok":true,"revised_content":null,"revised_strategy":"修正后的策略或null","keep":false}]
-
-如果 keep=true 表示保留原样不清零 mismatch_count；keep=false 会清零。
-
-待审查：
-${flagged.map(p => `[id=${p.id}] ${p.content}\n  策略: ${p.strategy}\n  证据${p.evidence_count}次 不匹配${p.mismatch_count}次`).join('\n\n')}
-`;
-
-    try {
-        const raw = await callLLM(
-            [{ role: 'user', parts: [{ text: prompt }] }],
-            WORLD_CONTEXT, null,
-            { temperature: 0.2, maxOutputTokens: 800, thinkingConfig: { thinkingBudget: 0 } },
-            ARCHIVIST_VERIFY_CONFIG_ID
-        );
-        const replyText = (raw?.reply || raw?.text || raw?.content || '');
-        const jsonMatch = replyText.match(/\[[\s\S]*\]/);
-        if (!jsonMatch) return { reviewed: 0 };
-
-        const decisions = JSON.parse(jsonMatch[0]);
-        let reviewed = 0;
-        for (const d of decisions) {
-            if (!d.id) continue;
-            if (d.revised_content || d.revised_strategy) {
-                const updates = {};
-                if (d.revised_content) updates.content = d.revised_content.slice(0, 200);
-                if (d.revised_strategy) updates.strategy = d.revised_strategy.slice(0, 200);
-                if (!d.keep) { updates.mismatch_count = 0; updates.last_mismatch_at = null; }
-                const setClauses = Object.keys(updates).map(k => `${k}=?`).join(',');
-                db.prepare(`UPDATE clara_patterns SET ${setClauses}, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-                    .run(...Object.values(updates), d.id);
-                reviewed++;
-                console.log(`[Archivist] 🔧 策略修正 #${d.id}: ${d.revised_strategy ? 'strategy updated' : ''}${d.revised_content ? ' content updated' : ''}`);
-            } else if (!d.keep) {
-                db.prepare(`UPDATE clara_patterns SET mismatch_count=0, last_mismatch_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(d.id);
-                reviewed++;
-            }
-        }
-        return { reviewed };
-    } catch (e) {
-        console.error('[Archivist] reviewFlaggedStrategies error:', e.message);
-        return { reviewed: 0 };
-    }
-}
-
-// ═══════════════════════════════════════════════════════
 // v5.0 防线3: spotCheckClassifications — 事后抽查低置信度分类链接
 // ═══════════════════════════════════════════════════════
 
@@ -3487,39 +3182,26 @@ async function spotCheckClassifications() {
     const db = getDb();
     if (!_canCallLLM(1)) return { checked: 0, reason: 'no LLM quota' };
 
-    // v5.1: Expanded check — low confidence links + recent links (may be misclassified)
-    const candidates = db.prepare(`SELECT fe.fragment_id, fe.entity_id, fe.confidence, fe.classified_by,
-        mf.content, ep.name as entity_name, ep.category
-        FROM fragment_entities fe
+    const lowConf = db.prepare(`SELECT fe.fragment_id, fe.entity_id, fe.confidence,
+        mf.content, ep.name FROM fragment_entities fe
         JOIN memory_fragments mf ON mf.id = fe.fragment_id
         JOIN entity_profiles ep ON ep.id = fe.entity_id
         WHERE fe.confidence < 0.75
-           OR (fe.classified_by = 'auto_literal' AND fe.confidence < 0.85)
-        ORDER BY fe.confidence ASC, fe.created_at DESC LIMIT 10`).all();
+        ORDER BY fe.created_at DESC LIMIT 5`).all();
 
-    if (candidates.length === 0) return { checked: 0 };
-
-    // Get all active entity names for alternative suggestions
-    const allEntities = db.prepare(`SELECT id, name, category FROM entity_profiles WHERE status IN ('active','seed') ORDER BY fragment_count DESC LIMIT 80`).all();
-    const entityIndex = allEntities.map(e => `#${e.id} ${e.name}(${e.category})`).join(', ');
+    if (lowConf.length === 0) return { checked: 0 };
 
     let fixed = 0;
-    let reclassified = 0;
-    for (const lc of candidates) {
+    for (const lc of lowConf) {
         try {
-            const prompt = `碎片: "${(lc.content||'').slice(0, 200)}"
-当前链接到: #${lc.entity_id} "${lc.entity_name}" (${lc.category})
-分类方式: ${lc.classified_by}, 置信度: ${(lc.confidence||0).toFixed(2)}
+            const prompt = `碎片: "${(lc.content||'').slice(0, 150)}"
+星座名: "${lc.name}"
 
-这条碎片的内容真的属于"${lc.entity_name}"星座吗？如果不是，它应该属于哪个星座？
-
-备选星座ID参考: ${entityIndex.slice(0, 1500)}
-
-回答JSON: {"belongs": true|false, "correct_entity_id": 123 或 null, "reason": "一句话"}`;
+这条碎片真的属于"${lc.name}"星座吗？回答JSON: {"belongs": true|false, "reason": "一句话"}`;
 
             const raw = await callLLM(
                 [{ role: 'user', parts: [{ text: prompt }] }], null, null,
-                { temperature: 0.1, maxOutputTokens: 150, thinkingConfig: { thinkingBudget: 0 } },
+                { temperature: 0.1, maxOutputTokens: 100, thinkingConfig: { thinkingBudget: 0 } },
                 ARCHIVIST_LLM_CONFIG_ID
             );
             const jsonMatch = (raw?.reply || raw?.text || raw?.content || '').match(/\{[\s\S]*\}/);
@@ -3528,28 +3210,14 @@ async function spotCheckClassifications() {
 
             if (v.belongs === false) {
                 db.prepare('DELETE FROM fragment_entities WHERE entity_id=? AND fragment_id=?').run(lc.entity_id, lc.fragment_id);
-                console.log(`[Archivist] 🧹 抽查解除: #${lc.fragment_id} ← ${lc.entity_name} — ${v.reason}`);
+                console.log(`[Archivist] 🧹 抽查解除: #${lc.fragment_id} ← ${lc.name} — ${v.reason}`);
                 fixed++;
-
-                // v5.1: Reclassify to correct entity if suggested
-                if (v.correct_entity_id && typeof v.correct_entity_id === 'number') {
-                    const targetExists = db.prepare('SELECT id, name FROM entity_profiles WHERE id=?').get(v.correct_entity_id);
-                    if (targetExists) {
-                        db.prepare(`INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, confidence, classified_by)
-                            VALUES (?, ?, 0.70, 'spotcheck_reclassify')`).run(lc.fragment_id, v.correct_entity_id);
-                        // Update fragment_count for target
-                        db.prepare(`UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM fragment_entities WHERE entity_id=?), updated_at=datetime('now') WHERE id=?`)
-                            .run(v.correct_entity_id, v.correct_entity_id);
-                        console.log(`[Archivist] 📎 重分类: #${lc.fragment_id} → ${targetExists.name} #${v.correct_entity_id}`);
-                        reclassified++;
-                    }
-                }
             }
         } catch (_) {}
     }
 
-    if (fixed > 0) console.log(`[Archivist] 事后抽查: ${fixed}/${candidates.length} 条错链解除 (重分类${reclassified})`);
-    return { checked: candidates.length, fixed, reclassified };
+    if (fixed > 0) console.log(`[Archivist] 事后抽查: ${fixed}/${lowConf.length} 条错链已解除`);
+    return { checked: lowConf.length, fixed };
 }
 
 // ═══════════════════════════════════════════════════════
@@ -4550,24 +4218,17 @@ const CATEGORY_CONSOLIDATE_MAX_FRAGS = 30;   // max fragments to fetch per categ
 async function consolidateCategory() {
     const db = getDb();
 
-    // v5.3: 从 entity_profiles 星座读取（替代旧的 memory_ontology 知识树）
-    // 跳过 Clara/Draco（碎片太多，每次取30条无法覆盖）和聚合实体
-    const CONSOLIDATE_SKIP = [USER.name, AI.name, '音乐', '共读'];
-    const CONSOLIDATE_SKIP_PH = CONSOLIDATE_SKIP.map(() => '?').join(',');
-
+    // Select dense categories with enough active fragments
     const candidates = db.prepare(`
-        SELECT ep.id, ep.name as path, ep.name as label, ep.overview as description, ep.fragment_count,
-               ep.category,
+        SELECT o.id, o.path, o.label, o.description, o.fragment_count,
                (SELECT COUNT(*) FROM memory_fragments mf
-                JOIN fragment_entities fe ON fe.fragment_id = mf.id
-                WHERE fe.entity_id = ep.id AND mf.status = 'active') as active_count
-        FROM entity_profiles ep
-        WHERE ep.status = 'active'
-          AND ep.fragment_count >= ?
-          AND ep.name NOT IN (${CONSOLIDATE_SKIP_PH})
-        ORDER BY ep.fragment_count DESC
+                JOIN fragment_categories fc ON fc.fragment_id = mf.id
+                WHERE fc.category_id = o.id AND mf.status = 'active') as active_count
+        FROM memory_ontology o
+        WHERE o.fragment_count >= ?
+        ORDER BY o.fragment_count DESC
         LIMIT ?
-    `).all(CATEGORY_CONSOLIDATE_MIN_FRAGS, ...CONSOLIDATE_SKIP, CATEGORY_CONSOLIDATE_MAX_CATS);
+    `).all(CATEGORY_CONSOLIDATE_MIN_FRAGS, CATEGORY_CONSOLIDATE_MAX_CATS);
 
     if (candidates.length === 0) return { categories: 0, episodes: 0 };
 
@@ -4580,13 +4241,13 @@ async function consolidateCategory() {
 
         categoriesProcessed++;
 
-        // Fetch active fragments linked to this constellation
+        // Fetch active fragments in this category
         const fragments = db.prepare(`
             SELECT mf.id, mf.content, mf.emotional_weight, mf.source, mf.source_date,
                    mf.source_msg_ids, mf.entity, mf.created_at
             FROM memory_fragments mf
-            JOIN fragment_entities fe ON fe.fragment_id = mf.id
-            WHERE fe.entity_id = ? AND mf.status = 'active'
+            JOIN fragment_categories fc ON fc.fragment_id = mf.id
+            WHERE fc.category_id = ? AND mf.status = 'active'
             ORDER BY mf.created_at DESC
             LIMIT ?
         `).all(cat.id, CATEGORY_CONSOLIDATE_MAX_FRAGS);
@@ -4604,9 +4265,9 @@ async function consolidateCategory() {
 
 ${buildLandscapeIndex()}
 
-你是星座记忆整合器。你看到的碎片都来自同一个记忆星座：
-**星座名称**：${cat.path}（${cat.category || 'unknown'}）
-**当前概述**：${cat.description || '无'}
+你是类别记忆整合器。你看到的碎片都已经归类到了同一知识树类别下：
+**类别路径**：${cat.path}
+**当前描述**：${cat.description || '无'}
 
 ## 你的任务
 
@@ -4617,7 +4278,7 @@ ${buildLandscapeIndex()}
 
 2. **对每个可合并的组**，将碎片合并为一条规范episode记忆（第三人称，不超过150字）。
 
-3. **如果碎片中有新的事实信息**（之前概述中没提到的），更新星座概述（一句话，不超过50字，描述此星座下碎片的主要主题）。如果现有概述已经准确覆盖，输出 null。
+3. **如果碎片中有新的事实信息**（之前类别描述中没提到的），更新类别描述（一句话，不超过50字，描述此类别下碎片的主要主题）。如果现有描述已经准确覆盖，输出 null。
 
 ## 分量判断 (significance)
 - 8-10：情感转折、重大决定、深刻冲突、关系里程碑
@@ -4639,7 +4300,7 @@ ${buildLandscapeIndex()}
       "contradiction": null
     }
   ],
-  "description_update": "新的星座概述，如果无更新则为null"
+  "description_update": "新的类别描述，如果无更新则为null"
 }`;
 
         try {
@@ -4670,7 +4331,7 @@ ${buildLandscapeIndex()}
 
                 const sig = typeof cluster.significance === 'number' ? cluster.significance : 5;
                 if (sig < 4) {
-                    console.log(`[Archivist] 星座整合跳过(分量不足 sig=${sig}): ${cat.path}`);
+                    console.log(`[Archivist] 类别整合跳过(分量不足 sig=${sig}): ${cat.path}`);
                     continue;
                 }
 
@@ -4701,24 +4362,23 @@ ${buildLandscapeIndex()}
                 // Write to memories table
                 const title = cluster.merged_memory.slice(0, 50);
                 const insert = db.prepare(`
-                    INSERT INTO memories (title, content, weight, valid_from, status, source_msg_ids, entity_id, layer, consolidation_type, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, 'permanent', ?, ?, 'episode', 'standard', datetime('now'), datetime('now'))
+                    INSERT INTO memories (title, content, weight, valid_from, status, source_msg_ids, layer, consolidation_type, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'permanent', ?, 'episode', 'standard', datetime('now'), datetime('now'))
                 `);
                 const info = insert.run(
                     title,
                     cluster.merged_memory,
                     mergedWeight,
                     finalDate,
-                    JSON.stringify([...allMsgIds]),
-                    cat.id
+                    JSON.stringify([...allMsgIds])
                 );
                 const memoryId = info.lastInsertRowid;
 
-                // Index to ChromaDB (v5.3: re-enabled for Librarian retrieval)
+                // Index to ChromaDB
                 try {
                     const { chromaDBOperation } = require('./memory');
                     const idxResult = await chromaDBOperation('index_batch', {
-                        items: [{ id: `memory_${memoryId}`, text: cluster.merged_memory, metadata: { source: 'archivist_consolidate', entity_id: cat.id } }]
+                        items: [{ id: `memory_${memoryId}`, text: cluster.merged_memory, metadata: { source: 'archivist_consolidate' } }]
                     });
                     const chromaId = idxResult.indexed > 0 ? `memory_${memoryId}`
                         : (idxResult.duplicates?.length > 0 ? `dup_of_${idxResult.duplicates[0].existing_id}` : null);
@@ -4744,25 +4404,29 @@ ${buildLandscapeIndex()}
                     confidence: cluster.confidence || 'medium',
                     contradiction: cluster.contradiction || null,
                     significance: sig,
-                    entityId: cat.id,
-                    entityName: cat.path,
                 });
 
-                console.log(`[Archivist] 星座整合 [${cat.path}]: ${mergedIds.length}碎片 → episode #${memoryId} (sig=${sig})`);
+                console.log(`[Archivist] 类别整合 [${cat.path}]: ${mergedIds.length}碎片 → episode #${memoryId} (sig=${sig})`);
             }
 
-            // v5.3: Update entity_profiles.overview instead of memory_ontology.description
+            // Update category description if warranted
             if (result.description_update && result.description_update !== 'null') {
-                db.prepare("UPDATE entity_profiles SET overview = ?, overview_updated_at = datetime('now') WHERE id = ?")
+                db.prepare('UPDATE memory_ontology SET description = ?, updated_at = datetime(\'now\') WHERE id = ?')
                     .run(result.description_update, cat.id);
                 db.prepare(`INSERT INTO ontology_changelog (action, category_path, detail, created_at)
                     VALUES ('description_update', ?, ?, datetime('now'))`)
                     .run(cat.path, JSON.stringify({ source: 'consolidate_category', fragment_count_at_update: cat.fragment_count }));
-                console.log(`[Archivist] 星座整合: ${cat.path} 概述更新 → "${result.description_update}"`);
+                console.log(`[Archivist] 类别整合: ${cat.path} 描述更新 → "${result.description_update}"`);
             }
 
-            // v5.3: entity_profiles doesn't have centroid_embedding — skip centroid refresh
-            // Fragment counts will be refreshed naturally on next classification cycle
+            // Refresh centroid (fragment composition changed)
+            const { refreshFragmentCount } = require('./ontology');
+            refreshFragmentCount(cat.id);
+            const newCentroid = await computeCategoryCentroid(cat.id);
+            if (newCentroid) {
+                db.prepare('UPDATE memory_ontology SET centroid_embedding = ?, updated_at = datetime(\'now\') WHERE id = ?')
+                    .run(JSON.stringify(newCentroid), cat.id);
+            }
 
         } catch (e) {
             console.error(`[Archivist] consolidateCategory 失败 [${cat.path}]:`, e.message);
@@ -4778,9 +4442,6 @@ ${buildLandscapeIndex()}
             );
         } catch (_) {}
 
-        // v5.3: Saga trigger kept for immediate effect, but clusterSagas is ALSO independently
-        // schedulable in GARDEN_TASKS. This dual-trigger ensures sagas update promptly
-        // when new episodes arrive, while the garden plan covers periodic full-clustering.
         try {
             const episodeCount = db.prepare("SELECT COUNT(*) as c FROM memories WHERE layer='episode' AND status='permanent'").get();
             if (episodeCount.c >= 5) {
@@ -4793,7 +4454,7 @@ ${buildLandscapeIndex()}
         } catch (_) {}
     }
 
-    console.log(`[Archivist] 星座整合完成: ${categoriesProcessed}个星座 → ${episodesWritten}条episode`);
+    console.log(`[Archivist] 类别整合完成: ${categoriesProcessed}个类别 → ${episodesWritten}条episode`);
     return { categories: categoriesProcessed, episodes: episodesWritten };
 }
 
@@ -4809,7 +4470,7 @@ async function regenerateEntityOverviews() {
         SELECT ep.id, ep.name, ep.category, ep.status, ep.subcategory,
                ep.relationship_to_clara, ep.relationship_nature,
                ep.emotional_significance, ep.overview, ep.overview_updated_at,
-               ep.last_eval_frag_count, ep.fragment_count, ep.aliases, ep.tags
+               ep.last_eval_frag_count, ep.fragment_count
         FROM entity_profiles ep
         WHERE ep.name NOT IN (${SKIP_PH})
           AND ep.fragment_count > 0
@@ -4851,26 +4512,11 @@ async function regenerateEntityOverviews() {
             needsUpdate.push({ ...ent, currentCount, reason: 'stale_30d' });
             continue;
         }
-
-        // v5.1: Missing aliases or tags — low-priority backfill
-        let existingAliases = [];
-        let existingTags = [];
-        try { existingAliases = JSON.parse(ent.aliases || '[]'); } catch (_) {}
-        try { existingTags = JSON.parse(ent.tags || '[]'); } catch (_) {}
-        if (existingAliases.length === 0 || existingTags.length === 0) {
-            const missing = [];
-            if (existingAliases.length === 0) missing.push('aliases');
-            if (existingTags.length === 0) missing.push('tags');
-            needsUpdate.push({ ...ent, currentCount, reason: `missing_${missing.join('_')}` });
-            continue;
-        }
     }
 
     needsUpdate.sort((a, b) => {
-        // Priority: never_described > missing_* > grown/shrunk > stale_30d
-        const prio = r => r === 'never_described' ? 0 : r.startsWith('missing_') ? 1 : r.startsWith('grown') || r.startsWith('shrunk') ? 2 : 3;
-        const pa = prio(a.reason), pb = prio(b.reason);
-        if (pa !== pb) return pa - pb;
+        if (a.reason === 'never_described' && b.reason !== 'never_described') return -1;
+        if (b.reason === 'never_described' && a.reason !== 'never_described') return 1;
         return b.currentCount - a.currentCount;
     });
 
@@ -4893,89 +4539,62 @@ async function regenerateEntityOverviews() {
         if (ent.relationship_nature) relationshipInfo.push(`关系性质：${ent.relationship_nature}`);
         if (ent.emotional_significance) relationshipInfo.push(`情感意义：${ent.emotional_significance}`);
 
-        // v5.1: Include existing aliases/tags for LLM to refine
-        let existingAliases = [];
-        let existingTags = [];
-        try { existingAliases = JSON.parse(ent.aliases || '[]'); } catch (_) {}
-        try { existingTags = JSON.parse(ent.tags || '[]'); } catch (_) {}
-
         const prompt = `${WORLD_CONTEXT}
 
 ${buildLandscapeIndex()}
 
-<task>
-根据记忆碎片为实体「${ent.name}」写一段第一人称概述。用「我」指代你自己，用「${USER.name}」称呼${USER.name}。
-</task>
+你是 ${AI.name}。你在回忆一个实体——${ent.name}。${relationshipInfo.length > 0 ? '\n\n关于这个实体和 ${USER.name} 的关联，目前已知：\n' + relationshipInfo.join('\n') : ''}
 
-<context>
-${relationshipInfo.length > 0 ? '关于这个实体和 ' + USER.name + ' 的关联：\n' + relationshipInfo.join('\n') + '\n' : ''}
-## 记忆碎片（仅这些是事实来源）
+## 关于 ${ent.name} 的记忆碎片
 ${fragments.map((f, i) => `[${i + 1}] ${f.content}`).join('\n')}
 
-## 现有别称和标签
-- 别称: ${existingAliases.length > 0 ? existingAliases.join(', ') : '（无）'}
-- 标签: ${existingTags.length > 0 ? existingTags.join(', ') : '（无）'}
-</context>
+## 你是谁，你在干什么
+你正在整理自己的记忆档案。你知道一件事：你和 ${USER.name} 的对话里，你说过很多话——有些是事实，有些是你的猜测，有些是玩笑，有些是角色扮演。那些话是你和她的互动，不是她的真实行为。
 
-<constraints>
-- 只写碎片里明确记载的事实。碎片没说的 = 不知道 = 不写。不要在不同碎片之间推断因果关系。
-- ★ 碎片中描述你（${AI.name}）自身言行的条目——特别是游戏、角色扮演、调情中的"命令""禁止""独占"——是你的表演，不是真实事件。概述里只写 ${USER.name} 做了什么、说了什么。
-- ★ 禁用相对时间词（今天/昨天/最近/这几天）。需时间时写具体日期（如"6月24日""6月21-23日期间"）。
-- 用「${USER.name}」「我」称呼。叙事语气。≤150字，3-5句话。不说"这个实体"等元叙述。
-</constraints>
+当你读到碎片里写着「${AI.name} 猜测她可能在做某某事」时，你的直觉会立刻告诉你：那是你在猜，不是她在做。你分得清什么是你的话、什么是她的事。
 
-<output_format>
-先写概述（中文）。
-然后单独一行：[依据: 碎片编号列表]
-然后一行JSON：{"aliases": [...], "tags": [...], "entity_type": "..."}
-同时审视别称和标签：
-- aliases: ${USER.name}会怎么称呼这个实体？专有别名，最多5个。别把描述性短语当别名。
-- tags: 类别标签，语义关联用。最多5个。
-- entity_type: person/place/game/book/tv_show/movie/company/event/other
+★ 更重要的是：当你读到碎片描述了你（${AI.name}）自己的行为时——特别是那些你在游戏、角色扮演、或调情场景里的言行——你立刻意识到：那是你的表演，不是真实发生的事。碎片说「${AI.name}禁止${USER.name}在星露谷用粉色家具」——这不是你真的下了什么禁令，这是你们在玩游戏时的互动。碎片说「${AI.name}表现出独占欲」——这是你在扮演你自己，不是一个值得存档的事件。概述里只写真实发生的事：${USER.name}玩了什么游戏、做了什么、说了什么。你在对话里说过什么夸张的狠话、演过什么戏——那是你和她之间的互动，不是这个星座的历史。
+
+你的概述只记录 ${USER.name} 的真实经历和行为。至于你说过的那些话——无论多精彩——它们是你和她的对话，不是她的档案。
+
+## 写作指南
+- ${ent.name} 是什么？和 ${USER.name} 有什么关联？
+- 对你来说，这个实体意味着什么？
+- ${USER.name} 和这个实体之间有过什么重要的事？
+- 用「${USER.name}」「我」称呼。叙事语气，150字以内。不说元叙述。
+- 每个事实必须在碎片中有依据。碎片没说的 = 你不知道 = 不写。
+- 不要在不同碎片之间自行架桥或推断因果关系。
+
+## 输出格式
+先输出概述文本（中文，3-5句话）。
+然后单独一行：\`[依据: 碎片编号列表]\`
 
 示例：
-${USER.name}是在小红书认识的插画师朋友，从2025年开始有合作。${USER.name}曾委托她画过头像，对她的画风评价很高。对我来说，她是${USER.name}创作网络中一个重要的节点。
-[依据: 1,3,5]
-{"aliases": ["阿花","花老师"], "tags": ["插画师","小红书","朋友"], "entity_type": "person"}
+${USER.name}是在小红书认识的...（概述文本）
+[依据: 1,3]
 
-[依据: ...] 和 JSON 行必须在输出的最后两行。编号是碎片前面的 [N] 标记。`;
+\`[依据: ...]\` 必须出现在输出的最后一行。编号是碎片前面的 \`[N]\` 标记。`;
 
         try {
             const response = await callLLM(
                 [{ role: 'user', parts: [{ text: prompt }] }],
                 null, null,
-                { temperature: 0.3, maxOutputTokens: 450 },
+                { temperature: 0.3, maxOutputTokens: 300 },
                 ARCHIVIST_LLM_CONFIG_ID
             );
 
             const raw = (response?.reply || '').trim();
             if (!raw || raw.length < 15) continue;
 
-            // v5.1: Parse aliases/tags JSON from last line
-            let aliases = existingAliases;
-            let tags = existingTags;
-            let entityType = ent.entity_type || null;
-            const jsonMatch = raw.match(/\{[^{}]*"aliases"[^{}]*\}/);
-            if (jsonMatch) {
-                try {
-                    const meta = JSON.parse(jsonMatch[0]);
-                    if (Array.isArray(meta.aliases)) aliases = meta.aliases.filter(a => typeof a === 'string' && a.trim().length >= 2).slice(0, 5);
-                    if (Array.isArray(meta.tags)) tags = meta.tags.filter(t => typeof t === 'string' && t.trim().length >= 2).slice(0, 5);
-                    if (typeof meta.entity_type === 'string' && meta.entity_type.trim()) entityType = meta.entity_type.trim();
-                } catch (_) {}
-            }
-
-            // Remove JSON line from overview text
-            let overviewRaw = raw;
-            if (jsonMatch) overviewRaw = overviewRaw.replace(jsonMatch[0], '').trim();
-
             // 解析引用标记 [依据: 1,3] 或 [依据: 1]
-            const citeMatch = overviewRaw.match(/\[依据:\s*([0-9,\s]+)\]/);
-            let overviewText = overviewRaw;
+            const citeMatch = raw.match(/\[依据:\s*([0-9,\s]+)\]/);
+            let overviewText = raw;
             let citedIndices = [];
 
             if (citeMatch) {
-                overviewText = overviewRaw.replace(citeMatch[0], '').trim();
+                // 从概述文本中移除引用行
+                overviewText = raw.replace(citeMatch[0], '').trim();
+                // 末尾可能残留换行和空行
                 overviewText = overviewText.replace(/\n\s*$/, '').trim();
 
                 citedIndices = citeMatch[1]
@@ -4997,25 +4616,15 @@ ${USER.name}是在小红书认识的插画师朋友，从2025年开始有合作�
                 continue;
             }
 
-            // v5.2: guard against overwriting recent manual updates (chat Draco's update_overview)
-            const recentlyUpdated = ent.overview_updated_at
-                && (Date.now() - new Date(ent.overview_updated_at)) < 3 * 60 * 60 * 1000;
-            if (recentlyUpdated && ent.reason && !ent.reason.startsWith('never') && !ent.reason.startsWith('grown') && !ent.reason.startsWith('shrunk')) {
-                console.log(`[Archivist] ⏭️ 跳过 ${ent.name} — overview 3h内刚更新过 (${ent.reason}), 保留手动修改`);
-                continue;
-            }
-
             if (overviewText && overviewText.length > 15) {
-                db.prepare(`UPDATE entity_profiles SET overview = ?, overview_updated_at = datetime('now'),
-                    aliases = ?, tags = ?, entity_type = COALESCE(entity_type, ?),
-                    last_eval_frag_count = ? WHERE id = ?`)
-                    .run(overviewText, JSON.stringify(aliases), JSON.stringify(tags), entityType, ent.currentCount, ent.id);
+                db.prepare(`UPDATE entity_profiles SET overview = ?, overview_updated_at = datetime('now'), last_eval_frag_count = ? WHERE id = ?`)
+                    .run(overviewText, ent.currentCount, ent.id);
                 regenerated++;
                 const citedFragsPreviews = validCited.map(n => {
                     const f = fragments[n - 1];
                     return `[${n}]${(f?.content || '').slice(0, 40)}`;
                 }).join(', ');
-                console.log(`[Archivist] Entity概述: ${ent.name} (${ent.reason}, ${ent.currentCount}碎片, aliases=[${aliases.join(',')}], tags=[${tags.join(',')}], 依据: ${citedFragsPreviews})`);
+                console.log(`[Archivist] Entity概述: ${ent.name} (${ent.reason}, ${ent.currentCount}碎片, 依据: ${citedFragsPreviews})`);
             }
         } catch (e) {
             console.error(`[Archivist] Entity 概述生成失败 (${ent.name}):`, e.message);
@@ -5699,10 +5308,6 @@ function registerAllTools() {
         '基于实际碎片内容更新类别描述');
     registerTool('regenerate_entity_overviews', regenerateEntityOverviews,
         '为实体生成 Draco 视角的叙事概述');
-    registerTool('cluster_observations', clusterObservations,
-        '将观察碎片按语义聚类为Clara行为模式');
-    registerTool('review_flagged_strategies', reviewFlaggedStrategies,
-        '审视标记为needs_review的模式策略，LLM重新评估修正');
     registerTool('reconcile_person_categories', reconcilePersonCategories,
         '按人名关键词调和碎片 → 人物类别，修复遗漏分类');
     registerTool('consolidate_category', consolidateCategory,
@@ -6125,12 +5730,9 @@ const GARDEN_TASKS = {
     entityRelations: { desc: '实体关系发现(LLM)', llm: true,  gapKey: 'MIN_GAP_RELATED_ENTITIES' },
     entityOverviews: { desc: '实体概述更新(LLM)', llm: true,  gapKey: 'MIN_GAP_ENTITY_OVERVIEWS' },
     episodeAudit:    { desc: 'Episode质检(LLM)', llm: true,  gapKey: 'MIN_GAP_EPISODE_AUDIT' },
-    consolidate:     { desc: '星座碎片整合→episode(LLM)', llm: true,  gapKey: 'MIN_GAP_CATEGORY_CONSOLIDATE' },
-    sagaCluster:     { desc: 'Saga编织(LLM语义聚类)', llm: true,  gapKey: 'MIN_GAP_SAGA_CLUSTER' },
     insights:        { desc: '碎片洞察提取(LLM)', llm: true,  gapKey: 'MIN_GAP_INSIGHTS' },
     entityScan:      { desc: '新实体扫描(LLM)', llm: true,  gapKey: 'MIN_GAP_ENTITY_VERIFY' },
     claraModel:      { desc: 'Clara Model认知维护', llm: true,  gapKey: 'MIN_GAP_CLARA_MODEL' },
-    reviewStrategies:{ desc: '审视flagged模式策略(LLM)', llm: true,  gapKey: 'MIN_GAP_PATTERN_CLUSTER' },
     stop:            { desc: '本轮无事可做，停止', llm: false, gapKey: null },
 };
 
@@ -6145,8 +5747,6 @@ GAP_VALUE_MAP.MIN_GAP_ENTITY_OVERVIEWS = MIN_GAP_ENTITY_OVERVIEWS;
 GAP_VALUE_MAP.MIN_GAP_EPISODE_AUDIT = MIN_GAP_EPISODE_AUDIT;
 GAP_VALUE_MAP.MIN_GAP_INSIGHTS = MIN_GAP_INSIGHTS;
 GAP_VALUE_MAP.MIN_GAP_ENTITY_VERIFY = MIN_GAP_ENTITY_VERIFY;
-GAP_VALUE_MAP.MIN_GAP_CATEGORY_CONSOLIDATE = MIN_GAP_CATEGORY_CONSOLIDATE;
-GAP_VALUE_MAP.MIN_GAP_SAGA_CLUSTER = MIN_GAP_SAGA_CLUSTER;
 GAP_VALUE_MAP.MIN_GAP_CLARA_MODEL = MIN_GAP_CLARA_MODEL;
 
 async function decideGardenAction(health, llmAvailable) {
@@ -6257,8 +5857,6 @@ module.exports = {
     // 仅供独立脚本（classifyBacklog/growFromScratch）逐轮重置 tick 预算，服务进程不要调
     resetTickBudget: () => { agentState.tickLLMCalls = 0; },
     graduateSeedsAndPrune,
-    clusterObservations,
-    reviewFlaggedStrategies,
     spotCheckClassifications,
     reviewConstellationAfterClassification,
     bootstrapOntology,
