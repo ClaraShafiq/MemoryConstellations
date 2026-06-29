@@ -805,8 +805,9 @@ function _countStaleEntityOverviews(db) {
 
     let count = 0;
     for (const ent of entities) {
+        // v5.5 fix: 使用 fragment_entities 联结表（旧列 memory_fragments.entity_id 已废弃）
         const currentCount = db.prepare(
-            "SELECT COUNT(*) as c FROM memory_fragments WHERE entity_id = ? AND status = 'active'"
+            "SELECT COUNT(*) as c FROM fragment_entities WHERE entity_id = ?"
         ).get(ent.id)?.c || 0;
 
         if (currentCount === 0) continue;
@@ -5768,6 +5769,22 @@ async function decideGardenAction(health, llmAvailable) {
     const seedsReady = db.prepare(`SELECT COUNT(*) as c FROM entity_profiles WHERE status = 'seed' AND fragment_count >= 3`).get()?.c || 0;
     const recentSeeds = db.prepare(`SELECT name, category, fragment_count FROM entity_profiles WHERE status = 'seed' AND fragment_count >= 2 ORDER BY fragment_count DESC LIMIT 10`).all();
 
+    // v5.5: 过时overview详情
+    const staleEntities = db.prepare(`
+        SELECT ep.id, ep.name, ep.category,
+               (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ep.id) as fc,
+               ep.last_eval_frag_count,
+               ROUND(CAST(julianday('now') - julianday(COALESCE(ep.overview_updated_at, ep.created_at)) AS REAL)) as days_stale
+        FROM entity_profiles ep
+        WHERE ep.status = 'active' AND ep.fragment_count >= 3
+          AND ep.name NOT IN (${SKIP_PH})
+          AND (ep.overview_updated_at IS NULL
+               OR ep.overview_updated_at < datetime('now', '-1 day'))
+          AND (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ep.id) > COALESCE(ep.last_eval_frag_count, 0)
+        ORDER BY days_stale DESC
+        LIMIT 8
+    `).all(...SKIP_NAMES);
+
     // Fast path: nothing to do
     const hasWork = health.unclassified >= 5 || seedsReady > 0 || seedsAtRisk > 5
         || health.needsInsight >= 10 || health.staleEntityOverviews > 0;
@@ -5786,6 +5803,7 @@ async function decideGardenAction(health, llmAvailable) {
 未分类碎片: ${health.unclassified} | 活跃星座: ${health.categoryCount}
 fc=2种子(差1条可毕业): ${seedsAtRisk}颗 | fc≥3种子(已可毕业): ${seedsReady}颗
 需洞察碎片: ${health.needsInsight} | 需更新概述: ${health.staleEntityOverviews}
+${staleEntities.length > 0 ? '═══ 过时概述 ═══\n' + staleEntities.map(s => `  ${s.name}(${s.category}): ${s.fc}碎片, 上次更新${s.days_stale}天前`).join('\n') + '\n' : ''}
 可用LLM配额: ${llmAvailable}
 
 ═══ 种子详情 ═══
