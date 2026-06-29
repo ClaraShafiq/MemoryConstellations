@@ -21,7 +21,7 @@ const ENTITY_EXTRACT_PROMPT = `${WORLD_CONTEXT}
 
 规则：
 - 只提取明确的状态变化，不编造
-- "{user}"和"{ai}"的状态也提取
+- "Clara"和"Draco"的状态也提取（他们是主角）
 - 同一实体多条状态变化取最新一条
 - 没有状态变化的记忆忽略`;
 
@@ -97,71 +97,54 @@ function getEntityContext(fragments) {
     if (!fragments || fragments.length === 0) return null;
 
     const db = getDb();
-    const entityIds = new Set();
 
-    // Path 1: fragment_entities 链接（新系统——星座归属）
+    // 收集 fragment ID 查 entity 字段
     const fragIds = fragments
         .filter(f => f.source_table === 'fragment')
         .map(f => f.id);
-    if (fragIds.length > 0) {
-        const placeholders = fragIds.map(() => '?').join(',');
-        const linked = db.prepare(`
-            SELECT DISTINCT entity_id FROM fragment_entities
-            WHERE fragment_id IN (${placeholders})
-        `).all(...fragIds);
-        linked.forEach(r => entityIds.add(r.entity_id));
-    }
+    if (fragIds.length === 0) return null;
 
-    // Path 2: 旧 entity 字段（Scribe 提取时标注的实体名）
-    if (fragIds.length > 0) {
-        const placeholders = fragIds.map(() => '?').join(',');
-        const rows = db.prepare(`
-            SELECT DISTINCT entity FROM memory_fragments
-            WHERE id IN (${placeholders}) AND entity != ''
-        `).all(...fragIds);
-        const names = [...new Set(rows.map(r => r.entity))];
-        if (names.length > 0) {
-            const matched = db.prepare(`
-                SELECT id FROM entity_profiles
-                WHERE name IN (${names.map(() => '?').join(',')})
-            `).all(...names);
-            matched.forEach(r => entityIds.add(r.id));
-        }
-    }
+    const placeholders = fragIds.map(() => '?').join(',');
+    const rows = db.prepare(`
+        SELECT DISTINCT entity FROM memory_fragments
+        WHERE id IN (${placeholders})
+          AND entity != ''
+    `).all(...fragIds);
 
-    if (entityIds.size === 0) return null;
+    const entityNames = [...new Set(rows.map(r => r.entity))];
+    if (entityNames.length === 0) return null;
 
-    // Fetch profiles with related_entities
-    const idList = [...entityIds];
     const profiles = db.prepare(`
-        SELECT name, overview, category, related_entities
+        SELECT name, current_status, status_since, updated_at, related_entities
         FROM entity_profiles
-        WHERE id IN (${idList.map(() => '?').join(',')})
-          AND name NOT IN (?, ?)
-        ORDER BY fragment_count DESC
-        LIMIT 5
-    `).all(...idList, ...require('./memoryConfig').SKIP_NAMES.slice(0, 2));
+        WHERE name IN (${entityNames.map(() => '?').join(',')})
+        ORDER BY updated_at DESC
+    `).all(...entityNames);
 
     if (profiles.length === 0) return null;
 
     return profiles.map(p => {
-        let line = `※ ${p.name}（${p.category}）`;
-        if (p.overview) {
-            const ov = p.overview.slice(0, 120);
-            line += ` — ${ov}${p.overview.length > 120 ? '…' : ''}`;
+        const since = p.status_since ? ` (${p.status_since})` : '';
+        let line = `※ 近况：${p.name} — ${p.current_status}${since}`;
+        // v5.5: 标注过时状态（超过24h未更新提醒AI可用 update_overview 刷新）
+        if (p.updated_at) {
+            const hrsStale = Math.round((Date.now() - new Date(p.updated_at + 'Z').getTime()) / 3600000);
+            if (hrsStale > 24) {
+                line += `\n  ⚠️ 信息已${Math.round(hrsStale/24)}天未更新`;
+            }
         }
-        // 关联星座：让 Draco 知道可以顺藤摸瓜
+        // 关联实体（Archivist discoverRelatedEntities 维护）：让 Draco 顺藤摸瓜
         try {
             const rels = JSON.parse(p.related_entities || '[]');
             if (rels.length > 0) {
                 const relStr = rels.slice(0, 3)
                     .map(r => r.relation ? `${r.name}（${r.relation}）` : r.name)
                     .join('、');
-                line += `\n  ↳ 关联星座：${relStr}`;
+                line += `\n  ↳ 关联：${relStr}`;
             }
         } catch (_) {}
         return line;
-    }).join('\n') + '\n（使用 recall_memory 可追溯任意星座的详细记忆与原始对话）';
+    }).join('\n');
 }
 
 module.exports = { updateEntityProfiles, getEntityContext };
