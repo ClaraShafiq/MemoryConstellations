@@ -1676,7 +1676,8 @@ async function classifyFragments(opts = {}) {
                             for (const e of allEntities) {
                                 try {
                                     const aliases = JSON.parse(e.aliases || '[]');
-                                    if (aliases.some(a => typeof a === 'string' && a.toLowerCase().trim() === seed.name.toLowerCase().trim())) {
+                                    const seedLower = seed.name.toLowerCase().trim();
+                                    if (aliases.some(a => { if (typeof a !== 'string') return false; const aL = a.toLowerCase().trim(); return aL === seedLower || aL.includes(seedLower) || seedLower.includes(aL); })) {
                                         existing = e;
                                         break;
                                     }
@@ -2760,7 +2761,8 @@ ${sampleText.slice(0, 2500)}
                     for (const e of allEnts) {
                         try {
                             const als = JSON.parse(e.aliases || '[]');
-                            if (als.some(a => typeof a === 'string' && a.toLowerCase().trim() === name.toLowerCase().trim())) {
+                            const nameLower = name.toLowerCase().trim();
+                            if (als.some(a => { if (typeof a !== 'string') return false; const aL = a.toLowerCase().trim(); return aL === nameLower || aL.includes(nameLower) || nameLower.includes(aL); })) {
                                 existing = e; break;
                             }
                         } catch (_) {}
