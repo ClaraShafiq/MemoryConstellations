@@ -103,6 +103,13 @@ const SCRIBE_CONFIG = {
     ]
 };
 
+// 校验 processed_until 是否为有效日期字符串（防止非日期值写入导致 Scribe 永久跳过）
+function isValidTimestamp(ts) {
+    if (!ts || typeof ts !== 'string') return false;
+    const d = new Date(ts);
+    return !isNaN(d.getTime()) && ts.startsWith('20'); // 简单但有效：必须是可解析日期且以年份开头
+}
+
 const SCRIBE_SYSTEM_PROMPT = `你是Scribe，${AI.name}记忆系统的书记员。
 你的职责是从对话记录中提取值得长期保存的记忆片段。
 你必须严格输出JSON，不得包含任何其他文字或markdown，严禁使用代码块包裹。
@@ -351,7 +358,24 @@ async function checkAndRunScribe() {
         ORDER BY run_at DESC LIMIT 1
     `).get();
 
-    const since = lastRun?.processed_until || '2000-01-01';
+    // 防护：processed_until 必须为有效日期，否则兜底到 2000-01-01（全量重扫）
+    // 历史上出现过 JSON 对象被误写入此字段导致 Scribe 永久跳过（NaN 时间计算）
+    let since = '2000-01-01';
+    if (lastRun?.processed_until && isValidTimestamp(lastRun.processed_until)) {
+        since = lastRun.processed_until;
+    } else if (lastRun?.processed_until) {
+        console.error(`[Scribe] ⚠️ processed_until 无效日期值，兜底全量扫描: ${JSON.stringify(lastRun.processed_until).slice(0, 100)}`);
+        // 尝试修复：取上一个有效 run 的 processed_until
+        const prevValid = db.prepare(`
+            SELECT processed_until FROM scribe_runs
+            WHERE status = 'done' AND id < (SELECT MAX(id) FROM scribe_runs WHERE status = 'done')
+            ORDER BY run_at DESC LIMIT 1
+        `).get();
+        if (prevValid?.processed_until && isValidTimestamp(prevValid.processed_until)) {
+            since = prevValid.processed_until;
+            console.log(`[Scribe] 回退到上一个有效 processed_until: ${since}`);
+        }
+    }
 
     // 未处理消息
     const unprocessed = db.prepare(`
@@ -588,8 +612,11 @@ async function runScribe(messages, since) {
                 } catch (diagOuterErr) {
                     console.error('[Scribe] 诊断外层异常:', diagOuterErr.message, diagOuterErr.stack?.slice(0, 200));
                 }
+                const safeUntil = isValidTimestamp(messages[messages.length - 1]?.timestamp)
+                    ? messages[messages.length - 1].timestamp
+                    : new Date().toISOString().replace('T', ' ').slice(0, 19);
                 db.prepare(`INSERT INTO scribe_runs (processed_until, messages_processed, status) VALUES (?, ?, 'failed')`)
-                    .run(messages[messages.length - 1].timestamp, messages.length);
+                    .run(safeUntil, messages.length);
                 return;
             }
         }
@@ -675,10 +702,17 @@ async function runScribe(messages, since) {
         }
     }
 
+    const safeUntil = isValidTimestamp(messages[messages.length - 1]?.timestamp)
+        ? messages[messages.length - 1].timestamp
+        : new Date().toISOString().replace('T', ' ').slice(0, 19);
+    if (!isValidTimestamp(messages[messages.length - 1]?.timestamp)) {
+        console.error(`[Scribe] ⚠️ 最后一条消息时间戳无效，使用当前时间兜底: ${safeUntil} (原值: ${JSON.stringify(messages[messages.length - 1]?.timestamp)})`);
+    }
+
     db.prepare(`
         INSERT INTO scribe_runs (processed_until, messages_processed, fragments_written, status)
         VALUES (?, ?, ?, 'done')
-    `).run(messages[messages.length - 1].timestamp, messages.length, written);
+    `).run(safeUntil, messages.length, written);
 
     console.log(`[Scribe] 完成：处理${messages.length}条消息，写入${written}条记忆片段`);
 
