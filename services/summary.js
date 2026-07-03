@@ -81,19 +81,25 @@ async function generateChatSummary(chatId, startMessageId = null, endMessageId =
         };
 
         for (const msg of messages) {
+            // 从消息时间戳提取 HH:MM，防止 LLM 编造时间
+            const msgTime = (msg.timestamp && typeof msg.timestamp === 'string')
+                ? (msg.timestamp.includes('T') ? msg.timestamp.slice(11, 16) : msg.timestamp.slice(11, 16))
+                : '';
+            const timePrefix = msgTime ? `[${msgTime}] ` : '';
+
             if (msg.sender === 'draco') {
                 roundCount++;
                 // Draco消息以300字缩略注入，提供上下文供模型判断猜测/纠正
                 const dracoText = extractText(msg);
                 if (dracoText.trim()) {
                     const preview = dracoText.slice(0, 300);
-                    conversationText += `${AI.name}: ${preview}${dracoText.length > 300 ? '…' : ''}\n\n`;
+                    conversationText += `${timePrefix}${AI.name}: ${preview}${dracoText.length > 300 ? '…' : ''}\n\n`;
                 }
                 continue;
             }
 
             const textContent = extractText(msg);
-            conversationText += `${USER.name}: ${textContent}\n\n`;
+            conversationText += `${timePrefix}${USER.name}: ${textContent}\n\n`;
         }
         
         console.log(`generateChatSummary: range ${startMessageId+1}-${endMessageId}, ${roundCount} rounds`);
