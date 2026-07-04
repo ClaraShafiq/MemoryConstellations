@@ -517,6 +517,39 @@ async function agentTick() {
             }
         }, MIN_GAP_AUTO_LINK);
 
+        // 5h. Zero-fragment cleanup — entities created >7d ago that never got fragments
+        const CLEANUP_ZEROFRAG_MS = 12 * 60 * 60 * 1000;
+        await runTaskIfDue('zeroFragCleanup', () => {
+            try {
+                const db = getDb();
+                const cleaned = db.prepare(`
+                    UPDATE entity_profiles SET status = 'superseded', updated_at = datetime('now')
+                    WHERE status = 'active'
+                      AND fragment_count = 0
+                      AND name NOT IN (${SKIP_PH})
+                      AND created_at < datetime('now', '-7 days')
+                `).run(...SKIP_NAMES);
+                if (cleaned.changes > 0) {
+                    console.log(`[Archivist] 🧹 零碎片清理: ${cleaned.changes} 个实体标记 superseded`);
+                }
+                return { cleaned: cleaned.changes };
+            } catch (e) {
+                console.error('[Archivist] zeroFragCleanup 失败:', e.message);
+                return null;
+            }
+        }, CLEANUP_ZEROFRAG_MS);
+
+        // 5i. Entity overview regeneration — NOT gated behind deep cycle.
+        // Stale overviews degrade entity context quality in every chat.
+        // Each entity costs one cheap LLM call; 30min cooldown prevents abuse.
+        await runTaskIfDue('entity_overviews', async () => {
+            if (health.staleEntityOverviews > 0) {
+                console.log(`[Archivist] 📝 轻量概述更新: ${health.staleEntityOverviews} 个实体概述需更新`);
+                return regenerateEntityOverviews();
+            }
+            return { skipped: true, reason: 'no stale overviews' };
+        }, MIN_GAP_ENTITY_OVERVIEWS);
+
         // ═══════════════════════════════════════
         // DEEP CYCLE TASKS — LLM-heavy, only when Clara idle > 1h
         // ═══════════════════════════════════════
@@ -2176,6 +2209,61 @@ async function mergeDuplicateSeeds() {
         }
         if (containers >= 2) genericNames.add(s.id);
     }
+
+    // ── v5.6 确定性别名合并：A.name ∈ B.aliases 或反之 → 零LLM直接合并 ──
+    // 覆盖跨文字系统（中文/拉丁/日文）的别名链路。
+    // aliases 是之前 LLM 运行已认定的等价关系，确定性 100%，不需要再验证。
+    let aliasMerged = 0;
+    const aliasSuperseded = new Set();
+    for (let i = 0; i < seeds.length; i++) {
+        if (aliasSuperseded.has(seeds[i].id)) continue;
+        for (let j = i + 1; j < seeds.length; j++) {
+            if (aliasSuperseded.has(seeds[j].id)) continue;
+            const a = seeds[i], b = seeds[j];
+            if (typeof a.name !== 'string' || typeof b.name !== 'string') continue;
+            if (genericNames.has(a.id) || genericNames.has(b.id)) continue;
+
+            let aAliases = [], bAliases = [];
+            try { aAliases = JSON.parse(a.aliases || '[]'); } catch (_) {}
+            try { bAliases = JSON.parse(b.aliases || '[]'); } catch (_) {}
+
+            const aNameLower = a.name.toLowerCase().trim();
+            const bNameLower = b.name.toLowerCase().trim();
+
+            const aInBAliases = bAliases.some(x => typeof x === 'string' && x.toLowerCase().trim() === aNameLower);
+            const bInAAliases = aAliases.some(x => typeof x === 'string' && x.toLowerCase().trim() === bNameLower);
+
+            if (!aInBAliases && !bInAAliases) continue;
+
+            const [winner, loser] = a.fragment_count >= b.fragment_count ? [a, b] : [b, a];
+            const reason = aInBAliases && bInAAliases ? '双向别名' : (aInBAliases ? `"${a.name}"是"${b.name}"的别名` : `"${b.name}"是"${a.name}"的别名`);
+
+            db.prepare(`UPDATE OR IGNORE fragment_entities SET entity_id = ? WHERE entity_id = ?`)
+                .run(winner.id, loser.id);
+            db.prepare(`DELETE FROM fragment_entities WHERE entity_id = ?`).run(loser.id);
+
+            const wAliases = (() => { try { return JSON.parse(winner.aliases || '[]'); } catch (_) { return []; } })();
+            const lAliases = (() => { try { return JSON.parse(loser.aliases || '[]'); } catch (_) { return []; } })();
+            const wTags = (() => { try { return JSON.parse(winner.tags || '[]'); } catch (_) { return []; } })();
+            const lTags = (() => { try { return JSON.parse(loser.tags || '[]'); } catch (_) { return []; } })();
+            let mergedAliases = [...new Set([...wAliases, ...lAliases, loser.name])];
+            mergedAliases = mergedAliases.filter(a => typeof a === 'string' && a.toLowerCase().trim() !== winner.name.toLowerCase().trim());
+            mergedAliases = mergedAliases.slice(0, 8);
+            const mergedTags = [...new Set([...wTags, ...lTags])].slice(0, 8);
+
+            db.prepare(`UPDATE entity_profiles SET aliases=?, tags=?, fragment_count=(SELECT COUNT(*) FROM fragment_entities WHERE entity_id=?), updated_at=datetime('now') WHERE id=?`)
+                .run(JSON.stringify(mergedAliases), JSON.stringify(mergedTags), winner.id, winner.id);
+            db.prepare(`UPDATE entity_profiles SET status='superseded', updated_at=datetime('now') WHERE id=?`).run(loser.id);
+
+            console.log(`[Archivist] 🔗 别名合并: "${loser.name}" → "${winner.name}" (${reason})`);
+            aliasSuperseded.add(loser.id);
+            aliasMerged++;
+
+            a.fragment_count = winner.id === a.id ? Math.max(a.fragment_count, b.fragment_count) : a.fragment_count;
+            b.fragment_count = winner.id === b.id ? Math.max(a.fragment_count, b.fragment_count) : b.fragment_count;
+        }
+    }
+    if (aliasMerged > 0) return { merged: aliasMerged, reason: 'alias_deterministic' };
 
     // 候选对：同 category 且名字包含/bigram 相似
     const pairs = [];
@@ -4532,7 +4620,7 @@ async function regenerateEntityOverviews() {
             SELECT mf.content, mf.created_at FROM memory_fragments mf
             JOIN fragment_entities fe ON fe.fragment_id = mf.id
             WHERE fe.entity_id = ? AND mf.status = 'active'
-            ORDER BY mf.created_at DESC LIMIT 10
+            ORDER BY mf.created_at DESC LIMIT 15
         `).all(ent.id);
 
         if (fragments.length === 0) continue;
