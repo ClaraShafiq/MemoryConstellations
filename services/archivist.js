@@ -4825,7 +4825,7 @@ async function scanContentForNewEntities() {
     `).all(CONTENT_SCAN_FRAG_LIMIT);
 
     // Separate candidate pools: CJK/kana (low noise) vs Latin (high noise)
-    const CJK_KANA_RE = /[一-鿿]{2,4}|[぀-ゟ]{2,6}|[゠-ヿ]{2,6}/g;
+    const CJK_KANA_RE = /[一-鿿]{2,6}|[぀-ゟ]{2,6}|[゠-ヿ]{2,6}/g;
     const LATIN_RE = /[A-Z][a-z]{2,20}/g;
     const cjkCounts = new Map();
     const latinCounts = new Map();
