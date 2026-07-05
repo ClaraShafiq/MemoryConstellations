@@ -1299,6 +1299,10 @@ function initDatabase() {
          ALTER TABLE clara_patterns ADD COLUMN last_mismatch_at DATETIME;
          ALTER TABLE clara_patterns ADD COLUMN mismatch_count INTEGER DEFAULT 0;`);
 
+    // v85: memories.entity_id — 叙事片段与星座的关联
+    runMigration(85, 'v5.7: memories.entity_id — episode→constellation link',
+        `ALTER TABLE memories ADD COLUMN entity_id INTEGER;`);
+
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {
         const existingRoots = db.prepare('SELECT COUNT(*) as c FROM memory_ontology WHERE parent_id IS NULL').get();
