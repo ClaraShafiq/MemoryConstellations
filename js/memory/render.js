@@ -384,7 +384,7 @@ function drawGalaxy(T, alpha, hovered, selected) {
     // 星座
     gLayout.cons.forEach(pc => {
         const cp = w2s(pc.x, pc.y, 0.9);
-        if (offScreen(cp.x, cp.y, pc.r * camera.scale + 120)) return;
+        if (offScreen(cp.x, cp.y, (pc.hitR || pc.r) * camera.scale + 120)) return;
         const isHov = hovered && hovered.type === 'con' && hovered.id === pc.con.id;
         const conAlpha = alpha * (isHov ? 1 : 0.88);
         // 星座连线（顺序链）
@@ -400,13 +400,14 @@ function drawGalaxy(T, alpha, hovered, selected) {
             const pulse = Math.sin(T * 1.25 + st.phase) * 0.18 + 0.9;
             drawStar(p.x, p.y, st.baseR * camera.scale, pc.con.rgb, st.star.conf || 0.5, conAlpha, pulse, false, false, T, st.star.lifecycle);
         });
-        // hover 范围环
+        // hover 范围环（用点击半径 hitR）
         if (isHov) {
-            ctx.beginPath(); ctx.arc(cp.x, cp.y, pc.r * camera.scale * 1.08, 0, Math.PI * 2);
+            const hr = (pc.hitR || pc.r) * camera.scale;
+            ctx.beginPath(); ctx.arc(cp.x, cp.y, hr * 1.05, 0, Math.PI * 2);
             ctx.strokeStyle = `rgba(${pc.con.rgb},0.22)`; ctx.lineWidth = 0.8;
             ctx.setLineDash([4, 6]); ctx.stroke(); ctx.setLineDash([]);
         }
-        // 标签
+        // 标签（用视觉半径 r 定位）
         const lp = w2s(pc.x, pc.y - pc.r - 12, 0.9);
         ctx.font = `${isHov ? 500 : 400} ${isHov ? 12.5 : 11}px 'Inter','PingFang SC',sans-serif`;
         ctx.fillStyle = `rgba(${pc.con.rgb},${(isHov ? 0.95 : 0.62) * conAlpha})`;
@@ -500,10 +501,11 @@ export function hitTest(mx, my) {
     }
     if (view.level === 'galaxy' && gLayout) {
         // 星座（星团圆域，从小到大检测避免大圆吞小圆）
-        const sorted = [...gLayout.cons].sort((a, b) => a.r - b.r);
+        const sorted = [...gLayout.cons].sort((a, b) => (a.hitR || a.r) - (b.hitR || b.r));
         for (const pc of sorted) {
             const p = w2s(pc.x, pc.y, 0.9);
-            if (Math.hypot(mx - p.x, my - p.y) < pc.r * camera.scale + 8) return { type: 'con', id: pc.con.id, con: pc.con };
+            const hr = (pc.hitR || pc.r) * camera.scale;
+            if (Math.hypot(mx - p.x, my - p.y) < hr + 8) return { type: 'con', id: pc.con.id, con: pc.con };
         }
         return null;
     }

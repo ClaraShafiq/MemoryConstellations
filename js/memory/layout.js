@@ -29,7 +29,7 @@ export function layoutUniverse(W, H) {
                 con: c,
                 x: gx + Math.cos(angle) * r,
                 y: gy + Math.sin(angle) * r,
-                r: Math.max(2.2, Math.min(7, 2 + Math.sqrt(c.stars.length) * 0.9)),
+                r: Math.max(2.0, Math.min(5.5, 1.8 + Math.sqrt(c.stars.length) * 0.7)),
             };
         });
         return { galaxy: g, x: gx, y: gy, nebulaR, points };
@@ -39,6 +39,7 @@ export function layoutUniverse(W, H) {
 
 // ── galaxy 俯瞰视图 ──
 // 该星系星座全屏 spiral 铺开，星座半径 ∝ sqrt(star数)，星座内有个体星点
+// v5.1: 视觉半径与点击半径分离，加碰撞推开避免星座重叠无法点击
 export function layoutGalaxy(galaxyId, W, H) {
     const cons = [...consOfGalaxy(galaxyId)].sort((a, b) => (b.fragment_count || 0) - (a.fragment_count || 0));
     const cx = W / 2, cy = H / 2;
@@ -51,9 +52,28 @@ export function layoutGalaxy(galaxyId, W, H) {
         const r = maxR * Math.sqrt((i + 0.5) / Math.max(cons.length, 1));
         const conX = cx + Math.cos(angle) * r * (W > H ? 1.35 : 1);
         const conY = cy + Math.sin(angle) * r;
-        const conR = Math.min(110, 26 + Math.sqrt(c.stars.length) * 13);
-        placed.push({ con: c, x: conX, y: conY, r: conR, stars: layoutStarsInCon(c, conX, conY, conR) });
+        // 视觉半径：小幅增长，上限收紧；点击半径：至少 30px 保证可点
+        const conR = Math.min(70, 18 + Math.sqrt(c.stars.length) * 7);
+        const hitR = Math.max(conR, 30);
+        placed.push({ con: c, x: conX, y: conY, r: conR, hitR, stars: layoutStarsInCon(c, conX, conY, conR) });
     });
+    // 碰撞推开：中心距 < hitR1+hitR2+8px → 推开，3轮迭代
+    for (let iter = 0; iter < 3; iter++) {
+        for (let i = 0; i < placed.length; i++) {
+            for (let j = i + 1; j < placed.length; j++) {
+                const a = placed[i], b = placed[j];
+                const dx = b.x - a.x, dy = b.y - a.y;
+                const dist = Math.hypot(dx, dy);
+                const minDist = a.hitR + b.hitR + 8;
+                if (dist < minDist && dist > 0.01) {
+                    const push = (minDist - dist) / 2;
+                    const nx = dx / dist, ny = dy / dist;
+                    a.x -= nx * push; a.y -= ny * push;
+                    b.x += nx * push; b.y += ny * push;
+                }
+            }
+        }
+    }
     return { galaxy: GALAXY_BY_ID[galaxyId], cx, cy, cons: placed };
 }
 
