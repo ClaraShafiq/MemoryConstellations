@@ -346,9 +346,9 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
                        mf.entity_id, fe.confidence AS link_confidence, fe.relation
                 FROM memory_fragments mf
                 JOIN fragment_entities fe ON fe.fragment_id = mf.id
-                WHERE fe.entity_id = ? AND mf.status IN ('active', 'cooling', 'frozen')
+                WHERE fe.entity_id = ? AND mf.status IN ('active', 'consolidated', 'cooling', 'frozen')
                 ORDER BY
-                    CASE mf.status WHEN 'active' THEN 0 WHEN 'cooling' THEN 1 ELSE 2 END,
+                    CASE mf.status WHEN 'active' THEN 0 WHEN 'consolidated' THEN 1 WHEN 'cooling' THEN 2 ELSE 3 END,
                     fe.confidence DESC, mf.emotional_weight DESC
                 LIMIT 40
             `).all(ent.id);
