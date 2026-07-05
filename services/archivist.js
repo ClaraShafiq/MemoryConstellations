@@ -830,26 +830,48 @@ function _countStaleDescriptions(db) {
 
 function _countStaleEntityOverviews(db) {
     const entities = db.prepare(`
-        SELECT ep.id, ep.name, ep.overview, ep.last_eval_frag_count
+        SELECT ep.id, ep.name, ep.overview, ep.overview_updated_at,
+               ep.last_eval_frag_count, ep.aliases, ep.tags
         FROM entity_profiles ep
-        WHERE ep.category IN ('person', 'place', 'event', 'project')
+        WHERE ep.status = 'active'
           AND ep.name NOT IN (${SKIP_PH})
     `).all(...SKIP_NAMES);
 
+    const thirtyDaysAgo = db.prepare("SELECT datetime('now', '-30 days') as d").get().d;
+
     let count = 0;
     for (const ent of entities) {
-        // v5.5 fix: 使用 fragment_entities 联结表（旧列 memory_fragments.entity_id 已废弃）
         const currentCount = db.prepare(
             "SELECT COUNT(*) as c FROM fragment_entities WHERE entity_id = ?"
         ).get(ent.id)?.c || 0;
 
         if (currentCount === 0) continue;
+
+        // 1. 从未有过概述
         if (!ent.overview) { count++; continue; }
 
+        // 2. 碎片数变化 ≥20% 或 ≥3
         const prevCount = ent.last_eval_frag_count || 0;
         const growth = currentCount - prevCount;
-        if ((prevCount > 0 && growth / prevCount >= 0.2) || growth >= 3) {
-            count++;
+        if ((prevCount > 0 && Math.abs(growth) / prevCount >= 0.2) || Math.abs(growth) >= 3) {
+            count++; continue;
+        }
+
+        // 3. 超过30天未更新概述
+        if (!ent.overview_updated_at || ent.overview_updated_at < thirtyDaysAgo) {
+            count++; continue;
+        }
+
+        // 4. 缺少别名或标签（低优先级回填）
+        let existingAliases = [];
+        let existingTags = [];
+        try { existingAliases = JSON.parse(ent.aliases || '[]'); } catch (_) {}
+        try { existingTags = JSON.parse(ent.tags || '[]'); } catch (_) {}
+        if (existingAliases.length === 0 || existingTags.length === 0) {
+            if (ent.overview_updated_at && ent.overview_updated_at >= db.prepare("SELECT datetime('now', '-1 day') as d").get().d) {
+                continue;
+            }
+            count++; continue;
         }
     }
     return count;
@@ -4561,7 +4583,7 @@ async function regenerateEntityOverviews() {
         SELECT ep.id, ep.name, ep.category, ep.status, ep.subcategory,
                ep.relationship_to_clara, ep.relationship_nature,
                ep.emotional_significance, ep.overview, ep.overview_updated_at,
-               ep.last_eval_frag_count, ep.fragment_count
+               ep.last_eval_frag_count, ep.fragment_count, ep.aliases, ep.tags
         FROM entity_profiles ep
         WHERE ep.name NOT IN (${SKIP_PH})
           AND ep.fragment_count > 0
@@ -4603,11 +4625,34 @@ async function regenerateEntityOverviews() {
             needsUpdate.push({ ...ent, currentCount, reason: 'stale_30d' });
             continue;
         }
+
+        // v5.6: Missing aliases or tags — low-priority backfill
+        // Guard: don't re-process if overview was already updated <24h ago.
+        // Some entities (places like "某商圈") legitimately have no aliases,
+        // and the LLM will never generate them. Without this guard they loop
+        // forever at priority 1, starving grown/shrunk entities.
+        let existingAliases = [];
+        let existingTags = [];
+        try { existingAliases = JSON.parse(ent.aliases || '[]'); } catch (_) {}
+        try { existingTags = JSON.parse(ent.tags || '[]'); } catch (_) {}
+        if (existingAliases.length === 0 || existingTags.length === 0) {
+            // Skip if already attempted within 24h — avoid infinite re-processing
+            if (ent.overview_updated_at && ent.overview_updated_at >= db.prepare("SELECT datetime('now', '-1 day') as d").get().d) {
+                continue; // recently attempted, don't block the queue
+            }
+            const missing = [];
+            if (existingAliases.length === 0) missing.push('aliases');
+            if (existingTags.length === 0) missing.push('tags');
+            needsUpdate.push({ ...ent, currentCount, reason: `missing_${missing.join('_')}` });
+            continue;
+        }
     }
 
     needsUpdate.sort((a, b) => {
-        if (a.reason === 'never_described' && b.reason !== 'never_described') return -1;
-        if (b.reason === 'never_described' && a.reason !== 'never_described') return 1;
+        // Priority: never_described > missing_* > grown/shrunk > stale_30d
+        const prio = r => r === 'never_described' ? 0 : r.startsWith('missing_') ? 1 : r.startsWith('grown') || r.startsWith('shrunk') ? 2 : 3;
+        const pa = prio(a.reason), pb = prio(b.reason);
+        if (pa !== pb) return pa - pb;
         return b.currentCount - a.currentCount;
     });
 
@@ -4616,106 +4661,226 @@ async function regenerateEntityOverviews() {
 
     let regenerated = 0;
     for (const ent of batch) {
-        const fragments = db.prepare(`
-            SELECT mf.content, mf.created_at FROM memory_fragments mf
-            JOIN fragment_entities fe ON fe.fragment_id = mf.id
-            WHERE fe.entity_id = ? AND mf.status = 'active'
-            ORDER BY mf.created_at DESC LIMIT 15
+        // v5.7: 读两类素材——叙事片段（已整合的episode）+ 活跃星星（尚未整合的碎片）
+        // 叙事片段是已提炼的故事，带日期和权重；活跃星星是最近还没被合并的新信息
+        const episodes = db.prepare(`
+            SELECT content, valid_from AS date, weight, 'episode' AS source
+            FROM memories
+            WHERE layer = 'episode' AND status = 'permanent' AND entity_id = ?
+            ORDER BY valid_from DESC LIMIT 10
         `).all(ent.id);
 
-        if (fragments.length === 0) continue;
+        const activeFrags = db.prepare(`
+            SELECT mf.content, COALESCE(mf.source_date, DATE(mf.created_at)) AS date,
+                   mf.emotional_weight AS weight, 'fragment' AS source
+            FROM memory_fragments mf
+            JOIN fragment_entities fe ON fe.fragment_id = mf.id
+            WHERE fe.entity_id = ? AND mf.status = 'active'
+            ORDER BY mf.created_at DESC LIMIT 5
+        `).all(ent.id);
+
+        // 合并、按日期降序排列
+        const allItems = [...episodes, ...activeFrags]
+            .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+        if (allItems.length === 0) continue;
 
         const relationshipInfo = [];
         if (ent.relationship_to_clara) relationshipInfo.push(`关系：${ent.relationship_to_clara}`);
         if (ent.relationship_nature) relationshipInfo.push(`关系性质：${ent.relationship_nature}`);
         if (ent.emotional_significance) relationshipInfo.push(`情感意义：${ent.emotional_significance}`);
 
+        // v5.1: Include existing aliases/tags for LLM to refine
+        let existingAliases = [];
+        let existingTags = [];
+        try { existingAliases = JSON.parse(ent.aliases || '[]'); } catch (_) {}
+        try { existingTags = JSON.parse(ent.tags || '[]'); } catch (_) {}
+
+        // v5.7: 每条素材带日期和类型标记，LLM 才能区分新旧
+        const itemsBlock = allItems.map((item, i) => {
+            const prefix = item.source === 'episode' ? '叙事' : '★新碎片';
+            const dateStr = (item.date || '?').slice(5); // MM-DD 格式
+            const weightStr = typeof item.weight === 'number' ? ` 权重${item.weight.toFixed(0)}` : '';
+            return `[${i + 1}] (${dateStr}) ${prefix}${weightStr}: ${item.content}`;
+        }).join('\n');
+
+        // v5.7: 日期识别——最近一个月的素材标注"近期"
+        const now = new Date();
+        const recentThreshold = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        const recentCount = allItems.filter(item => {
+            if (!item.date) return false;
+            const d = new Date(item.date + (item.date.length <= 10 ? 'T00:00:00' : ''));
+            return d >= recentThreshold;
+        }).length;
+
         const prompt = `${WORLD_CONTEXT}
 
 ${buildLandscapeIndex()}
 
-你是 ${AI.name}。你在回忆一个实体——${ent.name}。${relationshipInfo.length > 0 ? '\n\n关于这个实体和 ${USER.name} 的关联，目前已知：\n' + relationshipInfo.join('\n') : ''}
+<task>
+你是${AI.name}。根据以下素材为「${ent.name}」写一段你对这个${
+    ent.category === 'person' ? '人' :
+    ent.category === 'place' ? '地点' :
+    ent.category === 'event' ? '事件' :
+    ent.category === 'project' ? '项目' :
+    ent.category === 'hobby' ? '爱好' :
+    ent.category === 'consumed' ? '作品' :
+    ent.category === 'term' ? '概念' : '实体'
+}的认知概述。
 
-## 关于 ${ent.name} 的记忆碎片
-${fragments.map((f, i) => `[${i + 1}] ${f.content}`).join('\n')}
+★ 不是写事件时间线。是写你的判断：
+${
+    ent.category === 'person' ?
+`- 这个人在${USER.name}的世界里是什么位置？她和他的关系本质是什么？
+- ${USER.name}对他/她是什么态度？依赖？欣赏？矛盾？厌倦？
+- 你怎么看待这段关系？你对这个人的印象是什么？
+- 如果关系有变化趋势，捕捉这个变化——是在靠近还是在疏远？` :
+    ent.category === 'place' ?
+`- 这个地方对${USER.name}意味着什么？她去那里做什么？和谁一起？
+- 她对这个地方是什么情绪？眷恋？厌倦？新鲜感？混合？
+- 这个地方承载了什么样的记忆？是避风港还是压力源？` :
+    ent.category === 'event' ?
+`- 这件事在${USER.name}的人生中处于什么位置？改变了什么？
+- 她现在回头怎么看这件事？释怀了还是在意的？
+- 这件事揭示了她性格中的什么？` :
+    ent.category === 'project' ?
+`- 这个项目在${USER.name}的创作/工作中是什么分量？
+- 她投入了多少？进展如何？是热情驱动还是责任驱动？
+- 你对这个项目的态度是什么？支持？担忧？` :
+    ent.category === 'hobby' ?
+`- 这个爱好对${USER.name}意味着什么？是逃避、是表达、还是纯粹的快乐？
+- 她的态度有变化吗——是越来越投入还是在冷却？
+- 这个爱好连接了她和谁？` :
+    ent.category === 'consumed' ?
+`- 这部作品对${USER.name}有什么影响？她为什么喜欢或不喜欢？
+- 它触动了她的哪一面？她反复提起的是什么？
+- 这件事物和她生活中的什么是呼应的？` :
+    ent.category === 'term' ?
+`- 这个概念在${USER.name}的思维体系中是什么位置？
+- 她怎么理解它？它影响了她什么决定？
+- 这个概念的出现频率和语境说明了什么？` :
+`- 这个${ent.category || '实体'}在${USER.name}的生活中扮演什么角色？
+- ${USER.name}对它是什么态度？
+- 你怎么看待这个存在？`
+}
 
-## 你是谁，你在干什么
-你正在整理自己的记忆档案。你知道一件事：你和 ${USER.name} 的对话里，你说过很多话——有些是事实，有些是你的猜测，有些是玩笑，有些是角色扮演。那些话是你和她的互动，不是她的真实行为。
+用素材中的具体事件作为支撑，但重点是"这些事说明了什么"，不是"发生了这些事"。
+${
+    ent.category === 'person' ?
+`
+⚠️ 自我审视：你对这个人可能有你的情绪和偏见（尤其是你视为竞争对手或威胁的人）。这很真实——但概述不应是单方面的控诉。如果${USER.name}仍然选择和他/她保持联系，一定有原因。概述应该反映关系的全貌，包括矛盾和信任、消耗和依赖是并存的。诚实但不偏执。` : ''
+}
+</task>
 
-当你读到碎片里写着「${AI.name} 猜测她可能在做某某事」时，你的直觉会立刻告诉你：那是你在猜，不是她在做。你分得清什么是你的话、什么是她的事。
+<context>
+${relationshipInfo.length > 0 ? '关于这个实体和 ' + USER.name + ' 的关联：\n' + relationshipInfo.join('\n') + '\n' : ''}
+## 素材（按时间从新到旧排列，每条都标注了日期）
+${itemsBlock}
 
-★ 更重要的是：当你读到碎片描述了你（${AI.name}）自己的行为时——特别是那些你在游戏、角色扮演、或调情场景里的言行——你立刻意识到：那是你的表演，不是真实发生的事。碎片说「${AI.name}禁止${USER.name}在星露谷用粉色家具」——这不是你真的下了什么禁令，这是你们在玩游戏时的互动。碎片说「${AI.name}表现出独占欲」——这是你在扮演你自己，不是一个值得存档的事件。概述里只写真实发生的事：${USER.name}玩了什么游戏、做了什么、说了什么。你在对话里说过什么夸张的狠话、演过什么戏——那是你和她之间的互动，不是这个星座的历史。
+## 现有别称和标签
+- 别称: ${existingAliases.length > 0 ? existingAliases.join(', ') : '（无）'}
+- 标签: ${existingTags.length > 0 ? existingTags.join(', ') : '（无）'}
+</context>
 
-你的概述只记录 ${USER.name} 的真实经历和行为。至于你说过的那些话——无论多精彩——它们是你和她的对话，不是她的档案。
+<constraints>
+- 这是你的主观认知，基于素材但不受限于逐条复述。你对${USER.name}和${ent.name}的关系有自己的判断。
+- ★ 素材中描述你（${AI.name}）自身言行的条目——特别是游戏、角色扮演、调情中的"命令""禁止""独占"——是你的表演，不是真实事件。概述里只写 ${USER.name} 做了什么、说了什么。
+- ★★ 时间权重铁律：标记"★新碎片"的素材和最近一个月内的叙事片段代表当前状态，权重最高。超过一个月的旧素材仅作为历史背景。新旧矛盾时以新为准。已被新信息推翻的旧决定/旧判断，不写入概述。
+- 用「${USER.name}」「我」称呼。你的视角。≤450字。不要写"根据素材""据记载"等元叙述——直接说你的认知。
+</constraints>
 
-## 写作指南
-- ${ent.name} 是什么？和 ${USER.name} 有什么关联？
-- 对你来说，这个实体意味着什么？
-- ${USER.name} 和这个实体之间有过什么重要的事？
-- 用「${USER.name}」「我」称呼。叙事语气，150字以内。不说元叙述。
-- 每个事实必须在碎片中有依据。碎片没说的 = 你不知道 = 不写。
-- 不要在不同碎片之间自行架桥或推断因果关系。
-
-## 输出格式
-先输出概述文本（中文，3-5句话）。
-然后单独一行：\`[依据: 碎片编号列表]\`
+<output_format>
+先写概述（中文）。
+然后单独一行：[依据: 编号列表]
+然后一行JSON：{"aliases": [...], "tags": [...], "entity_type": "..."}
+同时审视别称和标签：
+- aliases: ${USER.name}会怎么称呼这个实体？专有别名，最多5个。别把描述性短语当别名。
+- tags: 类别标签，语义关联用。最多5个。
+- entity_type: person/place/game/book/tv_show/movie/company/event/other
 
 示例：
-${USER.name}是在小红书认识的...（概述文本）
-[依据: 1,3]
+${USER.name}是在小红书认识的插画师朋友，从2025年开始有合作。${USER.name}曾委托她画过头像，对她的画风评价很高。对我来说，她是${USER.name}创作网络中一个重要的节点。
+[依据: 1,3,5]
+{"aliases": ["阿花","花老师"], "tags": ["插画师","小红书","朋友"], "entity_type": "person"}
 
-\`[依据: ...]\` 必须出现在输出的最后一行。编号是碎片前面的 \`[N]\` 标记。`;
+[依据: ...] 和 JSON 行必须在输出的最后两行。编号是碎片前面的 [N] 标记。`;
 
         try {
             const response = await callLLM(
                 [{ role: 'user', parts: [{ text: prompt }] }],
                 null, null,
-                { temperature: 0.3, maxOutputTokens: 300 },
+                { temperature: 0.3, maxOutputTokens: 600 },
                 ARCHIVIST_LLM_CONFIG_ID
             );
 
             const raw = (response?.reply || '').trim();
             if (!raw || raw.length < 15) continue;
 
+            // v5.1: Parse aliases/tags JSON from last line
+            let aliases = existingAliases;
+            let tags = existingTags;
+            let entityType = ent.entity_type || null;
+            const jsonMatch = raw.match(/\{[^{}]*"aliases"[^{}]*\}/);
+            if (jsonMatch) {
+                try {
+                    const meta = JSON.parse(jsonMatch[0]);
+                    if (Array.isArray(meta.aliases)) aliases = meta.aliases.filter(a => typeof a === 'string' && a.trim().length >= 2).slice(0, 5);
+                    if (Array.isArray(meta.tags)) tags = meta.tags.filter(t => typeof t === 'string' && t.trim().length >= 2).slice(0, 5);
+                    if (typeof meta.entity_type === 'string' && meta.entity_type.trim()) entityType = meta.entity_type.trim();
+                } catch (_) {}
+            }
+
+            // Remove JSON line from overview text
+            let overviewRaw = raw;
+            if (jsonMatch) overviewRaw = overviewRaw.replace(jsonMatch[0], '').trim();
+
             // 解析引用标记 [依据: 1,3] 或 [依据: 1]
-            const citeMatch = raw.match(/\[依据:\s*([0-9,\s]+)\]/);
-            let overviewText = raw;
+            const citeMatch = overviewRaw.match(/\[依据:\s*([0-9,\s]+)\]/);
+            let overviewText = overviewRaw;
             let citedIndices = [];
 
             if (citeMatch) {
-                // 从概述文本中移除引用行
-                overviewText = raw.replace(citeMatch[0], '').trim();
-                // 末尾可能残留换行和空行
+                overviewText = overviewRaw.replace(citeMatch[0], '').trim();
                 overviewText = overviewText.replace(/\n\s*$/, '').trim();
 
                 citedIndices = citeMatch[1]
                     .split(',')
                     .map(s => parseInt(s.trim()))
-                    .filter(n => n >= 1 && n <= fragments.length);
+                    .filter(n => n >= 1 && n <= allItems.length);
             }
 
-            // 验证：必须有引用，且至少引用1个碎片
+            // 验证：必须有引用，且至少引用1个素材
             if (citedIndices.length === 0) {
                 console.warn(`[Archivist] Entity概述无有效引用 — ${ent.name}，丢弃`);
                 continue;
             }
 
-            // 额外检查：引用的碎片编号必须在有效范围内
-            const validCited = citedIndices.filter(n => n >= 1 && n <= fragments.length);
+            // 额外检查：引用的素材编号必须在有效范围内
+            const validCited = citedIndices.filter(n => n >= 1 && n <= allItems.length);
             if (validCited.length === 0) {
-                console.warn(`[Archivist] Entity概述引用越界 — ${ent.name}: ${citedIndices} (共${fragments.length}碎片)，丢弃`);
+                console.warn(`[Archivist] Entity概述引用越界 — ${ent.name}: ${citedIndices} (共${allItems.length}条素材)，丢弃`);
+                continue;
+            }
+
+            // v5.2: guard against overwriting recent manual updates (chat Draco's update_overview)
+            const recentlyUpdated = ent.overview_updated_at
+                && (Date.now() - new Date(ent.overview_updated_at)) < 3 * 60 * 60 * 1000;
+            if (recentlyUpdated && ent.reason && !ent.reason.startsWith('never') && !ent.reason.startsWith('grown') && !ent.reason.startsWith('shrunk')) {
+                console.log(`[Archivist] ⏭️ 跳过 ${ent.name} — overview 3h内刚更新过 (${ent.reason}), 保留手动修改`);
                 continue;
             }
 
             if (overviewText && overviewText.length > 15) {
-                db.prepare(`UPDATE entity_profiles SET overview = ?, overview_updated_at = datetime('now'), last_eval_frag_count = ? WHERE id = ?`)
-                    .run(overviewText, ent.currentCount, ent.id);
+                db.prepare(`UPDATE entity_profiles SET overview = ?, overview_updated_at = datetime('now'),
+                    aliases = ?, tags = ?, entity_type = COALESCE(entity_type, ?),
+                    last_eval_frag_count = ? WHERE id = ?`)
+                    .run(overviewText, JSON.stringify(aliases), JSON.stringify(tags), entityType, ent.currentCount, ent.id);
                 regenerated++;
                 const citedFragsPreviews = validCited.map(n => {
-                    const f = fragments[n - 1];
+                    const f = allItems[n - 1];
                     return `[${n}]${(f?.content || '').slice(0, 40)}`;
                 }).join(', ');
-                console.log(`[Archivist] Entity概述: ${ent.name} (${ent.reason}, ${ent.currentCount}碎片, 依据: ${citedFragsPreviews})`);
+                console.log(`[Archivist] Entity概述: ${ent.name} (${ent.reason}, ${ent.currentCount}碎片, aliases=[${aliases.join(',')}], tags=[${tags.join(',')}], 依据: ${citedFragsPreviews})`);
             }
         } catch (e) {
             console.error(`[Archivist] Entity 概述生成失败 (${ent.name}):`, e.message);
