@@ -4792,7 +4792,7 @@ ${itemsBlock}
 </constraints>
 
 <output_format>
-先写概述（中文）。
+先写概述（纯文本，不要markdown格式如**加粗**或#标题）。
 然后单独一行：[依据: 编号列表]
 然后一行JSON：{"aliases": [...], "tags": [...], "entity_type": "..."}
 同时审视别称和标签：
