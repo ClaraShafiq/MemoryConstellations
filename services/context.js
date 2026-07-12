@@ -192,26 +192,9 @@ ${libText}
         }
     }
 
-    // Saga 注入：长沉默（>60min）时注入长期记忆弧线
-    try {
-        const db = require('../database').getDb();
-        const lastUserMsg = db.prepare("SELECT timestamp FROM messages WHERE sender='user' ORDER BY id DESC LIMIT 1").get();
-        const silenceMinutes = lastUserMsg?.timestamp
-            ? (Date.now() - new Date(lastUserMsg.timestamp + '+08:00').getTime()) / 60000
-            : 0;
-
-        if (silenceMinutes > 60) {
-            const sagas = db.prepare("SELECT title, description FROM memory_sagas WHERE status='active' ORDER BY created_at DESC").all();
-            if (sagas.length > 0) {
-                const sagaText = sagas.map(s => `- ${s.title}: ${s.description}`).join('\n');
-                dynamicParts.push(`<memory_sagas>\n[${AI.name}的长期记忆弧线 — ${USER.name}离开${Math.floor(silenceMinutes / 60)}h${Math.floor(silenceMinutes % 60)}min后]\n${sagaText}\n</memory_sagas>`);
-                estimatedTokens += Math.ceil(sagaText.length / 4);
-                console.log(`buildSmartContext: silence ${Math.floor(silenceMinutes)}min, injected ${sagas.length} sagas`);
-            }
-        }
-    } catch (e) {
-        console.error('Saga注入失败:', e.message);
-    }
+    // Saga 不再通过长沉默全量注入。
+    // Sagas 现在通过 getEntityContext() 按实体关联注入 ——
+    // 当 Draco 在对话中遇到某个星座实体时，自动展示相关的叙事弧线。
 
     // Clara Intuition — context-triggered cognitive intuition
     // Keyword-first matching: only injects traits/hypotheses whose tags match the conversation.
