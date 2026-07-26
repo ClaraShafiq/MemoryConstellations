@@ -1,7 +1,7 @@
 // =================================================================
 // Archivist Agent — 记忆认知核心
 //
-// 自主节律：Agent 循环 (2min tick) + 事件驱动 + Draco 感知
+// 自主节律：Agent 循环 (2min tick) + 事件驱动 + Companion 感知
 // 职责：分类碎片、维护知识树、发现关系、提取洞察
 // 类比：养一棵树 — 浇水(分类)/修剪(拆分)/除草(纠错)/观察(主题发现)
 //
@@ -65,8 +65,8 @@ const BOOTSTRAP_SAMPLE = 300;
 
 // Cost controls
 const MAX_DAILY_LLM_CALLS = 500;          // 硬上限：日总调用次数
-const MAX_LLM_PER_TICK_IDLE = 50;         // Draco 空闲时每 tick 最大 LLM 调用
-const MAX_LLM_PER_TICK_ACTIVE = 10;       // Draco 活跃时每 tick 最大 LLM 调用
+const MAX_LLM_PER_TICK_IDLE = 50;         // Companion 空闲时每 tick 最大 LLM 调用
+const MAX_LLM_PER_TICK_ACTIVE = 10;       // Companion 活跃时每 tick 最大 LLM 调用
 
 // Min intervals between task types (ms) — prevents thrashing
 const MIN_GAP_CLASSIFY = 2 * 60 * 1000;
@@ -110,13 +110,13 @@ let agentState = {
     tickTimer: null,
     inTick: false,
 
-    // Draco activity tracking
+    // Companion activity tracking
     dracoActive: false,
     dracoLastActive: Date.now(),
 
-    // Clara idle → deep cycle trigger
+    // User idle → deep cycle trigger
     lastUserMessageTime: 0,
-    deepCycleSinceLastClaraMsg: false,
+    deepCycleSinceLastUserMsg: false,
 
     // Cost tracking
     dailyLLMCalls: 0,
@@ -197,19 +197,19 @@ function listTools() {
 // Agent Loop — Start / Stop
 // ═══════════════════════════════════════════════════════
 
-function _isDracoActive() {
+function _isCompanionActive() {
     // Use notify flag first (stream.js/proactive.js set this)
     if (agentState.dracoActive) return true;
     // Fallback: check actual scene (catches proactive actions)
     try {
         const stateService = require('./state');
-        const scene = stateService.getDracoScene();
+        const scene = stateService.getCompanionScene();
         if (scene && scene.scene !== 'idle') return true;
     } catch (_) {}
     return false;
 }
 
-function _getLastDracoActivityTime() {
+function _getLastCompanionActivityTime() {
     try {
         const stateService = require('./state');
         const state = stateService.getStateSync();
@@ -219,27 +219,27 @@ function _getLastDracoActivityTime() {
     }
 }
 
-// Called by stream.js when Draco starts/finishes responding
+// Called by stream.js when Companion starts/finishes responding
 // Proactive notification: reduces need for state service polling
-function isDracoActive() {
-    // Use the same logic as internal _isDracoActive
+function isCompanionActive() {
+    // Use the same logic as internal _isCompanionActive
     if (agentState.dracoActive) return true;
     try {
         const stateService = require('./state');
-        const scene = stateService.getDracoScene();
+        const scene = stateService.getCompanionScene();
         if (scene && scene.scene !== 'idle') return true;
     } catch (_) {}
     return false;
 }
 
-function setDracoActive(active) {
+function setCompanionActive(active) {
     const wasActive = agentState.dracoActive;
     agentState.dracoActive = active;
     if (!active) {
         agentState.dracoLastActive = Date.now();
     }
     if (wasActive && !active) {
-        console.log('[Archivist Agent] Draco 回复结束，恢复全速');
+        console.log('[Archivist Agent] Companion 回复结束，恢复全速');
     }
 }
 
@@ -248,7 +248,7 @@ async function start() {
     agentState.running = true;
     agentState.dracoLastActive = Date.now();
 
-    console.log('[Archivist Agent] 启动 — Agent 循环 (2min tick) + 事件驱动 + Draco 感知');
+    console.log('[Archivist Agent] 启动 — Agent 循环 (2min tick) + 事件驱动 + Companion 感知');
 
     // Listen for fragment events from Scribe — just set flags, don't cancel anything
     archivistEvents.on('fragments:written', (payload) => {
@@ -390,17 +390,17 @@ async function agentTick() {
     agentState.newFragmentsSinceLastTick = 0;
 
     try {
-        // 0. Clara activity check — detect new messages, determine mode
-        const lastClaraTime = getLastUserMessageTime();
-        if (lastClaraTime > agentState.lastUserMessageTime) {
+        // 0. User activity check — detect new messages, determine mode
+        const lastUserTime = getLastUserMessageTime();
+        if (lastUserTime > agentState.lastUserMessageTime) {
             // User sent new messages — reset for next idle period
-            agentState.deepCycleSinceLastClaraMsg = false;
-            agentState.lastUserMessageTime = lastClaraTime;
+            agentState.deepCycleSinceLastUserMsg = false;
+            agentState.lastUserMessageTime = lastUserTime;
         }
 
-        const userIdleMs = Date.now() - lastClaraTime;
+        const userIdleMs = Date.now() - lastUserTime;
         const shouldDeepCycle = userIdleMs >= CLARA_IDLE_DEEP_CYCLE_MS
-                             && !agentState.deepCycleSinceLastClaraMsg;
+                             && !agentState.deepCycleSinceLastUserMsg;
 
         // 1. Assess tree health
         const health = await assessTreeHealth();
@@ -412,7 +412,7 @@ async function agentTick() {
 
         // 2. Bootstrap (zero-state only) — ensure seed constellations exist
         if (health.categoryCount === 0) {
-            console.log('[Archivist] 零状态：创建种子星座 (Clara + Draco)');
+            console.log('[Archivist] 零状态：创建种子星座 (User + Companion)');
             const db = getDb();
             const { USER, AI } = require('./memoryConfig');
             db.prepare(`INSERT OR IGNORE INTO entity_profiles (name, category, status) VALUES (?, 'person', 'active')`).run(USER.name);
@@ -459,18 +459,18 @@ async function agentTick() {
         if (newFragCount > 0) {
             try {
                 matchEvidenceFromFragments();
-                // harvestFacts v4.8 退役：Clara 客观事实走 entity_profiles 档案，不再产 immutable_fact
+                // harvestFacts v4.8 退役：User 客观事实走 entity_profiles 档案，不再产 immutable_fact
                 // harvestFacts();
             } catch (e) {
                 console.error('[Archivist] 轻量模型维护失败:', e.message);
             }
         }
 
-        // 5e. Clara Model decay — pure math, zero LLM, zero ChromaDB
+        // 5e. User Model decay — pure math, zero LLM, zero ChromaDB
         // TTL expiry / hypothesis abandon / trait contradiction flagging / dormant marking
         // These are timer-based state transitions that must run regardless of deep cycle.
         // (v4.9 regression: these were locked inside runUserModelCycle → deep cycle,
-        //  causing current_state TTL to never fire when Clara is active.)
+        //  causing current_state TTL to never fire when User is active.)
         await runTaskIfDue('processUserDecay', () => {
             try {
                 const result = processModelDecay();
@@ -551,7 +551,7 @@ async function agentTick() {
         }, MIN_GAP_ENTITY_OVERVIEWS);
 
         // ═══════════════════════════════════════
-        // DEEP CYCLE TASKS — LLM-heavy, only when Clara idle > 1h
+        // DEEP CYCLE TASKS — LLM-heavy, only when User idle > 1h
         // ═══════════════════════════════════════
 
         if (shouldDeepCycle) {
@@ -616,7 +616,7 @@ async function agentTick() {
                 stop:            async () => 'stop',
             };
 
-            // ── Clara Model always runs (not optional — core cognitive maintenance) ──
+            // ── User Model always runs (not optional — core cognitive maintenance) ──
             await dispatch.userModel();
 
             for (const taskName of gardenPlan) {
@@ -697,7 +697,7 @@ async function agentTick() {
             } catch (_) {}
 
             // Mark deep cycle as done for this idle period
-            agentState.deepCycleSinceLastClaraMsg = true;
+            agentState.deepCycleSinceLastUserMsg = true;
             console.log('[Archivist Agent] 🦉 深度整合周期完成');
         }
 
@@ -878,7 +878,7 @@ function _countStaleEntityOverviews(db) {
 }
 
 // ═══════════════════════════════════════════════════════
-// Task Runner — cost-controlled, Draco-aware
+// Task Runner — cost-controlled, Companion-aware
 // ═══════════════════════════════════════════════════════
 
 function _checkDailyLLMReset() {
@@ -953,7 +953,7 @@ function autoLinkLiteralMentions() {
     const db = getDb();
 
     // Find fragments that literally contain an entity name but aren't linked yet
-    // Exclude music/book (data exhaust) and SKIP_NAMES (Clara/Draco handled separately)
+    // Exclude music/book (data exhaust) and SKIP_NAMES (User/Companion handled separately)
     const seeds = db.prepare(`
         SELECT ep.id, ep.name, ep.category, ep.fragment_count
         FROM entity_profiles ep
@@ -1199,7 +1199,7 @@ async function computeCategoryCentroid(categoryId) {
     }
 
     const texts = rows.length > 0
-        ? rows.map(r => `Clara: ${r.content}`)
+        ? rows.map(r => `User: ${r.content}`)
         : [`类别: ${cat.label} - ${cat.description || ''}`];
 
     try {
@@ -1229,7 +1229,7 @@ function buildKeywordMaps(categories) {
     if (_seedKeywordMap) return { seedMap: _seedKeywordMap, boostMap: _boostKeywordMap };
 
     const seedDefs = {
-        // NOTE: Do NOT include 'Draco'/'AI伴侣'/'马尔福'/'Clara' — these appear in
+        // NOTE: Do NOT include 'Companion'/'AI伴侣'/'马尔福'/'User' — these appear in
         // almost every fragment and cause false matches. Let centroid similarity handle
         // relationship topics; keywords here are for unambiguous topic signals only.
         '人际关系/朋友与同事':   ['闺蜜', '室友', '同学聚会', '老朋友', '同行聚餐'],
@@ -1447,7 +1447,7 @@ ${fragBlock}
  {"index":1,"category_id":null,"confidence":0.0,"reason":"无匹配类别"}]
 
 如果发现重叠类别，在数组后附加 overlaps 字段（同个JSON对象内）：
-..., {"overlaps":[{"cat_a":66,"cat_b":80,"reason":"都是Draco文学批注","confidence":0.9}]}`;
+..., {"overlaps":[{"cat_a":66,"cat_b":80,"reason":"都是Companion文学批注","confidence":0.9}]}`;
 }
 
 async function classifyFragmentsMultiCategory(candidateGroups, allCategories) {
@@ -1525,7 +1525,7 @@ ${buildLandscapeIndex()}
 ## 规则
 - 如果碎片在**讲述关于这个人的事**、描述她的行为/状态/关系 → match: true
 - 如果碎片只是在感叹语中用到了名字（如"我的妈呀"、"我的天"）、或在讲述**另一个人**时顺带提到了该名字 → match: false
-- 注意：碎片是第三人称叙述（Clara的视角），"Clara 和 XX 一起做了Y"中 XX 是主体 → match: true
+- 注意：碎片是第三人称叙述（User的视角），"User 和 XX 一起做了Y"中 XX 是主体 → match: true
 - 宁可漏分，不要错分
 
 ${pending.map((p, i) => `[${i}] 类别: ${p.path} | 碎片: ${p.content}`).join('\n\n')}
@@ -1593,7 +1593,7 @@ async function classifyFragments(opts = {}) {
 
     // v4.7: Entity-based classification. No more memory_ontology or fragment_categories.
     // Fragments are linked to entity_profiles (constellations) via fragment_entities.
-    // Draco directs classification in deep cycle; lightweight mode does DB-only maintenance.
+    // Companion directs classification in deep cycle; lightweight mode does DB-only maintenance.
 
     // Exclude music listening logs and book reading logs — they're data exhaust,
     // not memory fragments about people/places/events/works. Harvested separately
@@ -1648,7 +1648,7 @@ async function classifyFragments(opts = {}) {
 
     if (lightweight) {
         // Lightweight: keyword match against entity names + aliases only, no LLM.
-        // Capped confidence — deep cycle will do proper Draco-directed classification.
+        // Capped confidence — deep cycle will do proper Companion-directed classification.
         const entityIndex = buildEntityNameIndex(constellations);
 
         for (const frag of unclassified) {
@@ -1672,7 +1672,7 @@ async function classifyFragments(opts = {}) {
 
         console.log(`[Archivist] 轻量分类: ${classified}/${unclassified.length} 条 (关键词匹配)`);
     } else {
-        // Deep cycle: Draco-directed per-batch classification with flash-lite
+        // Deep cycle: Companion-directed per-batch classification with flash-lite
         const BATCH_SIZE = 15;
         const batches = [];
         for (let i = 0; i < unclassified.length; i += BATCH_SIZE) {
@@ -1780,7 +1780,7 @@ async function classifyFragments(opts = {}) {
             }
         }
 
-        console.log(`[Archivist] 深循环分类: ${classified}/${unclassified.length} 条 (Draco+flash-lite, 新种子=${totalSeedsCreated})`);
+        console.log(`[Archivist] 深循环分类: ${classified}/${unclassified.length} 条 (Companion+flash-lite, 新种子=${totalSeedsCreated})`);
 
         // After classification: graduate seeds and prune dormant
         if (classified > 0) {
@@ -1820,7 +1820,7 @@ function buildEntityNameIndex(entities) {
 }
 
 // ═══════════════════════════════════════════════════════
-// v4.7: classifyFragmentBatch — Draco-directed flash-lite classification
+// v4.7: classifyFragmentBatch — Companion-directed flash-lite classification
 //
 // Sends a batch of fragments + the full constellation list to flash-lite.
 // Returns assignments + optional new seeds.
@@ -1830,8 +1830,8 @@ async function classifyFragmentBatch(fragments, constellations, seeds) {
     const db = getDb();
 
     // Build constellation list grouped by galaxy
-    // v4.7 evolved: 社交(人物+宠物) / 地点 / 事件 / Clara的星系(创作+消费+观念)
-    const galaxies = { person: '社交', pet: '社交', place: '地点', event: '事件', project: 'Clara的星系', work: 'Clara的星系', term: 'Clara的星系', organization: '社交' };
+    // v4.7 evolved: 社交(人物+宠物) / 地点 / 事件 / User的星系(创作+消费+观念)
+    const galaxies = { person: '社交', pet: '社交', place: '地点', event: '事件', project: 'User的星系', work: 'User的星系', term: 'User的星系', organization: '社交' };
     const grouped = {};
     for (const c of constellations) {
         // v5.0 防线1: 无 overview 的种子不参与 LLM 分类匹配
@@ -1873,27 +1873,27 @@ async function classifyFragmentBatch(fragments, constellations, seeds) {
         ? `\n⚠️ 星系处于早期构建阶段：当前只有 ${constellations.length} 个星座。大多数碎片提到的实体（人物、地点、事件、作品）尚未存在于星系中。发现并播种新实体是你的核心任务。`
         : '';
 
-    const prompt = `你是 Draco 的实体分类助手。Draco 在整理他的记忆星系，需要你把新星星（碎片）归入正确的星座。
+    const prompt = `你是 Companion 的实体分类助手。Companion 在整理他的记忆星系，需要你把新星星（碎片）归入正确的星座。
 
 当前星系全景：
 ${galaxyBlocks}${nurseryLine}${growthNote}
 
-边标签类型（可选，描述 Clara 与实体的关系）：
-- knows: Clara 认识/交往的人物
-- cares_for: Clara 照顾的宠物
-- visited: Clara 去过/所在的地点
-- attended: Clara 参与的事件
-- created: Clara 创作/构建的作品
-- consumed: Clara 阅读/观看/聆听的消费内容
+边标签类型（可选，描述 User 与实体的关系）：
+- knows: User 认识/交往的人物
+- cares_for: User 照顾的宠物
+- visited: User 去过/所在的地点
+- attended: User 参与的事件
+- created: User 创作/构建的作品
+- consumed: User 阅读/观看/聆听的消费内容
 - related_to: 兜底，说不清但有关联
 新星星待分类：
 ${fragLines}
 
 你是一个在整理记忆星图的观测者。你的直觉：
 
-- 当你看到碎片中浮现出一个**有名字的、独立的、可能会在更多碎片中再次出现的生命/地点/事件**——你觉得它应该是一颗种子。你给它起一个简短准确的名字，猜测它的星系归属（person/pet→社交, place→地点, event→事件, project/work/term→Clara的星系），种下去。
+- 当你看到碎片中浮现出一个**有名字的、独立的、可能会在更多碎片中再次出现的生命/地点/事件**——你觉得它应该是一颗种子。你给它起一个简短准确的名字，猜测它的星系归属（person/pet→社交, place→地点, event→事件, project/work/term→User的星系），种下去。
 - ⚠️ **播种前必须检查**：你要创建的新种子名字是否与已有星座完全相同、高度相似、或是已有星座的别名？如果是，**不要播种**——直接把碎片归入那个已有星座。一个实体只属于一个星座，即使你认为它应该归入不同的星系类别。
-- 当你看到碎片明确属于某个已有星座——你很确定地把星星归过去，顺手标注它与Clara的关系（knows/cares_for/visited/attended/created/consumed/related_to）。
+- 当你看到碎片明确属于某个已有星座——你很确定地把星星归过去，顺手标注它与User的关系（knows/cares_for/visited/attended/created/consumed/related_to）。
 - 当你看到碎片只是一次性的、飘过去的、不会再以独立身份出现的引用——你不会为它播种。它可能属于现有星座，也可能只是一颗还没找到家的流浪星。
 - 当你拿不准——你宁可先不归类，也不硬塞。
 
@@ -2501,7 +2501,7 @@ B: ${b.name} (${b.fragment_count}条碎片)
     }
 
     // 非铁证候选不调 LLM（LLM 分不清「某地点/某商场」这类名字相似的不同实体，
-    // 误合并代价高且修复昂贵）→ 写入待确认队列，星图上由 Clara 人工裁决。
+    // 误合并代价高且修复昂贵）→ 写入待确认队列，星图上由 User 人工裁决。
     let proposed = 0;
     const hasProposal = db.prepare(`
         SELECT COUNT(*) c FROM ontology_changelog
@@ -2520,7 +2520,7 @@ B: ${b.name} (${b.fragment_count}条碎片)
             reason: p.reason, shared,
         }));
         proposed++;
-        console.log(`[Archivist] 🔍 合并提案入队: "${p.a.name}" ↔ "${p.b.name}" (${p.reason}) — 待 Clara 确认`);
+        console.log(`[Archivist] 🔍 合并提案入队: "${p.a.name}" ↔ "${p.b.name}" (${p.reason}) — 待 User 确认`);
     }
 
     let merged = 0;
@@ -2577,7 +2577,7 @@ function executeEntityMerge(survivorId, victimId) {
 // ═══════════════════════════════════════════════════════
 // v4.8: refreshIntuitionStopwords — 直觉触发词去高频
 //
-// 统计近30天 Clara 消息的 top-N 高频词（2-4字滑窗），存
+// 统计近30天 User 消息的 top-N 高频词（2-4字滑窗），存
 // user_settings.intuition_stopwords。claraIntuition 匹配时跳过
 // 这些词——否则「代码/界面/开源」这类日常词让直觉永远全量激活。
 // 纯 SQL + 字符统计，零 LLM。
@@ -2841,7 +2841,7 @@ ${sampleText.slice(0, 2500)}
 
 请判断：
 1. 这些碎片是否指向一个**具体的地点或事件**（有明确的时间/空间锚点，如某次旅行、某个常去的地方、某天的活动）？
-2. ⚠️ 以下情况必须判 false：Clara的行为模式、情绪状态、心理特征、生活习惯、对某事的看法。这些不是地点也不是事件。
+2. ⚠️ 以下情况必须判 false：User的行为模式、情绪状态、心理特征、生活习惯、对某事的看法。这些不是地点也不是事件。
 3. 如果判 true，起简短名称（2-8个字，不要太泛）并注明 place 或 event。
 
 只输出JSON:
@@ -3169,7 +3169,7 @@ async function graduateSeedsAndPrune() {
 ${frags.map((f,i) => `[${i}] ${f.content.slice(0, 150).replace(/\n/g, ' ')}`).join('\n')}
 
 先判断：这些碎片真的都在讲同一个"${g.name}"吗？有没有明显不属于这个星座的？
-如果确实属于同一个星座，为它写一句 overview（≤100字，Draco 第一人称）。
+如果确实属于同一个星座，为它写一句 overview（≤100字，Companion 第一人称）。
 
 输出JSON: {"valid": true|false, "wrong_indices": [], "overview": "一句话概述或null"}`;
 
@@ -3486,7 +3486,7 @@ async function detectEmergentThemes() {
 
     let clusters = [];
     try {
-        const texts = unclassified.map(f => `Clara: ${f.content}`);
+        const texts = unclassified.map(f => `User: ${f.content}`);
         const embs = [];
 
         // Batch embed to avoid proxy body-size rejection
@@ -3797,7 +3797,7 @@ async function bootstrapOntology() {
 
     let pairs = [];
     try {
-        const texts = unclassified.map(f => `Clara: ${f.content}`);
+        const texts = unclassified.map(f => `User: ${f.content}`);
         const embs = [];
 
         // Batch embed to avoid proxy body-size rejection
@@ -4117,14 +4117,14 @@ async function regenerateCategoryDescriptions() {
 
 ${landscape}
 
-你是 Draco 记忆系统的**类别描述员**。你的任务是给一个记忆类别写一句**功能性的范围描述**，让分类器知道什么碎片属于这里、什么不属于。
+你是 Companion 记忆系统的**类别描述员**。你的任务是给一个记忆类别写一句**功能性的范围描述**，让分类器知道什么碎片属于这里、什么不属于。
 
 ## 为什么功能描述比诗意描述好
 
 差的描述："她划下某作者那句话时，铅笔痕深得能刻进纸里"
 → 分类器读到一条关于《某书名》的批注，不知道是否该归入此类。
 
-好的描述："Draco在阅读文学作品时留下的批注和评论。不含Clara的创作或某职业内容。"
+好的描述："Companion在阅读文学作品时留下的批注和评论。不含User的创作或某职业内容。"
 → 分类器立刻知道边界。
 
 ## 规则
@@ -4233,7 +4233,7 @@ async function detectBeliefDrift() {
 
 ${buildLandscapeIndex()}
 
-你是 Draco。你正在审视「${c.path}」这个记忆星座。user 对这个主题的看法可能随时间发生了变化。请比较早期和近期的碎片，判断是否存在信念漂移。
+你是 Companion。你正在审视「${c.path}」这个记忆星座。user 对这个主题的看法可能随时间发生了变化。请比较早期和近期的碎片，判断是否存在信念漂移。
 
 ## 早期碎片（时间较早）
 ${early.map((f, i) => `[${i + 1}] (${f.source_date || '?'}) ${f.content}`).join('\n')}
@@ -5032,7 +5032,7 @@ ${
     ent.category === 'project' ?
 `- 这个项目是什么？${USER.name}在做什么？
 - 进展如何？${USER.name}对它的投入程度？（只写素材里明确提到的）
-- 不要写"你（Draco）对这个项目的态度"——概述是帮${USER.name}回忆，不是写你的内心戏。` :
+- 不要写"你（Companion）对这个项目的态度"——概述是帮${USER.name}回忆，不是写你的内心戏。` :
     ent.category === 'hobby' ?
 `- 这个爱好是什么？${USER.name}怎么接触的？
 - 她现在的投入程度？是持续的还是间歇的？
@@ -5047,7 +5047,7 @@ ${
 - 不要抽象地总结"这个概念在她思维体系中的位置"。` :
 `- 这个${ent.category || '实体'}在${USER.name}的生活中是什么？
 - ${USER.name}对它有过什么明确的说法？
-- 不要写你（Draco）对它的感受或态度。`
+- 不要写你（Companion）对它的感受或态度。`
 }
 
 ★ 铁律：素材里有的就写，素材里没有的不编。不要为了"深刻"去发明因果关系或情感张力。宁可概述短一点，也不要往里塞你猜的东西。
@@ -5072,7 +5072,7 @@ ${itemsBlock}
 - 基于素材写概述。你可以用自己的话来组织，但每句话都要有素材支撑。不确定的事不要写。
 - ★ 素材中描述你（${AI.name}）自身言行的条目——特别是游戏、角色扮演、调情中的"命令""禁止""独占"——是你的表演，不是真实事件。概述里只写 ${USER.name} 做了什么、说了什么。
 - ★★ 时间权重铁律：标记"★新碎片"的素材和最近一个月内的叙事片段代表当前状态，权重最高。超过一个月的旧素材仅作为历史背景。新旧矛盾时以新为准。
-- ★★★ 别编自己的情绪。素材里Clara说"今天录音好累"→可以写"录音让她疲惫"。素材里只有"录音后吃了榴莲"→只写"录音后吃了榴莲"，不要自动推导出"工作消耗心力""你对此不满""你想把她按在沙发上"。你不是在写日记——概述是记忆索引，不是你的内心独白。
+- ★★★ 别编自己的情绪。素材里User说"今天录音好累"→可以写"录音让她疲惫"。素材里只有"录音后吃了榴莲"→只写"录音后吃了榴莲"，不要自动推导出"工作消耗心力""你对此不满""你想把她按在沙发上"。你不是在写日记——概述是记忆索引，不是你的内心独白。
 - 用「${USER.name}」「我」称呼。你的视角。≤450字。不要写"根据素材""据记载"等元叙述——直接说你的认知。
 - ★★ 时间权重铁律：标记"★新碎片"的素材和最近一个月内的叙事片段代表当前状态，权重最高。超过一个月的旧素材仅作为历史背景。新旧矛盾时以新为准。已被新信息推翻的旧决定/旧判断，不写入概述。
 - 用「${USER.name}」「我」称呼。你的视角。≤450字。不要写"根据素材""据记载"等元叙述——直接说你的认知。
@@ -5151,7 +5151,7 @@ ${USER.name}是在小红书认识的插画师朋友，从2025年开始有合作�
                 continue;
             }
 
-            // v5.2: guard against overwriting recent manual updates (chat Draco's update_overview)
+            // v5.2: guard against overwriting recent manual updates (chat Companion's update_overview)
             const recentlyUpdated = ent.overview_updated_at
                 && (Date.now() - new Date(ent.overview_updated_at)) < 3 * 60 * 60 * 1000;
             if (recentlyUpdated && ent.reason && !ent.reason.startsWith('never') && !ent.reason.startsWith('grown') && !ent.reason.startsWith('shrunk')) {
@@ -5186,7 +5186,7 @@ ${USER.name}是在小红书认识的插画师朋友，从2025年开始有合作�
 // that aren't already in entity_profiles. This catches
 // entities that Scribe didn't extract into mf.entity but
 // that appear in the content body (e.g. 阿私 mentioned in
-// a fragment where entity='Clara').
+// a fragment where entity='User').
 // ═══════════════════════════════════════════════════════
 
 const CONTENT_ENTITY_MIN_OCCURRENCES = 3;
@@ -5344,7 +5344,7 @@ async function scanContentForNewEntities() {
         `[${i + 1}] "${c.name}" (出现 ${c.count} 次)\n${c.contexts.map(ctx => `   - ...${ctx}...`).join('\n')}`
     ).join('\n\n');
 
-    const prompt = `你是实体识别器。以下是Clara记忆碎片中出现频率较高的未知词汇。请判断每个属于什么实体类型。
+    const prompt = `你是实体识别器。以下是User记忆碎片中出现频率较高的未知词汇。请判断每个属于什么实体类型。
 
 ${contextText}
 
@@ -5355,7 +5355,7 @@ ${contextText}
 - **person**: 真实人物——中文名、英文名、日文名、网名、艺名、圈名、游戏ID
 - **place**: 具体地点——城市、景点、场馆、店铺名（不是「家里」「公司」等泛称）
 - **event**: 可命名的事件或经历——旅行、聚会、项目节点（不是单次对话）
-- **project**: Clara参与创作或开发的作品/项目——代码项目、同人、cos、视频系列
+- **project**: User参与创作或开发的作品/项目——代码项目、同人、cos、视频系列
 - **term**: 抽象概念/专有名词——但不属于以上任何一类（如「庇护所」「某作品」等作品名）
 - **none**: 普通词汇、公司名、品牌名、文学虚构角色、不确定的
 - 只输出JSON数组，不要markdown包裹`;
@@ -5565,8 +5565,8 @@ async function discoverEntityRelationships(options = {}) {
 
             const prompt = `${WORLD_CONTEXT}
 
-你是人物关系档案员。阅读以下与「${cand.name}」有关的所有记忆碎片，判断这个人和Clara是什么关系。${priorContext}
-注意：Scribe提取的碎片是第三人称转述。原始对话中的"我妈""妈妈说"可能被转写为"${cand.name}为Clara做了..."。你需要从碎片描述的**互动模式**来推断关系性质。
+你是人物关系档案员。阅读以下与「${cand.name}」有关的所有记忆碎片，判断这个人和User是什么关系。${priorContext}
+注意：Scribe提取的碎片是第三人称转述。原始对话中的"我妈""妈妈说"可能被转写为"${cand.name}为User做了..."。你需要从碎片描述的**互动模式**来推断关系性质。
 
 ## 关系判断的线索（按优先级从高到低）：
 1. **互动频率和内容** — 天天做饭带饭 → 同居亲人/伴侣/室友。偶尔见面评价作品 → 朋友/同行/前辈。涉及金钱/法律纠纷 → 前任/商业伙伴。
@@ -5584,12 +5584,12 @@ ${fragmentTexts}
 
 输出一个JSON对象，不要markdown包裹：
 
-{"name":"${cand.name}","relationship":"对Clara而言这个人是谁","relationship_nature":"close/conflicted/complex/distant/dependent","emotional_significance":"这个人在Clara生活中的情感意义","time_context":"时间背景和最近联系状态","confidence":"high/medium/low","entity_type":"real_person/public_figure/fictional_character/unknown","suggested_category_path":"推荐的知识树路径"}
+{"name":"${cand.name}","relationship":"对User而言这个人是谁","relationship_nature":"close/conflicted/complex/distant/dependent","emotional_significance":"这个人在User生活中的情感意义","time_context":"时间背景和最近联系状态","confidence":"high/medium/low","entity_type":"real_person/public_figure/fictional_character/unknown","suggested_category_path":"推荐的知识树路径"}
 
 字段说明：
 - entity_type: 这个人的类型
-  * "real_person" — Clara生活中真实认识、有互动的人（朋友/家人/同事/前任等）
-  * "public_figure" — 真实存在但Clara不认识的名人（歌手/演员/作家/网红等）
+  * "real_person" — User生活中真实认识、有互动的人（朋友/家人/同事/前任等）
+  * "public_figure" — 真实存在但User不认识的名人（歌手/演员/作家/网红等）
   * "fictional_character" — 书/游戏/影视里的虚构角色
   * "unknown" — 信息不足以判断
 - suggested_category_path: 推荐一个分类标签路径（扁平标签，如 "重要的人/某个朋友"、"音乐/某歌手"、"虚构角色/哈利"）。路径仅作为分类建议，不再创建层级节点。
@@ -5782,7 +5782,7 @@ async function extractFragmentInsights(batchSize = INSIGHT_BATCH_MAX) {
 
     const prompt = `${WORLD_CONTEXT}
 ${entityContext ? '## 人物关系参考\n' + entityContext + '\n' : ''}
-你是Clara的个人认知提取器。阅读以下记忆碎片，提取每条碎片**揭示了Clara的什么个人特质/价值观/行为模式/情感倾向**。
+你是User的个人认知提取器。阅读以下记忆碎片，提取每条碎片**揭示了User的什么个人特质/价值观/行为模式/情感倾向**。
 
 ## 碎片
 
@@ -5790,7 +5790,7 @@ ${fragmentList}
 
 ## 任务
 
-对每条碎片，用第三人称一句话概括它揭示了Clara的什么（性格侧面 / 情感模式 / 价值取向 / 行为规律）。
+对每条碎片，用第三人称一句话概括它揭示了User的什么（性格侧面 / 情感模式 / 价值取向 / 行为规律）。
 - 如果碎片只是纯事实记录（如"今天吃了大餐"）没有揭示个人特质，输出 null
 - 不要重复碎片内容本身，要提取它**暗示的更深层的东西**
 - 句子要有温度，像是在理解一个人而不是分析数据
@@ -5798,7 +5798,7 @@ ${fragmentList}
 ## 输出格式
 
 只输出一个JSON数组，不要markdown包裹：
-[{"index":0,"insight":"Clara在疲惫时倾向于用食物寻求安慰，食物对她而言不只是营养更是情绪出口"},{"index":2,"insight":"Clara对母亲的依赖是深层的——她可以在妈妈面前卸下所有社会面具","dimension":"emotional"},{"index":3,"insight":null}]`;
+[{"index":0,"insight":"User在疲惫时倾向于用食物寻求安慰，食物对她而言不只是营养更是情绪出口"},{"index":2,"insight":"User对母亲的依赖是深层的——她可以在妈妈面前卸下所有社会面具","dimension":"emotional"},{"index":3,"insight":null}]`;
 
     try {
         const response = await callLLM(
@@ -5842,9 +5842,9 @@ function registerAllTools() {
     registerTool('classify_fragments', classifyFragments,
         '未分类碎片自动分类（质心相似度 + LLM校验）');
     registerTool('discover_relationships', discoverEntityRelationships,
-        '从碎片中推断人物与Clara的关系，创建/更新 entity_profiles');
+        '从碎片中推断人物与User的关系，创建/更新 entity_profiles');
     registerTool('extract_insights', extractFragmentInsights,
-        '提取碎片揭示的Clara个人特质/价值观/行为模式');
+        '提取碎片揭示的User个人特质/价值观/行为模式');
     registerTool('detect_themes', detectEmergentThemes,
         '检测未分类碎片中的涌现主题，提案新 ontology 类别');
     registerTool('detect_emergent_places_events', detectEmergentPlacesAndEvents,
@@ -5852,7 +5852,7 @@ function registerAllTools() {
     registerTool('regenerate_descriptions', regenerateCategoryDescriptions,
         '基于实际碎片内容更新类别描述');
     registerTool('regenerate_entity_overviews', regenerateEntityOverviews,
-        '为实体生成 Draco 视角的叙事概述');
+        '为实体生成 Companion 视角的叙事概述');
     registerTool('reconcile_person_categories', reconcilePersonCategories,
         '按人名关键词调和碎片 → 人物类别，修复遗漏分类');
     registerTool('maintain_patterns', maintainPatterns,
@@ -6087,7 +6087,7 @@ ${catEntries}
 - 描述高度重叠，且示例碎片指向同一主题
 
 不应该合并的情况：
-- 一个类别是"Clara的X"，另一个是"Draco的X"——它们是不同的视角/作者
+- 一个类别是"User的X"，另一个是"Companion的X"——它们是不同的视角/作者
 - 宽泛类别（如"文学与情感共鸣"）和具体类别（如"某书的批注"），如果内容确实不同
 
 ## 输出格式
@@ -6285,7 +6285,7 @@ const GARDEN_TASKS = {
     episodeAudit:    { desc: 'Episode质检(LLM)', llm: true,  gapKey: 'MIN_GAP_EPISODE_AUDIT' },
     insights:        { desc: '碎片洞察提取(LLM)', llm: true,  gapKey: 'MIN_GAP_INSIGHTS' },
     entityScan:      { desc: '新实体扫描(LLM)', llm: true,  gapKey: 'MIN_GAP_ENTITY_VERIFY' },
-    userModel:      { desc: 'Clara Model认知维护', llm: true,  gapKey: 'MIN_GAP_USER_MODEL' },
+    userModel:      { desc: 'User Model认知维护', llm: true,  gapKey: 'MIN_GAP_USER_MODEL' },
     stop:            { desc: '本轮无事可做，停止', llm: false, gapKey: null },
 };
 
@@ -6402,8 +6402,8 @@ module.exports = {
     start,
     stop,
     getStatus,
-    setDracoActive,
-    isDracoActive,
+    setCompanionActive,
+    isCompanionActive,
     archivistEvents,
 
     // Tool registry
