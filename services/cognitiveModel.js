@@ -2331,7 +2331,7 @@ action: extend=旧便签还够用，只续命。create=状态变了或上次判�
         if (action !== 'extend' || !prevState) {
         // v5.4: readUserRawMessages 产出的是全景快照（holistic snapshot），
         // 不是领域分项。新版快照自然替代旧版——resolve 所有前序 deep_cycle 条目。
-        // chat_draco 条目（通过 manage_clara_state 工具创建的领域明确状态）
+        // chat_draco 条目（通过 manage_user_state 工具创建的领域明确状态）
         // 不受影响，继续按各自 TTL 独立过期。
         const resolvedCount = db.prepare(`
             UPDATE clara_model SET status = 'resolved',
