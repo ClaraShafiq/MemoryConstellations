@@ -12,11 +12,11 @@ const UI = window.MEMORY_UI_CONFIG || { user: { name: 'User' } };
 export const OWN_GALAXY_ID = UI.user.name + '的';
 
 export const GALAXIES = [
-    { id: '爱好',       hue: 0,   azimuth: -90,  desc: OWN_GALAXY_ID + '星系——音乐、书籍、电影等兴趣爱好' },
-    { id: '社交',       hue: 22,  azimuth: -18,  desc: '人际关系网' },
-    { id: OWN_GALAXY_ID, hue: 275, azimuth: 54,   desc: '创作产出与项目' },
-    { id: '事件',       hue: 152, azimuth: 126,  desc: '有时间跨度的经历' },
-    { id: '地点',       hue: 215, azimuth: 198,  desc: '走过的物理空间' },
+    { id: '爱好', hue: 0,   azimuth: -90, desc: '游戏、影视、书籍、音乐——她喜欢的东西' },
+    { id: '社交', hue: 22,  azimuth: -18, desc: '人际关系网——她认识的人、她的猫' },
+    { id: '创作', hue: 275, azimuth: 54,  desc: '她的创作——小说、代码、项目、某职业工作' },
+    { id: '事件', hue: 152, azimuth: 126, desc: '有时间跨度的经历' },
+    { id: '地点', hue: 215, azimuth: 198, desc: '走过的物理空间' },
 ];
 export const GALAXY_BY_ID = Object.fromEntries(GALAXIES.map(g => [g.id, g]));
 
@@ -69,7 +69,7 @@ export function hslToRgbStr(hue, sat, lit) {
 export const universe = {
     constellations: [],   // 普通星座（不含 Clara/Draco）
     core: [],             // 双星核心档案
-    cognitiveModel: [],
+    claraModel: [],
     archlog: [],
     mergeProposals: [],   // 待 Clara 裁决的合并提案
     bridges: [],          // 星座桥 [{a, b, weight}]（conId 对）
@@ -178,7 +178,7 @@ export async function loadUniverse() {
 
     universe.constellations = cons;
     universe.core = data.core || [];
-    universe.cognitiveModel = data.cognitiveModel || [];
+    universe.claraModel = data.claraModel || [];
     universe.patterns = data.patterns || [];
     universe.archlog = data.archlog || [];
     universe.mergeProposals = data.mergeProposals || [];
