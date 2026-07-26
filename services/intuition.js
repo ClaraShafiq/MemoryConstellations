@@ -229,8 +229,8 @@ function getTriggeredIntuition(userMessage, maxTokens = 800) {
     return { text: '', signals: [] };
   }
 
-  const lines = ['<clara_intuition>',
-    '（你此刻感知到的Clara的状态——不是推理，是观察。）',
+  const lines = ['<user_intuition>',
+    '（你此刻感知到的用户的状态——不是推理，是观察。）',
     ''];
 
   // ── 当前状态（含 TTL 提示）──
@@ -329,7 +329,7 @@ function getTriggeredIntuition(userMessage, maxTokens = 800) {
     if (triggered.length > 0) lines.push('');
   }
 
-  lines.push('</clara_intuition>');
+  lines.push('</user_intuition>');
 
   const fullText = lines.join('\n');
   const estimatedTokens = Math.ceil(fullText.length / 1.5);
@@ -337,8 +337,8 @@ function getTriggeredIntuition(userMessage, maxTokens = 800) {
   if (estimatedTokens <= maxTokens) return { text: fullText, signals: [] };
 
   // 超预算：保留 current_state + 缩减 entity overview
-  const slim = ['<clara_intuition>',
-    '（你此刻感知到的Clara的状态——不是推理，是观察。）',
+  const slim = ['<user_intuition>',
+    '（你此刻感知到的用户的状态——不是推理，是观察。）',
     ''];
   if (states.length > 0) {
     slim.push('● 当前状态：');
@@ -354,7 +354,7 @@ function getTriggeredIntuition(userMessage, maxTokens = 800) {
     }
     slim.push('');
   }
-  slim.push('</clara_intuition>');
+  slim.push('</user_intuition>');
   return { text: slim.join('\n'), signals: [] };
 }
 

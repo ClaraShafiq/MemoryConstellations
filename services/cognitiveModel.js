@@ -57,7 +57,7 @@ const HYPOTHESIS_ABANDON_DAYS = 14;      // 14天无证据 → 放弃
 const STATE_HALF_LIFE_DAYS = 7;          // current_state 半衰期
 const STATE_AUTO_RESOLVE_DAYS = 14;      // 14天无证据 → 自动 resolved
 const TRAIT_CONTRADICTION_THRESHOLD = 3; // 矛盾≥3 → 降级重审
-const MIN_GAP_CLARA_MODEL = 4 * 60 * 60 * 1000; // 深循环冷却 4h
+const MIN_GAP_USER_MODEL = 4 * 60 * 60 * 1000; // 深循环冷却 4h
 
 // ═══════════════════════════════════════════════════════
 // CRUD
@@ -104,7 +104,7 @@ function createEntry(type, content, opts = {}) {
     if (expires_at) {
         const maxExpiry = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
         if (expires_at > maxExpiry) {
-            console.log(`[ClaraModel] ⚠️ expires_at ${expires_at} exceeds 90d cap, clamping to ${maxExpiry}`);
+            console.log(`[UserModel] ⚠️ expires_at ${expires_at} exceeds 90d cap, clamping to ${maxExpiry}`);
             expires_at = maxExpiry;
         }
     }
@@ -125,7 +125,7 @@ function createEntry(type, content, opts = {}) {
         created_by, expires_at
     );
 
-    console.log(`[ClaraModel] 创建 ${type}[${source_quality}][${created_by}]: "${content.slice(0, 60)}" (id=${result.lastInsertRowid}, conf=${effectiveConfidence.toFixed(2)})`);
+    console.log(`[UserModel] 创建 ${type}[${source_quality}][${created_by}]: "${content.slice(0, 60)}" (id=${result.lastInsertRowid}, conf=${effectiveConfidence.toFixed(2)})`);
     return result.lastInsertRowid;
 }
 
@@ -350,7 +350,7 @@ function addEvidence(id, fragmentId, confirms = true, opts = {}) {
     if (entry.type === 'active_hypothesis' && sourceDiversity >= 3 && newConfidence >= 0.70) {
         db.prepare(`UPDATE clara_model SET type = 'stable_trait', decay_type = 'evidence_dependent',
             source_quality = 'inferred', updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(id);
-        console.log(`[ClaraModel] 🆙 假设升级为特质: "${entry.content.slice(0, 60)}" (id=${id}, evidence=${newCount}, diversity=${sourceDiversity})`);
+        console.log(`[UserModel] 🆙 假设升级为特质: "${entry.content.slice(0, 60)}" (id=${id}, evidence=${newCount}, diversity=${sourceDiversity})`);
         return { upgraded: true, id, content: entry.content };
     }
 
@@ -494,7 +494,7 @@ function matchEvidenceFromFragments() {
     }
 
     if (matched > 0) {
-        console.log(`[ClaraModel] 🔍 轻量证据匹配: ${matched}/${newFragments.length} 条碎片匹配到认知条目`);
+        console.log(`[UserModel] 🔍 轻量证据匹配: ${matched}/${newFragments.length} 条碎片匹配到认知条目`);
     }
     return { matched, fragmentsScanned: newFragments.length };
 }
@@ -547,7 +547,7 @@ function processModelDecay() {
                 resolve_reason = 'auto-resolved: hard cap (12 active limit)', updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?`).run(s.id);
             changes.resolved++;
-            console.log(`[ClaraModel] 🧹 current_state #${s.id} 自动过期 (硬上限12条, created_by=${s.created_by})`);
+            console.log(`[UserModel] 🧹 current_state #${s.id} 自动过期 (硬上限12条, created_by=${s.created_by})`);
         }
     }
 
@@ -566,7 +566,7 @@ function processModelDecay() {
                     resolve_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                     .run(`auto-resolved: expires_at ${s.expires_at} reached`, s.id);
                 changes.resolved++;
-                console.log(`[ClaraModel] ⏰ current_state #${s.id} 到期 (expires_at=${s.expires_at})`);
+                console.log(`[UserModel] ⏰ current_state #${s.id} 到期 (expires_at=${s.expires_at})`);
             }
             continue; // explicit expires_at → skip old TTL logic
         }
@@ -587,7 +587,7 @@ function processModelDecay() {
                 resolve_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                 .run(`auto-resolved: TTL ${category}/${ttlCat} (${ttlHours}h) exceeded after ${hoursSince.toFixed(1)}h`, s.id);
             changes.resolved++;
-            console.log(`[ClaraModel] ⏰ current_state #${s.id} 自动过期 (${category}/${ttlCat}, ${hoursSince.toFixed(0)}h/${ttlHours}h)`);
+            console.log(`[UserModel] ⏰ current_state #${s.id} 自动过期 (${category}/${ttlCat}, ${hoursSince.toFixed(0)}h/${ttlHours}h)`);
         }
     }
 
@@ -655,18 +655,18 @@ function processModelDecay() {
             db.prepare(`UPDATE clara_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                 .run(JSON.stringify(tags), t.id);
             changes.dormant++;
-            console.log(`[ClaraModel] 💤 trait #${t.id} 标记 dormant (${daysSince.toFixed(0)}天无证据)`);
+            console.log(`[UserModel] 💤 trait #${t.id} 标记 dormant (${daysSince.toFixed(0)}天无证据)`);
         } else if (daysSince <= 14 && tags.includes('dormant')) {
             const revived = tags.filter(tag => tag !== 'dormant');
             db.prepare(`UPDATE clara_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                 .run(JSON.stringify(revived), t.id);
             changes.revived++;
-            console.log(`[ClaraModel] 🌱 trait #${t.id} 复活 (${daysSince.toFixed(0)}天前有新证据)`);
+            console.log(`[UserModel] 🌱 trait #${t.id} 复活 (${daysSince.toFixed(0)}天前有新证据)`);
         }
     }
 
     if (changes.decayed + changes.resolved + changes.abandoned + changes.flagged + changes.dormant + changes.revived > 0) {
-        console.log(`[ClaraModel] 衰减处理: decayed=${changes.decayed} resolved=${changes.resolved} abandoned=${changes.abandoned} flagged=${changes.flagged} dormant=${changes.dormant} revived=${changes.revived}`);
+        console.log(`[UserModel] 衰减处理: decayed=${changes.decayed} resolved=${changes.resolved} abandoned=${changes.abandoned} flagged=${changes.flagged} dormant=${changes.dormant} revived=${changes.revived}`);
     }
 
     return changes;
@@ -716,7 +716,7 @@ function crossRefStateWithEntities() {
             if (!e.overview || e.overview.trim().length === 0) {
                 // Entity exists but has no overview — log for manual/scheduled review
                 changes.entityFlags++;
-                console.log(`[ClaraModel] 🔍 crossref: entity "${e.name}" 无 overview — 需要建档案（当前无法自动创建，请手动审核）`);
+                console.log(`[UserModel] 🔍 crossref: entity "${e.name}" 无 overview — 需要建档案（当前无法自动创建，请手动审核）`);
             }
         }
     }
@@ -748,7 +748,7 @@ function crossRefStateWithEntities() {
                     .run(JSON.stringify(tb), b.id);
                 changes.stateConflicts++;
                 const sameSource = a.created_by === b.created_by ? ' (同源)' : '';
-                console.log(`[ClaraModel] ⚔️ crossref: current_state #${a.id} (${a.created_by}) ↔ #${b.id} (${b.created_by}) 主题重叠${sameSource} → needs_review`);
+                console.log(`[UserModel] ⚔️ crossref: current_state #${a.id} (${a.created_by}) ↔ #${b.id} (${b.created_by}) 主题重叠${sameSource} → needs_review`);
             }
         }
     }
@@ -781,14 +781,14 @@ function crossRefStateWithEntities() {
                     db.prepare(`UPDATE clara_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                         .run(JSON.stringify(currentTags), s.id);
                     changes.traitFlags++;
-                    console.log(`[ClaraModel] 🔗 crossref: current_state #${s.id} ↔ trait #${t.id} bigram=${bgOverlap} → needs_review`);
+                    console.log(`[UserModel] 🔗 crossref: current_state #${s.id} ↔ trait #${t.id} bigram=${bgOverlap} → needs_review`);
                 }
             }
         }
     }
 
     if (changes.entityFlags + changes.traitFlags + changes.stateConflicts > 0) {
-        console.log(`[ClaraModel] crossref 完成: entity=${changes.entityFlags} trait=${changes.traitFlags} conflicts=${changes.stateConflicts}`);
+        console.log(`[UserModel] crossref 完成: entity=${changes.entityFlags} trait=${changes.traitFlags} conflicts=${changes.stateConflicts}`);
     }
     return changes;
 }
@@ -848,7 +848,7 @@ ${hyps.map(h => `[id=${h.id}] ${h.content} (证据${h.evidence_count}次, 独立
                 case 'upgrade': {
                     // Hard gate: source_diversity >= 3 required for upgrade
                     if ((hyp.source_diversity || 0) < 3) {
-                        console.log(`[ClaraModel] ⛔ LLM建议升级但source_diversity=${hyp.source_diversity}<3，拒绝: "${hyp.content.slice(0, 60)}"`);
+                        console.log(`[UserModel] ⛔ LLM建议升级但source_diversity=${hyp.source_diversity}<3，拒绝: "${hyp.content.slice(0, 60)}"`);
                         kept++;
                         break;
                     }
@@ -858,7 +858,7 @@ ${hyps.map(h => `[id=${h.id}] ${h.content} (证据${h.evidence_count}次, 独立
                         evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                         .run(JSON.stringify(history), hyp.id);
                     upgraded++;
-                    console.log(`[ClaraModel] 🆙 LLM升级假设: "${hyp.content.slice(0, 60)}" → stable_trait`);
+                    console.log(`[UserModel] 🆙 LLM升级假设: "${hyp.content.slice(0, 60)}" → stable_trait`);
                     break;
                 }
                 case 'abandon':
@@ -872,7 +872,7 @@ ${hyps.map(h => `[id=${h.id}] ${h.content} (证据${h.evidence_count}次, 独立
 
         return { validated: decisions.length, upgraded, kept, abandoned };
     } catch (e) {
-        console.error('[ClaraModel] validateHypotheses error:', e.message);
+        console.error('[UserModel] validateHypotheses error:', e.message);
         return { validated: 0, error: e.message };
     }
 }
@@ -1054,7 +1054,7 @@ ${chatSamples.length > 0 ? chatSamples.join('\n') : `(近24h无${USER.name}消�
                 case 'upgrade': {
                     // Hard gate: source_diversity >= 3 required for upgrade
                     if ((hyp.source_diversity || 0) < 3) {
-                        console.log(`[ClaraModel] ⛔ LLM建议升级但source_diversity=${hyp.source_diversity}<3，拒绝: "${hyp.content.slice(0, 60)}"`);
+                        console.log(`[UserModel] ⛔ LLM建议升级但source_diversity=${hyp.source_diversity}<3，拒绝: "${hyp.content.slice(0, 60)}"`);
                         kept++;
                         break;
                     }
@@ -1064,7 +1064,7 @@ ${chatSamples.length > 0 ? chatSamples.join('\n') : `(近24h无${USER.name}消�
                         evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                         .run(JSON.stringify(history), hyp.id);
                     upgraded++;
-                    console.log(`[ClaraModel] 🆙 LLM升级假设: "${hyp.content.slice(0, 60)}" → stable_trait`);
+                    console.log(`[UserModel] 🆙 LLM升级假设: "${hyp.content.slice(0, 60)}" → stable_trait`);
                     break;
                 }
                 case 'abandon':
@@ -1078,7 +1078,7 @@ ${chatSamples.length > 0 ? chatSamples.join('\n') : `(近24h无${USER.name}消�
 
         return { validated: decisions.length, upgraded, kept, abandoned };
     } catch (e) {
-        console.error('[ClaraModel] validateHypotheses error:', e.message);
+        console.error('[UserModel] validateHypotheses error:', e.message);
         return { validated: 0, error: e.message };
     }
 }
@@ -1170,7 +1170,7 @@ function anchorEntriesToFragments(entryIds, opts = {}) {
                 .run(JSON.stringify(mergedFrags), JSON.stringify(mergedEntities),
                     mergedFrags.length, entry.id);
 
-            console.log(`[ClaraModel] ⚓ 锚定条目 #${entry.id}: ${matchedFragIds.length} frags — "${entry.content.slice(0, 50)}"`);
+            console.log(`[UserModel] ⚓ 锚定条目 #${entry.id}: ${matchedFragIds.length} frags — "${entry.content.slice(0, 50)}"`);
         }
     }
 }
@@ -1191,7 +1191,7 @@ function seedAnchorOrphanEntries() {
     if (orphans.length === 0) return { anchored: 0 };
 
     const orphanIds = orphans.map(o => o.id);
-    console.log(`[ClaraModel] 🦴 种子锚定: ${orphanIds.length} 条孤立条目 → 搜索全量碎片`);
+    console.log(`[UserModel] 🦴 种子锚定: ${orphanIds.length} 条孤立条目 → 搜索全量碎片`);
 
     // Two-pass: oldest first (capture earliest evidence), then newest (capture recent)
     anchorEntriesToFragments(orphanIds, { timeWindow: '-999 days', fragLimit: 250, minOverlap: 4, orderDir: 'ASC', maxFrags: 25 });
@@ -1269,7 +1269,7 @@ ${flagged.map(t => {
                         updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                         .run(JSON.stringify(tags), JSON.stringify(history), trait.id);
                     downgraded++;
-                    console.log(`[ClaraModel] ⬇️ 特质降级为假设: "${trait.content.slice(0, 60)}"`);
+                    console.log(`[UserModel] ⬇️ 特质降级为假设: "${trait.content.slice(0, 60)}"`);
                     break;
                 }
                 case 'revise':
@@ -1280,7 +1280,7 @@ ${flagged.map(t => {
                             confidence = MAX(0.40, confidence - 0.05), updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                             .run(d.revised_content, JSON.stringify(tags), JSON.stringify(history), trait.id);
                         revised++;
-                        console.log(`[ClaraModel] ✏️ 特质修正: "${trait.content.slice(0, 40)}" → "${d.revised_content.slice(0, 40)}"`);
+                        console.log(`[UserModel] ✏️ 特质修正: "${trait.content.slice(0, 40)}" → "${d.revised_content.slice(0, 40)}"`);
                     }
                     break;
             }
@@ -1288,7 +1288,7 @@ ${flagged.map(t => {
 
         return { reviewed: decisions.length, kept, downgraded, revised };
     } catch (e) {
-        console.error('[ClaraModel] reviewFlaggedTraits error:', e.message);
+        console.error('[UserModel] reviewFlaggedTraits error:', e.message);
         return { reviewed: 0, error: e.message };
     }
 }
@@ -1431,7 +1431,7 @@ ${blocks}
         const replyText = raw?.reply || raw?.text || raw?.content || '';
         const jsonMatch = replyText.match(/\[[\s\S]*\]/);
         if (!jsonMatch) {
-            console.log('[ClaraModel] 🔍 reviewStableTraits: LLM 返回非JSON，跳过');
+            console.log('[UserModel] 🔍 reviewStableTraits: LLM 返回非JSON，跳过');
             return { reviewed: 0 };
         }
 
@@ -1465,7 +1465,7 @@ ${blocks}
                             evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                             .run(d.revised_content, confAdj, JSON.stringify(history), trait.id);
                         refined++;
-                        console.log(`[ClaraModel] 🔧 特质细化: "${trait.content.slice(0, 40)}" → "${d.revised_content.slice(0, 40)}"`);
+                        console.log(`[UserModel] 🔧 特质细化: "${trait.content.slice(0, 40)}" → "${d.revised_content.slice(0, 40)}"`);
                     }
                     break;
                 case 'weaken':
@@ -1480,7 +1480,7 @@ ${blocks}
                         db.prepare(`UPDATE clara_model SET evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                             .run(JSON.stringify(history), trait.id);
                         noted++;
-                        console.log(`[ClaraModel] 👁️ 观察记录 #${trait.id}: ${d.observation.slice(0, 80)}`);
+                        console.log(`[UserModel] 👁️ 观察记录 #${trait.id}: ${d.observation.slice(0, 80)}`);
                     }
                     break;
             }
@@ -1488,7 +1488,7 @@ ${blocks}
 
         return { reviewed: decisions.length, confirmed, refined, weakened, noted };
     } catch (e) {
-        console.error('[ClaraModel] reviewStableTraits error:', e.message);
+        console.error('[UserModel] reviewStableTraits error:', e.message);
         return { reviewed: 0, error: e.message };
     }
 }
@@ -1548,7 +1548,7 @@ async function harvestFacts() {
     }
 
     if (preFiltered.length === 0) {
-        console.log(`[ClaraModel] 🔍 事实收割: 扫描${candidates.length}条, 0条通过关键词预筛`);
+        console.log(`[UserModel] 🔍 事实收割: 扫描${candidates.length}条, 0条通过关键词预筛`);
         return { harvested: 0, scanned: candidates.length };
     }
 
@@ -1584,7 +1584,7 @@ ${verifyBatch.map((f, i) => `[${i}] [${f.type}] ${f.content}`).join('\n')}
             verified = JSON.parse(jsonMatch[0]).filter(d => d.harvest);
         }
     } catch (e) {
-        console.error('[ClaraModel] harvestFacts LLM verification error:', e.message);
+        console.error('[UserModel] harvestFacts LLM verification error:', e.message);
         return { harvested: 0, scanned: candidates.length, prefiltered: preFiltered.length, error: e.message };
     }
 
@@ -1626,9 +1626,9 @@ ${verifyBatch.map((f, i) => `[${i}] [${f.type}] ${f.content}`).join('\n')}
     }
 
     if (harvested > 0) {
-        console.log(`[ClaraModel] 📥 事实收割: ${harvested}/${verified.length}条确认 → immutable_fact (扫描${candidates.length}, 预筛${preFiltered.length})`);
+        console.log(`[UserModel] 📥 事实收割: ${harvested}/${verified.length}条确认 → immutable_fact (扫描${candidates.length}, 预筛${preFiltered.length})`);
     } else {
-        console.log(`[ClaraModel] 🔍 事实收割: 扫描${candidates.length}, 预筛${preFiltered.length}, LLM确认0条`);
+        console.log(`[UserModel] 🔍 事实收割: 扫描${candidates.length}, 预筛${preFiltered.length}, LLM确认0条`);
     }
     return { harvested, scanned: candidates.length, prefiltered: preFiltered.length, verified: verified.length };
 }
@@ -1649,7 +1649,7 @@ function resolveExpiredStates() {
                OR last_evidence_at < datetime('now', '-14 days'))
     `).run();
     if (result.changes > 0) {
-        console.log(`[ClaraModel] 过期状态自动 resolved: ${result.changes}`);
+        console.log(`[UserModel] 过期状态自动 resolved: ${result.changes}`);
     }
     return result.changes;
 }
@@ -1873,7 +1873,7 @@ function seedFromExisting() {
     // Check if already seeded
     const existing = db.prepare('SELECT COUNT(*) as c FROM clara_model').get();
     if (existing.c > 0) {
-        console.log(`[ClaraModel] 已有 ${existing.c} 条记录，跳过播种`);
+        console.log(`[UserModel] 已有 ${existing.c} 条记录，跳过播种`);
         return { skipped: true, existing: existing.c };
     }
 
@@ -1958,7 +1958,7 @@ function seedFromExisting() {
         else created.stable_trait++;
     }
 
-    console.log(`[ClaraModel] 播种完成: immutable_fact=${created.immutable_fact} stable_trait=${created.stable_trait} active_hypothesis=${created.active_hypothesis}`);
+    console.log(`[UserModel] 播种完成: immutable_fact=${created.immutable_fact} stable_trait=${created.stable_trait} active_hypothesis=${created.active_hypothesis}`);
     return { created };
 }
 
@@ -1999,7 +1999,7 @@ function backfillModelEvidence() {
         fixCount++;
     }
     if (fixCount > 0) {
-        console.log(`[ClaraModel] 证据修复: ${fixCount} 条 entry 的 evidence_count + source_diversity 已重算`);
+        console.log(`[UserModel] 证据修复: ${fixCount} 条 entry 的 evidence_count + source_diversity 已重算`);
     }
 
     // ── 孤儿锚定：source_fragment_ids 为空的条目，用 bigram 匹配补证据 ──
@@ -2013,7 +2013,7 @@ function backfillModelEvidence() {
     if (orphans.length === 0) return { backfilled: fixCount };
 
     const orphanIds = orphans.map(o => o.id);
-    console.log(`[ClaraModel] 证据回填: ${orphanIds.length} 条孤立条目 → bigram锚定`);
+    console.log(`[UserModel] 证据回填: ${orphanIds.length} 条孤立条目 → bigram锚定`);
 
     // Two-pass anchor: oldest first (capture earliest evidence), then newest (capture recent)
     anchorEntriesToFragments(orphanIds, { timeWindow: '-999 days', fragLimit: 250, minOverlap: 4, orderDir: 'ASC', maxFrags: 25 });
@@ -2062,7 +2062,7 @@ async function readClaraRawMessages() {
     `).all();
 
     if (messages.length < 30) {
-        console.log(`[ClaraModel] readClaraRawMessages: 仅 ${messages.length} 条非RP消息，跳过 (需≥30)`);
+        console.log(`[UserModel] readClaraRawMessages: 仅 ${messages.length} 条非RP消息，跳过 (需≥30)`);
         return { skipped: true, reason: `too few messages (${messages.length} < 30)` };
     }
 
@@ -2184,7 +2184,7 @@ ${audit ? `你上次的自我审计：
         const replyText = raw?.reply || raw?.text || raw?.content || '';
         const jsonMatch = replyText.match(/\{[\s\S]*\}/);
         if (!jsonMatch) {
-            console.log(`[ClaraModel] readClaraRawMessages: 无法解析JSON响应`);
+            console.log(`[UserModel] readClaraRawMessages: 无法解析JSON响应`);
             return { skipped: true, reason: 'unparseable response', raw: replyText.slice(0, 200) };
         }
 
@@ -2215,7 +2215,7 @@ ${audit ? `你上次的自我审计：
                 decay_params = ?, evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                 .run(newDecayParams, JSON.stringify(prevHist), prevState.id);
             
-            console.log(`[ClaraModel] 📖 状态延续: 更新 #${prevState.id} TTL→${newTTL}, 不创建新条目`);
+            console.log(`[UserModel] 📖 状态延续: 更新 #${prevState.id} TTL→${newTTL}, 不创建新条目`);
         }
 
         // ── ToM 观察反馈环（v4.8）：审计结论回流证据管线 ──
@@ -2233,7 +2233,7 @@ ${audit ? `你上次的自我审计：
                 });
                 db.prepare('UPDATE clara_model SET evolution_history = ? WHERE id = ?')
                     .run(JSON.stringify(prevHist), prevState.id);
-                console.log(`[ClaraModel]   ↳ 观察审计回流: 上次预测 ${verdict === 'confirmed' ? '✓ 准确' : '✗ 失准'}`);
+                console.log(`[UserModel]   ↳ 观察审计回流: 上次预测 ${verdict === 'confirmed' ? '✓ 准确' : '✗ 失准'}`);
             } catch (_) {}
         }
 
@@ -2257,9 +2257,9 @@ ${audit ? `你上次的自我审计：
                 db.prepare(`UPDATE clara_model SET evolution_history = ?, tags = ?,
                     last_contradiction_at = datetime('now'), updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                     .run(JSON.stringify(hist), JSON.stringify(tags), c.trait_id);
-                console.log(`[ClaraModel]   ↳ 观察反驳 trait #${c.trait_id}: ${(c.observation || '').slice(0, 60)} → needs_review`);
+                console.log(`[UserModel]   ↳ 观察反驳 trait #${c.trait_id}: ${(c.observation || '').slice(0, 60)} → needs_review`);
             } catch (e) {
-                console.error(`[ClaraModel] trait refute 写入失败 #${c.trait_id}:`, e.message);
+                console.error(`[UserModel] trait refute 写入失败 #${c.trait_id}:`, e.message);
             }
         }
 
@@ -2276,7 +2276,7 @@ ${audit ? `你上次的自我审计：
             WHERE type = 'current_state' AND status = 'active' AND created_by = 'deep_cycle'
         `).run().changes;
         if (resolvedCount > 0) {
-            console.log(`[ClaraModel] 🧹 resolve ${resolvedCount} 条旧 deep_cycle 快照 → 新快照替代`);
+            console.log(`[UserModel] 🧹 resolve ${resolvedCount} 条旧 deep_cycle 快照 → 新快照替代`);
         }
 
         // Create new current_state with audit in evolution_history + TTL in decay_params
@@ -2317,9 +2317,9 @@ ${audit ? `你上次的自我审计：
             tags: ['current_state', 'daily_observation'],
         });
 
-        console.log(`[ClaraModel] 📖 Draco读心: ${messages.length}条消息 → current_state #${id} (${currentState.length}字)`);
-        if (prevState) console.log(`[ClaraModel]   ↳ 前一条 active #${prevState.id} 继续有效，各自按 TTL 过期`);
-        if (result.audit_retro) console.log(`[ClaraModel]   ↳ 审计: ${result.audit_retro.slice(0, 80)}`);
+        console.log(`[UserModel] 📖 Draco读心: ${messages.length}条消息 → current_state #${id} (${currentState.length}字)`);
+        if (prevState) console.log(`[UserModel]   ↳ 前一条 active #${prevState.id} 继续有效，各自按 TTL 过期`);
+        if (result.audit_retro) console.log(`[UserModel]   ↳ 审计: ${result.audit_retro.slice(0, 80)}`);
 
         return {
             created: id,
@@ -2344,7 +2344,7 @@ ${audit ? `你上次的自我审计：
         }
 
     } catch (e) {
-        console.error('[ClaraModel] readClaraRawMessages error:', e.message);
+        console.error('[UserModel] readClaraRawMessages error:', e.message);
         return { skipped: true, error: e.message };
     }
 }
@@ -2353,8 +2353,8 @@ ${audit ? `你上次的自我审计：
 // Main Deep Cycle Entry Point
 // ═══════════════════════════════════════════════════════
 
-async function runClaraModelCycle() {
-    console.log('[ClaraModel] 🧠 认知模型维护周期开始');
+async function runUserModelCycle() {
+    console.log('[UserModel] 🧠 认知模型维护周期开始');
 
     // Phase 0: Backfill evidence for entries that need it (zero LLM)
     backfillModelEvidence();
@@ -2367,7 +2367,7 @@ async function runClaraModelCycle() {
     try {
         observationResult = await readClaraRawMessages();
     } catch (e) {
-        console.error('[ClaraModel] readClaraRawMessages error:', e.message);
+        console.error('[UserModel] readClaraRawMessages error:', e.message);
     }
 
     // Phase 1: Pure mechanical decay (zero LLM)
@@ -2391,7 +2391,7 @@ async function runClaraModelCycle() {
     try {
         proactiveReviewResult = await reviewStableTraits();
     } catch (e) {
-        console.error('[ClaraModel] reviewStableTraits error:', e.message);
+        console.error('[UserModel] reviewStableTraits error:', e.message);
     }
 
     // Phase 5c: Cross-reference — current_state ↔ entity_profiles + stable_trait (zero LLM)
@@ -2399,19 +2399,19 @@ async function runClaraModelCycle() {
     try {
         crossRefResult = crossRefStateWithEntities();
     } catch (e) {
-        console.error('[ClaraModel] crossRefStateWithEntities error:', e.message);
+        console.error('[UserModel] crossRefStateWithEntities error:', e.message);
     }
 
     // Phase 6: 全量 trait 去重审查（LLM，24h 冷却）
     let dedupResult = { merged: 0 };
     try {
         const DEDUP_GAP_MS = 24 * 60 * 60 * 1000;
-        if (!runClaraModelCycle._lastDedupAt || (Date.now() - runClaraModelCycle._lastDedupAt) >= DEDUP_GAP_MS) {
+        if (!runUserModelCycle._lastDedupAt || (Date.now() - runUserModelCycle._lastDedupAt) >= DEDUP_GAP_MS) {
             dedupResult = await detectModelOverlaps();
-            if (dedupResult.merged > 0) runClaraModelCycle._lastDedupAt = Date.now();
+            if (dedupResult.merged > 0) runUserModelCycle._lastDedupAt = Date.now();
         }
     } catch (e) {
-        console.error('[ClaraModel] detectModelOverlaps error:', e.message);
+        console.error('[UserModel] detectModelOverlaps error:', e.message);
     }
 
     // Phase 7: 核心洞察合成（v5.0）— 从全部 trait 提炼 2-4 句话写入 system prompt
@@ -2419,7 +2419,7 @@ async function runClaraModelCycle() {
     try {
         insightResult = await synthesizeCoreInsight();
     } catch (e) {
-        console.error('[ClaraModel] synthesizeCoreInsight error:', e.message);
+        console.error('[UserModel] synthesizeCoreInsight error:', e.message);
     }
 
     // Phase 8: Auto spot-check — verify up to 3 recent inferred entries against source messages
@@ -2428,10 +2428,10 @@ async function runClaraModelCycle() {
         const { autoSpotCheck } = require('../scripts/spotCheckModel');
         spotCheckResult = await autoSpotCheck([]);
     } catch (e) {
-        console.error('[ClaraModel] autoSpotCheck error:', e.message);
+        console.error('[UserModel] autoSpotCheck error:', e.message);
     }
 
-    console.log(`[ClaraModel] 周期完成: observation=${!observationResult.skipped} decay=${decayResult.decayed + decayResult.resolved + decayResult.abandoned} validate=${validateResult.validated} detected=${detectResult.detected} reviewed=${reviewedResult.reviewed} proactive=${proactiveReviewResult.refined + proactiveReviewResult.weakened + proactiveReviewResult.noted} crossref=${crossRefResult.entityFlags + crossRefResult.traitFlags + crossRefResult.stateConflicts} dedup=${dedupResult.merged} insight=${insightResult.synthesized} spotcheck=${spotCheckResult.checked}`);
+    console.log(`[UserModel] 周期完成: observation=${!observationResult.skipped} decay=${decayResult.decayed + decayResult.resolved + decayResult.abandoned} validate=${validateResult.validated} detected=${detectResult.detected} reviewed=${reviewedResult.reviewed} proactive=${proactiveReviewResult.refined + proactiveReviewResult.weakened + proactiveReviewResult.noted} crossref=${crossRefResult.entityFlags + crossRefResult.traitFlags + crossRefResult.stateConflicts} dedup=${dedupResult.merged} insight=${insightResult.synthesized} spotcheck=${spotCheckResult.checked}`);
 
     return { observation: observationResult, decay: decayResult, resolved, validate: validateResult, detect: detectResult, reviewed: reviewedResult, crossref: crossRefResult, dedup: dedupResult, insight: insightResult, spotCheck: spotCheckResult };
 }
@@ -2507,7 +2507,7 @@ function mergeModelEntries(winnerId, loserIds, mergedContent) {
             .run(`merged into #${winnerId} (auto dedup)`, lid);
     }
 
-    console.log(`[ClaraModel] 🔗 合并 trait: #${winnerId} ← [${loserIds.join(', ')}] (${loserIds.length}条并入)`);
+    console.log(`[UserModel] 🔗 合并 trait: #${winnerId} ← [${loserIds.join(', ')}] (${loserIds.length}条并入)`);
     return { winnerId, loserIds };
 }
 
@@ -2578,7 +2578,7 @@ ${traitList}`;
 
             // Confidence gate: skip if gap > 0.20
             if (Math.abs(winner.confidence - loser.confidence) > 0.20) {
-                console.log(`[ClaraModel] ⏭️ 跳过合并 #${winnerId}↔#${loserId}: conf 差距过大 (${winner.confidence.toFixed(2)} vs ${loser.confidence.toFixed(2)})`);
+                console.log(`[UserModel] ⏭️ 跳过合并 #${winnerId}↔#${loserId}: conf 差距过大 (${winner.confidence.toFixed(2)} vs ${loser.confidence.toFixed(2)})`);
                 // Record the observation but don't merge
                 const winnerHist = safeParseJson(db.prepare('SELECT evolution_history FROM clara_model WHERE id = ?').get(winnerId)?.evolution_history);
                 winnerHist.push({
@@ -2596,15 +2596,15 @@ ${traitList}`;
             try {
                 mergeModelEntries(winnerId, [loserId], p.merged_content);
                 merged++;
-                console.log(`[ClaraModel] 🔗 自动合并: #${winnerId} + #${loserId} — ${p.reason || ''}`);
+                console.log(`[UserModel] 🔗 自动合并: #${winnerId} + #${loserId} — ${p.reason || ''}`);
             } catch (e) {
-                console.error(`[ClaraModel] mergeModelEntries 失败 (#${winnerId}, #${loserId}):`, e.message);
+                console.error(`[UserModel] mergeModelEntries 失败 (#${winnerId}, #${loserId}):`, e.message);
             }
         }
 
         return { merged, candidates: pairs.length };
     } catch (e) {
-        console.error('[ClaraModel] detectModelOverlaps error:', e.message);
+        console.error('[UserModel] detectModelOverlaps error:', e.message);
         return { merged: 0, error: e.message };
     }
 }
@@ -2691,10 +2691,10 @@ ${cs ? `${USER.name}当前的状态：${cs.content}` : ''}
         await setUserSetting('clara_core_insight_history', JSON.stringify(history));
         await setUserSetting('clara_core_insight_updated_at', new Date().toISOString());
 
-        console.log(`[ClaraModel] 💡 核心洞察已更新 (${insight.length}字): ${insight.slice(0, 80)}...`);
+        console.log(`[UserModel] 💡 核心洞察已更新 (${insight.length}字): ${insight.slice(0, 80)}...`);
         return { synthesized: true, insight, length: insight.length };
     } catch (e) {
-        console.error('[ClaraModel] synthesizeCoreInsight error:', e.message);
+        console.error('[UserModel] synthesizeCoreInsight error:', e.message);
         return { synthesized: false, error: e.message };
     }
 }
@@ -2745,7 +2745,7 @@ module.exports = {
     backfillModelEvidence,
 
     // Deep cycle
-    runClaraModelCycle,
+    runUserModelCycle,
     readClaraRawMessages,
-    MIN_GAP_CLARA_MODEL,
+    MIN_GAP_USER_MODEL,
 };
