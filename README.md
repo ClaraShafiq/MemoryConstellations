@@ -12,11 +12,11 @@ Three things happen automatically while your companion runs:
 
 1. **Extract.** Scribe scans new chat messages and pulls out facts — who, where, what happened, what changed. Each fact is a short, third-person sentence with a link back to the original messages.
 
-2. **Organize.** Archivist runs every 2 minutes. It groups related facts into topics (constellations), merges tightly-related facts into narrative paragraphs (episodes), and periodically weaves episodes into long-term story arcs (sagas) that span multiple topics.
+2. **Organize.** Archivist runs every 2 minutes. It groups related facts into topics (constellations), merges tightly-related facts into narrative paragraphs (episodes), and periodically links related episodes into long-term story arcs (sagas — experimental, not yet running in production).
 
 3. **Retrieve.** When your companion needs context during a chat, Librarian searches across all three layers — raw facts, narrative episodes, and entity profiles — using a mix of keyword matching, vector similarity, and entity aggregation.
 
-(Optional) A 5-axis emotional state engine (jiwen, a separate open-source project) can integrate with this pipeline, with saga arcs applying a small but continuous pull on the companion's baseline mood.
+(Optional) A 5-axis emotional state engine ([jiwen](https://github.com/ClaraShafiq/jiwen), a separate project) provides continuous emotional drift for companions that want affect modeling beyond memory alone.
 
 ---
 
@@ -96,7 +96,7 @@ Archivist ── 2-min tick loop
         ├─ Classify unlinked fragments → assign to entities
         ├─ Grow seeds (new entities) → graduate to active
         ├─ Consolidate fragments per entity → episodes (narrative memories)
-        ├─ Cluster episodes across entities → sagas (story arcs)
+        ├─ Cluster episodes across entities → sagas (experimental)
         ├─ Discover emergent people/places/events
         ├─ Regenerate entity overviews (facts + judgment + current status)
         ├─ Detect new cognitive traits → refine companion's understanding
@@ -112,10 +112,9 @@ Librarian ── called at chat-time
 System Prompt ── injected: relevant memories + entity profiles + user profile + companion profile
     │
     ▼
-jiwen (optional) ── every minute
-                ── 5-axis continuous state: connection, pride, valence, arousal, immersion
-                ── Saga bias applies small per-minute pull on each axis
-                ── Separate project: github.com/ClaraShafiq/jiwen
+jiwen (optional) ── separate project: github.com/ClaraShafiq/jiwen
+                ── 5-axis continuous emotional state engine
+                ── Not required for memory pipeline — both systems work independently
 ```
 
 ---
@@ -129,7 +128,7 @@ jiwen (optional) ── every minute
 | Fragments | `memory_fragments` | Single facts, ≤80 chars, third-person, typed (observation/reflection/preference/event/state) | Scribe, per chat session |
 | Entities | `entity_profiles` | Named people/places/events/hobbies/projects, with three-field model (facts + current_status + judgment) | Archivist classify + graduate + overview regeneration |
 | Episodes | `memories` (layer=episode) | Merged fragment narratives, 100-250 chars, with date correction and contradiction detection | Deep cycle consolidate |
-| Sagas | `memory_sagas` | Cross-entity narrative arcs with emotional axis (bond/vigilance/confidence/humility/warmth/melancholy/grounded) | Every 24h or on new episodes |
+| Sagas | `memory_sagas` | Cross-entity narrative arcs (experimental — clustering runs but not yet consumed in production) | Every 24h or on new episodes |
 
 ### User model layers — what the companion knows about you
 
@@ -172,12 +171,6 @@ Retrieved memories are tagged with a **recall permission level** computed determ
 | **仅联想** (associate-only) | >90 days or floated at random | Internal reference only — don't state as fact to the user |
 
 A **segmented decay function** determines sort order: within 3 days, freshness dominates; after 3 days, emotional intensity dominates. Results below a combined score floor (0.005) are silently dropped — better silence than noise.
-
----
-
-## Saga bias
-
-Sagas feed into the `jiwen` emotional state engine as a per-minute bias on each of the five axes. The bias is intentionally small — ~6% of the natural drift rate. An inaccurate Saga won't destabilise the companion's emotional baseline; it'll just nudge it slightly in a direction that can be corrected by real-time conversation. The design prioritises safety over precision.
 
 ---
 
