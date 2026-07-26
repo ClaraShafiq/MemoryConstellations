@@ -247,16 +247,16 @@ See `core-prompt.example.txt` for a skeleton. `OSS_SETUP.md` has more detailed w
 
 ### .env
 
-Minimum required:
+Copy `.env.example` → `.env` and fill in:
 
 ```
 SANCTUARY_ENCRYPTION_KEY=<64-char hex: openssl rand -hex 32>
 SESSION_SECRET=<64-char hex>
 LOGIN_PASSWORD=<your password>
-LLM_API_KEY=<or OPENROUTER_API_KEY or GEMINI_API_KEY>
+API_KEY=<your LLM API key>
 ```
 
-Full list in `.env.example`.
+At least one LLM channel is required (Gemini, OpenRouter, or DeepSeek). See `.env.example` for all options.
 
 ---
 
