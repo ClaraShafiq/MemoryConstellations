@@ -1303,6 +1303,9 @@ function initDatabase() {
     runMigration(85, 'v5.7: memories.entity_id — episode→constellation link',
         `ALTER TABLE memories ADD COLUMN entity_id INTEGER;`);
 
+    runMigration(86, 'v5.10: memory_fragments.priority — 高价值碎片优先路由',
+        `ALTER TABLE memory_fragments ADD COLUMN priority TEXT DEFAULT "normal";`);
+
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {
         const existingRoots = db.prepare('SELECT COUNT(*) as c FROM memory_ontology WHERE parent_id IS NULL').get();
