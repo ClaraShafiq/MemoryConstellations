@@ -1,6 +1,6 @@
 // ========================================
 // 记忆星图 v5 — DOM 面板层
-// 详情面板、面包屑、观星手记、Clara 认知模型、tooltip
+// 详情面板、面包屑、观星手记、User 认知模型、tooltip
 // ========================================
 
 import { universe, conById, decideMergeProposal } from './data.js';
@@ -131,12 +131,40 @@ export function showStarPanel(star, viewConId) {
 }
 
 // 星座（实体）详情
+let _conPanelMode = 'facts'; // 'facts' | 'judgment'
+
 export function showConPanel(con) {
     panelBase(con.color);
     $('p-cat').textContent = (con.galaxyLabel || '') + '星系';
     $('p-title').textContent = con.label;
-    let body = con.description || '';
-    $('p-body').textContent = body;
+
+    // Determine which content to show
+    const hasFacts = con.facts && con.facts.trim().length > 0;
+    const hasJudgment = con.judgment && con.judgment.trim().length > 0;
+    const hasBoth = hasFacts && hasJudgment;
+
+    // Default to facts if available, otherwise judgment, otherwise overview
+    _conPanelMode = hasFacts ? 'facts' : (hasJudgment ? 'judgment' : 'facts');
+    _renderConBody(con);
+
+    // Toggle button
+    if (hasBoth) {
+        const existingBtn = document.getElementById('p-toggle-mode');
+        if (existingBtn) existingBtn.remove();
+        const btn = document.createElement('button');
+        btn.id = 'p-toggle-mode';
+        btn.className = 'p-toggle-btn';
+        btn.title = '切换事实/私语';
+        btn.textContent = '◆ 私语';
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            _conPanelMode = _conPanelMode === 'facts' ? 'judgment' : 'facts';
+            btn.textContent = _conPanelMode === 'facts' ? '◆ 私语' : '◇ 事实';
+            _renderConBody(con);
+        });
+        $('p-title').appendChild(btn);
+    }
+
     if (con.category) {
         const catLabel = con.subcategory ? `${con.category} · ${con.subcategory}` : con.category;
         addTag(catLabel);
@@ -257,6 +285,33 @@ export function showConPanel(con) {
     $('p-date').textContent = con.updatedAt ? '更新于 ' + (con.updatedAt || '').slice(0, 10) : '';
 }
 
+function _renderConBody(con) {
+    // 近况（current_status） — 放在 body 最前面
+    let bodyHtml = '';
+    if (con.current_status) {
+        bodyHtml += '<div class="p-cs">' + con.current_status + '</div>';
+    }
+    let mainText = '';
+    if (_conPanelMode === 'facts') {
+        mainText = con.facts || '';
+    } else if (_conPanelMode === 'judgment') {
+        mainText = con.judgment || '';
+    } else {
+        mainText = con.facts || '';
+    }
+    $('p-body').innerHTML = bodyHtml + mainText;
+    // Talking points
+    let tps = [];
+    try { tps = typeof con.talking_points === 'string' ? JSON.parse(con.talking_points) : (con.talking_points || []); } catch(_) {}
+    if (tps.length > 0) {
+        const tpDiv = document.createElement('div');
+        tpDiv.className = 'p-tps';
+        tpDiv.innerHTML = '<div class="p-tps-label">可聊</div>' +
+            tps.map(function(tp) { return '<div class="p-tp-item">' + (tp.content || '') + '</div>'; }).join('');
+        $('p-body').appendChild(tpDiv);
+    }
+}
+
 // 双星核心档案（颜色从API读取）
 export function showCorePanel(name, ent) {
     const color = ent?.color || '#7c9dff';
@@ -264,7 +319,7 @@ export function showCorePanel(name, ent) {
     panelBase(color);
     $('p-cat').textContent = '双星核心';
     $('p-title').textContent = name;
-    $('p-body').textContent = ent?.overview || (isUser ? '这个宇宙的创造者。' : '这个宇宙的守护者。');
+    $('p-body').textContent = ent?.facts || (isUser ? '这个宇宙的创造者。' : '这个宇宙的守护者。');
     addTag(isUser ? '恒星 · 暖金' : '恒星 · 银绿');
     if (ent?.relationship) addTag(ent.relationship.slice(0, 40));
     addMeta('记忆碎片', 100, (ent?.fragment_count || 0) + ' 条');
@@ -302,7 +357,7 @@ export function renderArchlog() {
     });
 }
 
-// ── Clara 认知模型 ──
+// ── User 认知模型 ──
 // immutable_fact v4.8 退役。stable_trait/active_hypothesis v5.2 退役，由 clara_patterns 替代。
 const MODEL_LAYERS = [
     { type: 'current_state', label: '● 当前状态', cls: 'state' },
@@ -311,7 +366,7 @@ const MODEL_LAYERS = [
 
 export function renderModelPanel() {
     const counts = {};
-    universe.cognitiveModel.forEach(e => counts[e.type] = (counts[e.type] || 0) + 1);
+    universe.claraModel.forEach(e => counts[e.type] = (counts[e.type] || 0) + 1);
     const patCount = (universe.patterns || []).filter(p => p.status === 'active').length;
     counts['pattern'] = patCount;
     $('mp-body').innerHTML = MODEL_LAYERS.map(l => `
@@ -337,7 +392,7 @@ function showModelDetail(filterType) {
 
     // ── Current State ──
     if (!filterType || filterType === 'current_state') {
-        const states = universe.cognitiveModel.filter(e => e.type === 'current_state');
+        const states = universe.claraModel.filter(e => e.type === 'current_state');
         html += `<div class="md-section"><div class="md-section-title">● 当前状态 (${states.length})</div>`;
         if (!states.length) html += '<div class="md-empty">暂无</div>';
         else states.forEach(e => {
@@ -351,7 +406,7 @@ function showModelDetail(filterType) {
                     extra = `<span class="md-ttl">${remainText}</span>`;
                 }
             }
-            if (e.created_by === 'chat_draco') extra += '<span class="md-source">🖊️ Draco</span>';
+            if (e.created_by === 'chat_draco') extra += '<span class="md-source">🖊️ AI</span>';
             else if (e.created_by === 'deep_cycle') extra += '<span class="md-source">🌙 深循环</span>';
             html += `<div class="md-row"><span class="mdot mp-dot-s state"></span><span style="flex:1">${esc(e.content)}</span>${extra}</div>`;
         });
@@ -408,7 +463,7 @@ export function renderPatterns() {
     }
 }
 
-// ── 合并提案队列（Draco 的疑问 → Clara 裁决）──
+// ── 合并提案队列（AI 的疑问 → User 裁决）──
 export function renderMergeProposals() {
     const box = $('merge-proposals');
     const body = $('mq-body');
@@ -498,21 +553,35 @@ export async function renderCoreInsight() {
 export function initPanelEvents() {
     $('panel-close').addEventListener('click', hidePanel);
     $('arch-header').addEventListener('click', () => {
-        const al = $('archlog');
-        al.classList.toggle('collapsed'); al.classList.toggle('expanded');
-        $('model-panel').style.bottom = al.classList.contains('expanded') ? '272px' : '68px';
+        $('archlog').classList.toggle('collapsed'); $('archlog').classList.toggle('expanded');
+        const archExp = $('archlog').classList.contains('expanded');
+        $('model-panel').style.bottom = archExp ? '272px' : '68px';
         closeModelDetail();
     });
     $('mp-header').addEventListener('click', () => {
-        const mp = $('model-panel');
-        mp.classList.toggle('collapsed'); mp.classList.toggle('expanded');
+        $('model-panel').classList.toggle('collapsed'); $('model-panel').classList.toggle('expanded');
     });
-    // Core insight panel toggle
-    $('ci-header').addEventListener('click', () => {
-        const ci = $('core-insight-panel');
-        ci.classList.toggle('collapsed'); ci.classList.toggle('expanded');
-        $('ci-body').style.display = ci.classList.contains('expanded') ? 'block' : 'none';
-    });
-    // Load core insight on init
-    loadCoreInsight();
+    loadPipelineStatus();
+    setInterval(loadPipelineStatus, 5 * 60 * 1000);
+}
+
+// ================================================================
+// Pipeline Status
+// ================================================================
+
+async function loadPipelineStatus() {
+    try {
+        const token = localStorage.getItem('token');
+        const res = await fetch('/api/memory/pipeline-status', { headers: { 'Authorization': 'Bearer ' + token } });
+        if (!res.ok) return;
+        const s = await res.json();
+        if (!$('tb-count')) return;
+        $('tb-count').textContent = '碎片 ' + (s.fragments?.total || 0).toLocaleString();
+        $('tb-entities').textContent = '实体 ' + (s.entities?.total || 0) + (s.entities?.seeds > 0 ? '/' + s.entities.seeds + '种' : '');
+        $('tb-cm').textContent = 'CM ' + (s.claraModel?.total || 0);
+        if (s.lastScribe) {
+            const mins = Math.round((Date.now() - new Date(s.lastScribe + 'Z').getTime()) / 60000);
+            $('tb-scribe').textContent = 'Scribe ' + (mins < 60 ? mins + 'min前' : Math.round(mins/60) + 'h前');
+        }
+    } catch (_) {}
 }

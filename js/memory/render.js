@@ -226,8 +226,8 @@ function drawCore(T, cx, cy, orbitR, alpha, hovered) {
     if (corePos.length === 2) {
         const [a, b] = corePos;
         const lg = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
-        lg.addColorStop(0, `rgba(${CORE_STYLE.Clara.rgb},${0.16 * alpha})`);
-        lg.addColorStop(1, `rgba(${CORE_STYLE.Draco.rgb},${0.16 * alpha})`);
+        lg.addColorStop(0, `rgba(${CORE_STYLE.User.rgb},${0.16 * alpha})`);
+        lg.addColorStop(1, `rgba(${CORE_STYLE.AI.rgb},${0.16 * alpha})`);
         ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
         ctx.strokeStyle = lg; ctx.lineWidth = 0.7; ctx.stroke();
     }
