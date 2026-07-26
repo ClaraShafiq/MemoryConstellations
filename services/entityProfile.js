@@ -21,7 +21,7 @@ const ENTITY_EXTRACT_PROMPT = `${WORLD_CONTEXT}
 
 规则：
 - 只提取明确的状态变化，不编造
-- "User"和"AI"的双子星状态也提取
+- "${USER.name}"和"${AI.name}"的状态也提取（他们是主角）
 - 同一实体多条状态变化取最新一条
 - 没有状态变化的记忆忽略`;
 
@@ -97,52 +97,146 @@ function getEntityContext(fragments) {
     if (!fragments || fragments.length === 0) return null;
 
     const db = getDb();
+    const entityIds = new Set();
 
-    // 收集 fragment ID 查 entity 字段
+    // Path 1: fragment_entities 链接（新系统——星座归属）
     const fragIds = fragments
         .filter(f => f.source_table === 'fragment')
         .map(f => f.id);
-    if (fragIds.length === 0) return null;
+    if (fragIds.length > 0) {
+        const placeholders = fragIds.map(() => '?').join(',');
+        const linked = db.prepare(`
+            SELECT DISTINCT entity_id FROM fragment_entities
+            WHERE fragment_id IN (${placeholders})
+        `).all(...fragIds);
+        linked.forEach(r => entityIds.add(r.entity_id));
+    }
 
-    const placeholders = fragIds.map(() => '?').join(',');
-    const rows = db.prepare(`
-        SELECT DISTINCT entity FROM memory_fragments
-        WHERE id IN (${placeholders})
-          AND entity != ''
-    `).all(...fragIds);
+    // Path 2: 旧 entity 字段（Scribe 提取时标注的实体名）
+    if (fragIds.length > 0) {
+        const placeholders = fragIds.map(() => '?').join(',');
+        const rows = db.prepare(`
+            SELECT DISTINCT entity FROM memory_fragments
+            WHERE id IN (${placeholders}) AND entity != ''
+        `).all(...fragIds);
+        const names = [...new Set(rows.map(r => r.entity))];
+        if (names.length > 0) {
+            const matched = db.prepare(`
+                SELECT id FROM entity_profiles
+                WHERE name IN (${names.map(() => '?').join(',')})
+            `).all(...names);
+            matched.forEach(r => entityIds.add(r.id));
+        }
+    }
 
-    const entityNames = [...new Set(rows.map(r => r.entity))];
-    if (entityNames.length === 0) return null;
+    if (entityIds.size === 0) return null;
 
+    // Fetch profiles with all three fields: facts, current_status, judgment
+    const idList = [...entityIds];
     const profiles = db.prepare(`
-        SELECT name, current_status, status_since, updated_at, related_entities
+        SELECT id, name, category, related_entities, overview_updated_at, fragment_count,
+               facts, current_status, judgment
         FROM entity_profiles
-        WHERE name IN (${entityNames.map(() => '?').join(',')})
-        ORDER BY updated_at DESC
-    `).all(...entityNames);
+        WHERE id IN (${idList.map(() => '?').join(',')})
+          AND name NOT IN (?, ?)
+        ORDER BY fragment_count DESC
+        LIMIT 5
+    `).all(...idList, ...require('./memoryConfig').SKIP_NAMES.slice(0, 2));
 
     if (profiles.length === 0) return null;
 
+    // Track entity access
+    const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const trackHit = db.prepare(`
+        UPDATE entity_profiles SET hit_count = hit_count + 1, last_accessed_at = ? WHERE id = ?
+    `);
+    for (const p of profiles) {
+        trackHit.run(now, p.id);
+    }
+
     return profiles.map(p => {
-        const since = p.status_since ? ` (${p.status_since})` : '';
-        let line = `※ 近况：${p.name} — ${p.current_status}${since}`;
-        // v5.5: 标注过时状态（超过24h未更新提醒AI可用 update_overview 刷新）
-        if (p.updated_at) {
-            const hrsStale = Math.round((Date.now() - new Date(p.updated_at + 'Z').getTime()) / 3600000);
-            if (hrsStale > 24) {
-                line += `\n  ⚠️ 信息已${Math.round(hrsStale/24)}天未更新`;
+        let line = `※ ${p.name}（${p.category}）`;
+
+        if (p.facts) {
+            line += `\n  Facts: ${p.facts}`;
+        }
+        if (p.current_status) {
+            line += `\n  Status: ${p.current_status}`;
+        }
+        if (p.judgment) {
+            line += `\n  Judgment: 你回想起这个以后，内心升起的想法是"${p.judgment}"`;
+        }
+
+        // 标注过时（>7天未更新）
+        if (p.overview_updated_at) {
+            const hrsStale = Math.round((Date.now() - new Date(p.overview_updated_at + 'Z').getTime()) / 3600000);
+            if (hrsStale > 168) {
+                line += `\n  ⚠️ 已${Math.round(hrsStale/24)}天未更新——若${USER.name}最近有新情况，用 update_overview 刷新`;
             }
         }
-        // 关联实体（Archivist discoverRelatedEntities 维护）：让 Draco 顺藤摸瓜
+
+        // 关联星座
         try {
             const rels = JSON.parse(p.related_entities || '[]');
             if (rels.length > 0) {
                 const relStr = rels.slice(0, 3)
                     .map(r => r.relation ? `${r.name}（${r.relation}）` : r.name)
                     .join('、');
-                line += `\n  ↳ 关联：${relStr}`;
+                line += `\n  ↳ 关联星座：${relStr}`;
             }
         } catch (_) {}
+
+        // 最近叙事片段（episodes），每条截断到80字
+        const episodes = db.prepare(`
+            SELECT content, valid_from FROM memories
+            WHERE layer = 'episode' AND status = 'permanent' AND entity_id = ?
+            ORDER BY valid_from DESC LIMIT 3
+        `).all(p.id);
+
+        if (episodes.length > 0) {
+            line += '\n  📖 最近动态：';
+            episodes.forEach((ep, i) => {
+                const date = (ep.valid_from || '?').slice(5);
+                const text = ep.content.length > 80 ? ep.content.slice(0, 80) + '…' : ep.content;
+                line += `\n    ${i + 1}. (${date}) ${text}`;
+            });
+            line += '\n  （用 recall_memory 可查看完整叙事片段，或追溯到原始聊天消息）';
+        }
+
+        // v5.8: 注入相关 Saga（跨实体叙事弧线）
+        // Saga 的 memory_ids 中包含本实体的 episode → 展示标题 + 截断描述
+        try {
+            const entityEpisodeIds = db.prepare(`
+                SELECT id FROM memories
+                WHERE layer = 'episode' AND status = 'permanent' AND entity_id = ?
+            `).all(p.id).map(r => r.id);
+
+            if (entityEpisodeIds.length > 0) {
+                const activeSagas = db.prepare(`
+                    SELECT title, description, memory_ids FROM memory_sagas
+                    WHERE status = 'active' AND memory_ids IS NOT NULL
+                    ORDER BY created_at DESC
+                `).all();
+
+                const relatedSagas = activeSagas.filter(s => {
+                    try {
+                        const ids = JSON.parse(s.memory_ids);
+                        return ids.some(id => entityEpisodeIds.includes(id));
+                    } catch (_) { return false; }
+                }).slice(0, 3);  // 最多3条
+
+                if (relatedSagas.length > 0) {
+                    line += '\n  🗺 叙事弧线：';
+                    relatedSagas.forEach(s => {
+                        const desc = (s.description || '').length > 100
+                            ? (s.description || '').slice(0, 100) + '…'
+                            : (s.description || '');
+                        line += `\n    · ${s.title}${desc ? ' — ' + desc : ''}`;
+                    });
+                }
+            }
+        } catch (_) {}
+
         return line;
     }).join('\n');
 }
