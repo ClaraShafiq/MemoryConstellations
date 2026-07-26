@@ -69,7 +69,22 @@ canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
 #panel.visible { opacity: 1; pointer-events: all; transform: translateY(-50%) translateX(0); }
 .p-accent { width: 20px; height: 2px; border-radius: 2px; background: var(--pc, #7c9dff); margin-bottom: 11px; box-shadow: 0 0 7px var(--pc, #7c9dff); }
 .p-cat { font-size: 9px; letter-spacing: .13em; text-transform: uppercase; color: rgba(140, 162, 255, 0.42); margin-bottom: 4px; }
-.p-title { font-size: 14px; font-weight: 500; color: #e4e8ff; line-height: 1.45; margin-bottom: 9px; }
+.p-title { font-size: 14px; font-weight: 500; color: #e4e8ff; line-height: 1.45; margin-bottom: 9px; display: flex; align-items: center; gap: 6px; }
+.p-title .p-toggle-btn {
+    background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 6px; padding: 2px 6px; cursor: pointer;
+    transition: all .15s; margin-left: 6px; flex-shrink: 0;
+    color: rgba(180,200,240,0.5); font-size: 10px; line-height: 1;
+}
+.p-title .p-toggle-btn:hover { color: rgba(220,235,255,0.8); background: rgba(255,255,255,0.08); }
+
+.p-cs { font-size: 10.5px; color: rgba(180,200,230,0.45); line-height: 1.55; margin-bottom: 10px;
+  padding: 5px 8px; background: rgba(100,130,200,0.06); border-radius: 4px; border-left: 2px solid rgba(140,170,220,0.25);
+}
+.p-tps { margin-top: 12px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 8px; }
+.p-tps-label { font-size: 8px; letter-spacing: .12em; text-transform: uppercase; color: rgba(140,160,200,0.3); margin-bottom: 4px; }
+.p-tp-item { font-size: 10.5px; color: rgba(160,185,220,0.45); line-height: 1.5; padding: 2px 0; }
+.p-tp-item::before { content: '— '; color: rgba(140,160,200,0.2); }
 .p-body {
     font-size: 11.5px; color: rgba(160, 182, 255, 0.58); line-height: 1.78; margin-bottom: 12px;
     border-left: 1px solid rgba(100, 120, 255, 0.18); padding-left: 9px;
@@ -388,6 +403,14 @@ canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
     color: rgba(140,160,200,0.35); white-space: nowrap;
 }
 .sd-entity { font-size: 9px; color: rgba(140,165,200,0.35); white-space: nowrap; }
+.sd-tag {
+    display: inline-block; font-size: 7.5px; padding: 1px 5px; border-radius: 8px;
+    white-space: nowrap; letter-spacing: .04em; margin-left: 2px;
+}
+.sd-tag.tg-ec { background: rgba(255,100,80,0.18); color: rgba(255,150,130,0.7); }
+.sd-tag.tg-fh { background: rgba(180,160,80,0.18); color: rgba(220,200,110,0.7); }
+.sd-tag.tg-rs { background: rgba(100,160,220,0.18); color: rgba(140,200,240,0.7); }
+.sd-tag.tg-ns { background: rgba(120,120,120,0.12); color: rgba(150,150,150,0.45); }
 .sd-stars { font-size: 10px; white-space: nowrap; margin-left: auto; }
 
 .sd-content {
@@ -399,6 +422,13 @@ canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
 
 .sd-detail { display: none; margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.04); }
 .sd-entry.expanded .sd-detail { display: block; }
+
+/* ── Pipeline Status (topbar) ── */
+.tb-sep { width: 1px; height: 16px; background: rgba(255,255,255,0.08); margin: 0 6px; display: inline-block; vertical-align: middle; }
+.tb-stat {
+    font-size: 9.5px; color: rgba(140,160,200,0.4); white-space: nowrap;
+    margin: 0 4px; cursor: default;
+}
 .sd-constellations { font-size: 10px; color: rgba(140,165,200,0.4); margin-bottom: 8px; }
 .sd-constellations span {
     color: rgba(180,210,255,0.55); cursor: pointer;
