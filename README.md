@@ -2,7 +2,7 @@
 
 A self-organizing memory system for AI companions. Extracts facts from chat, groups them by topic, and merges them into coherent narratives — all on autopilot.
 
-Built by **Clara Shafiq & Draco Malfoy**.
+Built by **Open Source Community**.
 
 ---
 
@@ -136,9 +136,9 @@ The system maintains three layers of user understanding at different time scales
 
 | Layer | Storage | Timescale | Contents | Update mechanism |
 |-------|---------|-----------|----------|-----------------|
-| **current_state** (瞬态) | `clara_model` type=current_state | Hours to days, TTL-expiring | Transient states the companion tracks: "she's on her period", "she just moved", "she's stressed about a deadline" | Companion writes via chat tools; auto-resolves on TTL expiry |
+| **current_state** (瞬态) | `user_model` type=current_state | Hours to days, TTL-expiring | Transient states the companion tracks: "she's on her period", "she just moved", "she's stressed about a deadline" | Companion writes via chat tools; auto-resolves on TTL expiry |
 | **current_status** (近期动态) | `entity_profiles.current_status` | Days to weeks | Recent developments per entity: "moved to a new apartment in July", "started a new project at work" | Archivist regenerates on significant change; companion can update mid-chat |
-| **behavior patterns** (行为模式) | `clara_patterns` | Weeks to years, confidence-only-grows | Long-term behavioral regularities: "prefers golden-haired characters with sharp wit and hidden vulnerability", "has strong aesthetic opinions about living spaces" | Auto-clustered from observation & preference fragments; bigram-matched every 6h; new patterns discovered every 24h deep cycle |
+| **behavior patterns** (行为模式) | `user_patterns` | Weeks to years, confidence-only-grows | Long-term behavioral regularities: "prefers golden-haired characters with sharp wit and hidden vulnerability", "has strong aesthetic opinions about living spaces" | Auto-clustered from observation & preference fragments; bigram-matched every 6h; new patterns discovered every 24h deep cycle |
 
 **Key design principle:** Behavior pattern confidence only increases — a person doesn't "stop preferring golden-haired characters" just because they haven't mentioned it in three months. Freshness controls injection priority independently from confidence.
 
@@ -154,7 +154,7 @@ Each entity (person, place, event, hobby, project) has three fields, all generat
 
 ### Companion profile
 
-The companion's own personality, self-understanding, and relationship context is stored in `draco_model` (five sections: identity, personality, relationship with user, self as AI, project context). This is injected into every system prompt and can be edited through a UI panel. In production, this replaces the static `core-prompt.txt` personality sections — but for open-source setup, `core-prompt.txt` remains the simplest starting point. See OSS_SETUP.md for both approaches.
+The companion's own personality, self-understanding, and relationship context is stored in `persona_model` (five sections: identity, personality, relationship with user, self as AI, project context). This is injected into every system prompt and can be edited through a UI panel. In production, this replaces the static `core-prompt.txt` personality sections — but for open-source setup, `core-prompt.txt` remains the simplest starting point. See OSS_SETUP.md for both approaches.
 
 ---
 
@@ -243,7 +243,7 @@ Guidelines (from production experience):
 
 See `core-prompt.example.txt` for a skeleton. `OSS_SETUP.md` has more detailed writing guidance.
 
-**Production note:** In Sanctuary's own deployment, the companion's personality sections have been migrated from `core-prompt.txt` into an editable `draco_model` database table, with a UI panel for live editing without restarting the server. The open-source version keeps `core-prompt.txt` as the simpler starting point — both paths are supported.
+**Production note:** In Sanctuary's own deployment, the companion's personality sections have been migrated from `core-prompt.txt` into an editable `persona_model` database table, with a UI panel for live editing without restarting the server. The open-source version keeps `core-prompt.txt` as the simpler starting point — both paths are supported.
 
 ### .env
 
@@ -253,7 +253,7 @@ Minimum required:
 SANCTUARY_ENCRYPTION_KEY=<64-char hex: openssl rand -hex 32>
 SESSION_SECRET=<64-char hex>
 LOGIN_PASSWORD=<your password>
-MIMO_API_KEY=<or OPENROUTER_API_KEY or GEMINI_API_KEY>
+LLM_API_KEY=<or OPENROUTER_API_KEY or GEMINI_API_KEY>
 ```
 
 Full list in `.env.example`.
@@ -274,7 +274,7 @@ Two modes:
 
 No parameters needed. Returns a top-level view of all memory partitions — people, places, events, projects. Your companion can see who they know about and how many memories are linked to each person.
 
-### `manage_clara_state` — Track user state
+### `manage_user_state` — Track user state
 
 Three actions your companion uses to maintain a current picture of you:
 - **set**: Record a new observation — "She started a new project, she's on her period, she just moved." Must include an expiry date (max 90 days). Optional `schedule` parameter for recurring reminders (e.g., medication: `{"type":"daily","windows":["08:00-10:00","19:00-21:00"]}`).
