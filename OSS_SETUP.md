@@ -48,7 +48,7 @@ nano .env
 - `SANCTUARY_ENCRYPTION_KEY` — 64 位 hex 随机字符串（用 `openssl rand -hex 32` 生成）
 - `SESSION_SECRET` — 同上
 - `LOGIN_PASSWORD` — 登录密码（明文，首次启动自动 hash）
-- 至少一个 LLM API key：`MIMO_API_KEY`（DeepSeek 代理）、`OPENROUTER_API_KEY`、或 `GEMINI_API_KEY`
+- 至少一个 LLM API key：`LLM_API_KEY`（DeepSeek 代理）、`OPENROUTER_API_KEY`、或 `GEMINI_API_KEY`
 
 **可选但建议：**
 - `JINA_API_KEY` — 用于向量嵌入（jina.ai，有免费额度）
