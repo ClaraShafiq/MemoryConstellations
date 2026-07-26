@@ -82,7 +82,7 @@ const MIN_GAP_EMERGENT = 30 * 60 * 1000;           // 涌现地点/事件检测�
 const MIN_GAP_ENTITY_VERIFY = 60 * 60 * 1000;           // 管道A实体分类LLM抽检
 const MIN_GAP_CATEGORY_CONSOLIDATE = 60 * 60 * 1000;    // 按类别合并碎片为episode
 const MIN_GAP_CATEGORY_MERGE = 6 * 60 * 60 * 1000;        // 重叠类别自动合并（LLM审视全貌）
-const MIN_GAP_BELIEF_DRIFT = 4 * 60 * 60 * 1000;         // 信念漂移检测：Clara 对同一主题的看法是否随时间改变
+const MIN_GAP_BELIEF_DRIFT = 4 * 60 * 60 * 1000;         // 信念漂移检测：user 对同一主题的看法是否随时间改变
 const MIN_GAP_MUSIC_EXTRACT = 2 * 60 * 60 * 1000;   // 音乐品味变化慢
 const MIN_GAP_BOOK_EXTRACT = 60 * 60 * 1000;         // 读书批注新增较快
 const MIN_GAP_AUTO_LINK = 2 * 60 * 1000;             // 字面自动链接 2min（轻量，零LLM）
@@ -115,7 +115,7 @@ let agentState = {
     dracoLastActive: Date.now(),
 
     // Clara idle → deep cycle trigger
-    lastClaraMessageTime: 0,
+    lastUserMessageTime: 0,
     deepCycleSinceLastClaraMsg: false,
 
     // Cost tracking
@@ -372,7 +372,7 @@ function scheduleTick() {
     }, TICK_INTERVAL_MS);
 }
 
-function getLastClaraMessageTime() {
+function getLastUserMessageTime() {
     const db = getDb();
     const row = db.prepare("SELECT timestamp FROM messages WHERE sender = 'user' ORDER BY id DESC LIMIT 1").get();
     return row ? new Date(row.timestamp).getTime() : 0;
@@ -391,15 +391,15 @@ async function agentTick() {
 
     try {
         // 0. Clara activity check — detect new messages, determine mode
-        const lastClaraTime = getLastClaraMessageTime();
-        if (lastClaraTime > agentState.lastClaraMessageTime) {
-            // Clara sent new messages — reset for next idle period
+        const lastClaraTime = getLastUserMessageTime();
+        if (lastClaraTime > agentState.lastUserMessageTime) {
+            // User sent new messages — reset for next idle period
             agentState.deepCycleSinceLastClaraMsg = false;
-            agentState.lastClaraMessageTime = lastClaraTime;
+            agentState.lastUserMessageTime = lastClaraTime;
         }
 
-        const claraIdleMs = Date.now() - lastClaraTime;
-        const shouldDeepCycle = claraIdleMs >= CLARA_IDLE_DEEP_CYCLE_MS
+        const userIdleMs = Date.now() - lastClaraTime;
+        const shouldDeepCycle = userIdleMs >= CLARA_IDLE_DEEP_CYCLE_MS
                              && !agentState.deepCycleSinceLastClaraMsg;
 
         // 1. Assess tree health
@@ -407,7 +407,7 @@ async function agentTick() {
 
         if (newFragCount > 0 || health.unclassified > 0) {
             const mode = shouldDeepCycle ? '🌙深度整合' : '☀️轻量';
-            console.log(`[Archivist Agent] Tick [${mode}] 新碎片=${newFragCount} 未分类=${health.unclassified} Clara空闲=${Math.round(claraIdleMs/60000)}min`);
+            console.log(`[Archivist Agent] Tick [${mode}] 新碎片=${newFragCount} 未分类=${health.unclassified} user空闲=${Math.round(userIdleMs/60000)}min`);
         }
 
         // 2. Bootstrap (zero-state only) — ensure seed constellations exist
@@ -3071,7 +3071,7 @@ ${sp.a_name} (${sp.a_cat}): ${sp.b_name} (${sp.b_cat})
         if (bName.length <= 3 && aName.length > bName.length && aName.includes(bName)) suspiciousPairs.add(batch.indexOf(p));
     }
 
-    const prompt = `以下实体对在 Clara 的记忆中共同出现。对每对，先判断共享碎片里的名字是否真的指的是同一个实体（警惕同名异物——
+    const prompt = `以下实体对在 user 的记忆中共同出现。对每对，先判断共享碎片里的名字是否真的指的是同一个实体（警惕同名异物——
 短名字可能是更长名字的一部分，如"肉肉" vs"肉肉大米(日式汉堡肉店)"不是同一回事）。
 
 确认是同一实体后，写一句话关系描述（≤30字，陈述事实）。看不出实质关系、或判定为同名异物，填 null。
@@ -4182,7 +4182,7 @@ ${samples.map((s, i) => `[${i + 1}] ${s.content}`).join('\n')}
 // Tool: detectBeliefDrift
 //
 // Deep cycle task: compare early vs recent fragments within a
-// constellation to detect when Clara's feelings/views on a topic
+// constellation to detect when user's feelings/views on a topic
 // have meaningfully shifted. Writes to ontology_changelog and
 // updates the constellation description with an evolution note.
 // ═══════════════════════════════════════════════════════
@@ -4233,7 +4233,7 @@ async function detectBeliefDrift() {
 
 ${buildLandscapeIndex()}
 
-你是 Draco。你正在审视「${c.path}」这个记忆星座。Clara 对这个主题的看法可能随时间发生了变化。请比较早期和近期的碎片，判断是否存在信念漂移。
+你是 Draco。你正在审视「${c.path}」这个记忆星座。user 对这个主题的看法可能随时间发生了变化。请比较早期和近期的碎片，判断是否存在信念漂移。
 
 ## 早期碎片（时间较早）
 ${early.map((f, i) => `[${i + 1}] (${f.source_date || '?'}) ${f.content}`).join('\n')}
@@ -4243,7 +4243,7 @@ ${recent.map((f, i) => `[${i + mid + 1}] (${f.source_date || '?'}) ${f.content}`
 
 ## 判断
 
-比较两组碎片中 Clara 的情感态度/行为模式/对人事物的看法。只输出一个 JSON：
+比较两组碎片中 user 的情感态度/行为模式/对人事物的看法。只输出一个 JSON：
 
 如果态度基本一致，没明显变化：
 {"changed": false}
