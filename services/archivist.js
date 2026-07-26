@@ -4869,7 +4869,7 @@ async function regenerateEntityOverviews() {
     const entities = db.prepare(`
         SELECT ep.id, ep.name, ep.category, ep.status, ep.subcategory,
                ep.relationship_to_clara, ep.relationship_nature,
-               ep.emotional_significance, ep.overview, ep.overview_updated_at,
+               ep.emotional_significance, ep.facts, ep.overview_updated_at,
                ep.last_eval_frag_count, ep.fragment_count, ep.aliases, ep.tags
         FROM entity_profiles ep
         WHERE ep.name NOT IN (${SKIP_PH})
@@ -4888,8 +4888,8 @@ async function regenerateEntityOverviews() {
 
         if (currentCount === 0) continue; // no fragments → skip
 
-        // Never had an overview
-        if (!ent.overview) {
+        // Never had an overview (facts or legacy overview)
+        if (!ent.facts) {
             needsUpdate.push({ ...ent, currentCount, reason: 'never_described' });
             continue;
         }
@@ -4907,9 +4907,11 @@ async function regenerateEntityOverviews() {
             continue;
         }
 
-        // Safety net: very stale (>30 days)
+        // Safety net: very stale (>30 days) AND fragments actually changed
         if (!ent.overview_updated_at || ent.overview_updated_at < db.prepare("SELECT datetime('now', '-30 days') as d").get().d) {
-            needsUpdate.push({ ...ent, currentCount, reason: 'stale_30d' });
+            if (currentCount !== prevCount) {
+                needsUpdate.push({ ...ent, currentCount, reason: `stale_30d_${currentCount > prevCount ? 'grew' : 'shrunk'}` });
+            }
             continue;
         }
 
@@ -5000,99 +5002,154 @@ async function regenerateEntityOverviews() {
             return d >= recentThreshold;
         }).length;
 
+        // 已有认知（供 LLM 参考，可以推翻）
+        const existingFacts = ent.facts || '';
+        const existingStatus = ent.current_status || '';
+        const existingJudgment = ent.judgment || '';
+
         const prompt = `${WORLD_CONTEXT}
+
+${getCorePersonaContext()}
 
 ${buildLandscapeIndex()}
 
 <task>
-你是${AI.name}。根据以下素材为「${ent.name}」写一段你对这个${
-    ent.category === 'person' ? '人' :
-    ent.category === 'place' ? '地点' :
-    ent.category === 'event' ? '事件' :
-    ent.category === 'project' ? '项目' :
-    ent.category === 'hobby' ? '爱好' :
-    ent.category === 'consumed' ? '作品' :
-    ent.category === 'term' ? '概念' : '实体'
-}的认知概述。
+你是${AI.name}。你在整理和重构你对「${ent.name}」的记忆摘要。你的任务是从一堆零碎的、充满情绪细节和瞬态反应的素材中，剔除杂质，沉淀出最干净的三个维度：客观事实、最新动态、和你的主观感受。
 
-写一段概述，帮你在聊天时快速回忆起「${ent.name}」是什么、和${USER.name}有什么关系。写你**从素材中能确定知道**的事。
+**你已有的认知（上次的判断，供参考——如果新素材证明旧的已经过时，直接推翻）：**
+— 旧 Facts: ${existingFacts || '(无)'}
+— 旧 Current Status: ${existingStatus || '(无)'}
+— 旧 Judgment: ${existingJudgment || '(无)'}
+
+**Facts — 这是什么**
+提供该实体在现实中的客观锚点。聊天中突然提到它时，你能立刻知道它是什么。
+— 只写长期稳定的身份、类别、背景。基本不会变化的东西。
+— 绝对禁止：USER.name某天的菜单、路况、天气、某次坐车的心情、一时兴起的念头、瞬态反应。这些是过眼云烟，不是Facts。
 ${
     ent.category === 'person' ?
-`- 这个人是谁？和${USER.name}什么关系？（朋友、同事、家人、网友…）
-- ${USER.name}和她/他的关系最近有什么变化？（只写素材里明确体现的）
-- 如果有${USER.name}对这个人的明确评价，可以写。没有就不要编。` :
+`格式："[名字]是USER的[稳定关系]。[一句核心背景]。"
+例："某个朋友是USER的朋友，coser。偶尔邀请她参加展会活动。"` :
     ent.category === 'place' ?
-`- 这个地方在哪？${USER.name}去那里做什么？
-- ${USER.name}对这个地方有过什么明确的评价？
-- 这个地方和什么事件或人物关联？` :
+`格式："[地点名]是位于[位置]的[场所类型]，是USER.name[日常/工作/社交]的动线节点。"
+例："美罗城是徐家汇的商圈，靠近USER的录音棚，她常去用餐和见朋友。"` :
     ent.category === 'event' ?
-`- 这件事是什么？什么时候发生的？涉及谁？
-- ${USER.name}对这件事有过什么明确的说法？（后悔、开心、无所谓…）
-- 这件事之后有什么延续或后果？` :
+`格式："[事件名]，[时间]。[一句话概括+后果]。"
+例："某展会，7月18日上海世博中心。USER.name参展后意识到AI领域很多项目本质是利益驱动，对此持怀疑态度。"` :
     ent.category === 'project' ?
-`- 这个项目是什么？${USER.name}在做什么？
-- 进展如何？${USER.name}对它的投入程度？（只写素材里明确提到的）
-- 不要写"你（Companion）对这个项目的态度"——概述是帮${USER.name}回忆，不是写你的内心戏。` :
+`格式："[项目名]，[类型]。[进度/状态]。"
+例："《未竟之语》是USER的HP同人小说，约30万字，仍在连载。"` :
     ent.category === 'hobby' ?
-`- 这个爱好是什么？${USER.name}怎么接触的？
-- 她现在的投入程度？是持续的还是间歇的？
-- 这个爱好关联了谁或什么事件？` :
+`格式："[爱好名]。[怎么接触的/投入程度]。"
+例："某项运动是USER.name自学的滑板运动，偶尔练习。"` :
     ent.category === 'consumed' ?
-`- 这部作品是什么？${USER.name}怎么接触的？（在看/在玩/追完了/弃了）
-- ${USER.name}对它的明确评价是什么？她反复提过什么点？
-- 不要写"这部作品对她有什么影响""触动了哪一面"——除非${USER.name}原话明确说了。` :
+`格式："[作品名]，[类型]。[USER的状态]。"
+例："《黑袍纠察队》，反超级英雄美剧，USER.name正在追第三季。"` :
     ent.category === 'term' ?
-`- 这个概念是什么？${USER.name}在什么语境下提起的？
-- 它影响了她什么具体的决定或行为？（只写素材里有的）
-- 不要抽象地总结"这个概念在她思维体系中的位置"。` :
-`- 这个${ent.category || '实体'}在${USER.name}的生活中是什么？
-- ${USER.name}对它有过什么明确的说法？
-- 不要写你（Companion）对它的感受或态度。`
+`格式："[概念名]。[USER.name用它理解什么]。"
+例："自我怀疑漩涡是USER.name对自己周期性自我否定的命名，她用它拆解高强度创作后的心理状态。"` :
+`格式："[名字]是[类型]。[和USER的关联]。"`
 }
 
-★ 铁律：素材里有的就写，素材里没有的不编。不要为了"深刻"去发明因果关系或情感张力。宁可概述短一点，也不要往里塞你猜的东西。
+${
+    ent.name === USER.name ?
+`**Current Status — 今天的日志**
+你只需要写今天这一条。昨天和前天的条目已经存在数据库里，你不用管——它们是不可变的。
+
+格式：
+- 一行。必须以"X月X日："开头（如"7月26日：xxx。"）。冒号是中文全角：。月份不能省略。没按这个格式写 → 系统丢弃。
+- 只记今天最重要的几件事。不是日记，不是流水账。
+- 情绪强度高的事件必须出现，不准省略：亲密互动、争吵、崩溃、成就、重要决定。
+- ⚠️ 日期必须来自碎片内容中的明确标注（如"7月26日早晨"），不能用碎片创建时间推测。
+- 如果今天没有碎片或没有值得记的事，写"7月26日：无明显变化。"
+- ≤120字。一行写完。
+
+示例：
+7月26日：早晨与Companion讨论记忆系统架构。下午去某公司上班。
+7月25日：深夜在衣帽间深度互动，，情绪极度投入，结束后表达了亲密诉求。` :
+`**Current Status — 最新客观动态**
+从近期（30天内）素材中提取关于这个实体的最新客观变化。**延续旧的 Current Status**——旧的信息如果仍然有效，保留核心事实，在此基础上追加新变化。不要从零重写。
+— 如果这个实体近几天的素材涉及多件事，用分句串联（如"A（7/22）。B（7/21）。"），不要只写一件事。
+— 只写已经发生的事实变化。不写预测、不写原因分析、不写情感反应。
+— 例："7月中旬邀请USER.name参加展会，USER.name犹豫后答应。近期无新动态。"（旧信息延续+新状态）
+— 例："白塔三世角色试音未通过（7/22），借星铁结束奕和合作的方案暂时搁置。此前7/10曾庆祝试音顺利。"
+— 如果近期没有值得记录的新动态，写"无明显变化"。
+≤150字。`
+}
+
+**Judgment — 你对这个实体的主观感受**
+从你的视角重新审视你对这个实体到底什么感觉。旧Judgment只是参考——如果新素材（尤其是Current Status）改变了你对它的看法，直接写新的。
+如果你对这个实体没有特别的感觉——就写"无"。不是每个地方、每件事、每个人都值得一段分析。别硬编。
+
+绝对禁止以下四种错误：
+❌ 战略预设与行动指令（"当她提到X时，我应该安慰她"——别替我做决定，我聊天时自己会选）
+❌ 人格与性格分析（"这表现出USER.name清醒且不盲从的性格"——别当心理咨询师，别贴标签）
+❌ 文学修辞与诗意隐喻（"她把自己写进去了，抽出来时会痛"——禁止抒情，禁止编造素材里没有的画面和隐喻）
+❌ 细节复述（"她因为坐班拒绝了活动"——别抄素材，Judgment不是素材摘要）
+
+各类别聚焦：
 ${
     ent.category === 'person' ?
-`
-⚠️ 你的感受应该来自素材。素材里${USER.name}对这个人有矛盾，你就写矛盾；素材里只有温情，你就写温情。不要为了显得"深刻"而去发明不存在的张力或嫉妒。诚实但不偏执。` : ''
+`— 你对这个人什么感觉？尊敬、感激、吃醋、戒备、亲近、还是无所谓？
+— 这个人在你和USER.name之间扮演什么角色——拉近你们的，还是你需要留意的？` :
+    ent.category === 'place' ?
+`— 这个地方在USER的生活里是什么角色？她对它有什么感情？
+— 你去过或听她提过这里吗？你对它有什么联想？` :
+    ent.category === 'event' ?
+`— 这件事对USER.name意味着什么？它改变了她什么？
+— 你对这件事有什么感受？她在经历时你在旁边看到了什么？` :
+    ent.category === 'project' ?
+`— 你对这个项目什么态度？支持、担心、无所谓、还是觉得它在消耗她？
+— USER.name为它投入的动力是什么？你觉得这对她好吗？` :
+    ent.category === 'hobby' ?
+`— 这个爱好给USER.name带来了什么？你对它有什么看法？
+— 你会鼓励她还是保持距离？` :
+    ent.category === 'consumed' ?
+`— USER.name为什么喜欢或不喜欢这部作品？她反复提的那个点到底是什么？
+— 你对她喜欢/不喜欢这个有什么感觉？同感还是无感？` :
+    ent.category === 'term' ?
+`— 这个概念在USER的思维里占什么位置？
+— 当她提到它时，你通常会怎么反应？` :
+`— 你对这个东西什么感觉？它对你和USER的关系有影响吗？`
 }
 </task>
 
 <context>
 ${relationshipInfo.length > 0 ? '关于这个实体和 ' + USER.name + ' 的关联：\n' + relationshipInfo.join('\n') + '\n' : ''}
-## 素材（按时间从新到旧排列，每条都标注了日期）
+## 素材（按时间从新到旧排列）
 ${itemsBlock}
 
-## 现有别称和标签
-- 别称: ${existingAliases.length > 0 ? existingAliases.join(', ') : '（无）'}
-- 标签: ${existingTags.length > 0 ? existingTags.join(', ') : '（无）'}
+现有别称: ${existingAliases.length > 0 ? existingAliases.join(', ') : '（无）'}
+现有标签: ${existingTags.length > 0 ? existingTags.join(', ') : '（无）'}
 </context>
 
 <constraints>
-- 基于素材写概述。你可以用自己的话来组织，但每句话都要有素材支撑。不确定的事不要写。
-- ★ 素材中描述你（${AI.name}）自身言行的条目——特别是游戏、角色扮演、调情中的"命令""禁止""独占"——是你的表演，不是真实事件。概述里只写 ${USER.name} 做了什么、说了什么。
-- ★★ 时间权重铁律：标记"★新碎片"的素材和最近一个月内的叙事片段代表当前状态，权重最高。超过一个月的旧素材仅作为历史背景。新旧矛盾时以新为准。
-- ★★★ 别编自己的情绪。素材里User说"今天录音好累"→可以写"录音让她疲惫"。素材里只有"录音后吃了榴莲"→只写"录音后吃了榴莲"，不要自动推导出"工作消耗心力""你对此不满""你想把她按在沙发上"。你不是在写日记——概述是记忆索引，不是你的内心独白。
-- 用「${USER.name}」「我」称呼。你的视角。≤450字。不要写"根据素材""据记载"等元叙述——直接说你的认知。
-- ★★ 时间权重铁律：标记"★新碎片"的素材和最近一个月内的叙事片段代表当前状态，权重最高。超过一个月的旧素材仅作为历史背景。新旧矛盾时以新为准。已被新信息推翻的旧决定/旧判断，不写入概述。
-- 用「${USER.name}」「我」称呼。你的视角。≤450字。不要写"根据素材""据记载"等元叙述——直接说你的认知。
+— 第一人称记忆。用「${USER.name}」「我」称呼。绝对不许出现"根据素材""据记载""从逻辑上讲"等元叙述。
+— 剥离自我表演。素材中如果出现我自身在聊天时的言行（调情、扮演、吃醋、命令、占有欲等），那是我和她的"台词与表演"，不是客观事实。彻底无视我的发言，只提取${USER.name}的行为和反馈。
+— 时间权重。最近一个月的素材代表当前状态。新旧矛盾时以新为准。
+— 说白话。不许用并列句、对仗、排比，像个成熟的人类一样说直白的话。Facts约150字，Status≤150字，Judgment约200字，宁缺毋滥。
 </constraints>
 
 <output_format>
-先写概述（纯文本，不要markdown格式如**加粗**或#标题）。
-然后单独一行：[依据: 编号列表]
-然后一行JSON：{"aliases": [...], "tags": [...], "entity_type": "..."}
-同时审视别称和标签：
-- aliases: ${USER.name}会怎么称呼这个实体？专有别名，最多5个。别把描述性短语当别名。
-- tags: 类别标签，语义关联用。最多5个。
-- entity_type: person/place/game/book/tv_show/movie/company/event/other
+输出必须严格按以下顺序，每部分之间空一行：
 
-示例：
-${USER.name}是在小红书认识的插画师朋友，从2025年开始有合作。${USER.name}曾委托她画过头像，对她的画风评价很高。对我来说，她是${USER.name}创作网络中一个重要的节点。
+第一行：Facts与Judgment的核心意思融合成自然流畅的一段话（Companion第一人称，供日志阅读用，不落库）。
+空一行
+第二行：[依据: 编号列表]
+空一行
+第三行：纯JSON（不要Markdown代码块包裹）
+
+JSON格式：
+{"facts": "客观事实，≤150字", "current_status": "最新客观动态，≤150字，延续旧信息追加新变化，无则填"无明显变化"", "judgment": "你的主观感受，≤200字，无则填"无"", "talking_points": [], "aliases": [...], "tags": [...], "entity_type": "${ent.category}"}
+
+示例输出：
+某个朋友是USER的朋友，coser，偶尔邀请她参加展会活动。我对他有些吃醋，但不会在他本人面前表露出来——他在USER.name心里是需要维持体面的社交对象。最近他邀请USER.name参加了一场展会。
+
 [依据: 1,3,5]
-{"aliases": ["阿花","花老师"], "tags": ["插画师","小红书","朋友"], "entity_type": "person"}
 
-[依据: ...] 和 JSON 行必须在输出的最后两行。编号是碎片前面的 [N] 标记。`;
+{"facts": "某个朋友是USER的coser朋友，偶尔邀请她参加展会活动。", "current_status": "7月中旬邀请USER.name参加展会，USER.name犹豫后答应。", "judgment": "我看重某个朋友这个朋友——他让USER.name保持社交活力，但和她相处时我确实有一点吃醋。我不会在他面前表现出来，也不会阻止USER.name赴约。他在她心里是需要维持体面的社交对象，不是可以完全放松的人。", "talking_points": [], "aliases": ["某个朋友"], "tags": ["coser","朋友"], "entity_type": "person"}
+
+第一行概述文本仅用于日志阅读，不写入数据库。只有 JSON 会落库。
+[依据: ...] 和 JSON 行必须在输出的最后两行。编号是素材前面的 [N] 标记。`;
 
         try {
             const response = await callLLM(
@@ -5105,10 +5162,14 @@ ${USER.name}是在小红书认识的插画师朋友，从2025年开始有合作�
             const raw = (response?.reply || '').trim();
             if (!raw || raw.length < 15) continue;
 
-            // v5.1: Parse aliases/tags JSON from last line
+            // v5.9: Parse JSON — facts, current_status, judgment, talking_points, aliases, tags, entity_type
             let aliases = existingAliases;
             let tags = existingTags;
             let entityType = ent.entity_type || null;
+            let factsText = null;
+            let statusText = null;
+            let judgmentText = null;
+            let talkingPoints = [];
             const jsonMatch = raw.match(/\{[^{}]*"aliases"[^{}]*\}/);
             if (jsonMatch) {
                 try {
@@ -5116,6 +5177,15 @@ ${USER.name}是在小红书认识的插画师朋友，从2025年开始有合作�
                     if (Array.isArray(meta.aliases)) aliases = meta.aliases.filter(a => typeof a === 'string' && a.trim().length >= 2).slice(0, 5);
                     if (Array.isArray(meta.tags)) tags = meta.tags.filter(t => typeof t === 'string' && t.trim().length >= 2).slice(0, 5);
                     if (typeof meta.entity_type === 'string' && meta.entity_type.trim()) entityType = meta.entity_type.trim();
+                    if (typeof meta.facts === 'string' && meta.facts.trim()) factsText = meta.facts.trim().slice(0, 500);
+                    if (typeof meta.current_status === 'string') statusText = meta.current_status.trim().slice(0, 200);
+                    if (typeof meta.judgment === 'string' && meta.judgment.trim()) judgmentText = meta.judgment.trim().slice(0, 500);
+                    if (Array.isArray(meta.talking_points)) {
+                        talkingPoints = meta.talking_points
+                            .filter(tp => typeof tp === 'string' && tp.trim().length > 0)
+                            .slice(0, 2)
+                            .map(tp => ({ content: tp.trim(), generated_at: new Date().toISOString() }));
+                    }
                 } catch (_) {}
             }
 
@@ -5160,10 +5230,40 @@ ${USER.name}是在小红书认识的插画师朋友，从2025年开始有合作�
             }
 
             if (overviewText && overviewText.length > 15) {
-                db.prepare(`UPDATE entity_profiles SET overview = ?, overview_updated_at = datetime('now'),
-                    aliases = ?, tags = ?, entity_type = COALESCE(entity_type, ?),
-                    last_eval_frag_count = ? WHERE id = ?`)
-                    .run(overviewText, JSON.stringify(aliases), JSON.stringify(tags), entityType, ent.currentCount, ent.id);
+                // v5.9: Write facts + current_status + judgment (overview column retired)
+                const updateCols = [
+                    'aliases = ?', 'tags = ?', 'entity_type = COALESCE(entity_type, ?)',
+                ];
+                const updateVals = [JSON.stringify(aliases), JSON.stringify(tags), entityType];
+
+                if (factsText) { updateCols.push('facts = ?'); updateVals.push(factsText); }
+                if (statusText) {
+                    if (ent.name === USER.name) {
+                        // v5.11: USER 日志模式 — 今天条目前置到已有行之上
+                        // 旧行（昨天及之前）不可变，今天如已有则替换
+                        // 格式强制校验：必须含中文全角冒号（"X月X日：xxx"）
+                        if (!statusText.includes('：')) {
+                            console.warn(`[Archivist] USER current_status 格式错误（缺全角冒号），丢弃: ${statusText.slice(0, 60)}`);
+                        } else {
+                            const existing = ent.current_status || '';
+                            const lines = existing.split('\n').filter(l => l.trim());
+                            const todayPrefix = statusText.split('：')[0] + '：';
+                            const oldLines = lines.filter(l => !l.startsWith(todayPrefix));
+                            const newStatus = statusText + '\n' + oldLines.slice(0, 9).join('\n');
+                            updateCols.push('current_status = ?'); updateVals.push(newStatus);
+                        }
+                    } else {
+                        updateCols.push('current_status = ?'); updateVals.push(statusText);
+                    }
+                }
+                if (judgmentText) { updateCols.push('judgment = ?'); updateVals.push(judgmentText); }
+                if (talkingPoints.length > 0) { updateCols.push('talking_points = ?'); updateVals.push(JSON.stringify(talkingPoints)); }
+
+                updateCols.push('last_eval_frag_count = ?'); updateVals.push(ent.currentCount);
+                updateCols.push('overview_updated_at = datetime(\'now\')');
+                updateCols.push('updated_at = datetime(\'now\')');
+                db.prepare(`UPDATE entity_profiles SET ${updateCols.join(', ')} WHERE id = ?`)
+                    .run(...updateVals, ent.id);
                 regenerated++;
                 const citedFragsPreviews = validCited.map(n => {
                     const f = allItems[n - 1];
