@@ -17,7 +17,7 @@ const { chromaDBOperation } = require('./memory');
 const { WORLD_CONTEXT } = require('./worldContext');
 const { SKIP_NAMES, USER, AI } = require('./memoryConfig');
 const SKIP_PH = SKIP_NAMES.map(() => '?').join(', '); // SQL placeholder string for NOT IN clauses
-const { runClaraModelCycle, matchEvidenceFromFragments, harvestFacts, processModelDecay, resolveExpiredStates, MIN_GAP_CLARA_MODEL } = require('./claraModel');
+const { runUserModelCycle, matchEvidenceFromFragments, harvestFacts, processModelDecay, resolveExpiredStates, MIN_GAP_USER_MODEL } = require('./cognitiveModel');
 
 // ═══════════════════════════════════════════════════════
 // Event Bus — Scribe 发事件，Archivist 监听
@@ -142,7 +142,7 @@ let agentState = {
     lastBookExtract: 0,
     lastEmergence: 0,
     lastAutoMerge: 0,
-    lastClaraModel: 0,
+    lastUserModel: 0,
     lastCategoryMerge: 0,
     lastBeliefDrift: 0,
 
@@ -469,9 +469,9 @@ async function agentTick() {
         // 5e. Clara Model decay — pure math, zero LLM, zero ChromaDB
         // TTL expiry / hypothesis abandon / trait contradiction flagging / dormant marking
         // These are timer-based state transitions that must run regardless of deep cycle.
-        // (v4.9 regression: these were locked inside runClaraModelCycle → deep cycle,
+        // (v4.9 regression: these were locked inside runUserModelCycle → deep cycle,
         //  causing current_state TTL to never fire when Clara is active.)
-        await runTaskIfDue('processClaraDecay', () => {
+        await runTaskIfDue('processUserDecay', () => {
             try {
                 const result = processModelDecay();
                 if (result && (result.resolved > 0 || result.abandoned > 0 || result.flagged > 0 || result.dormant > 0)) {
@@ -612,12 +612,12 @@ async function agentTick() {
                     return { skipped: true, reason: `needsInsight=${health.needsInsight}` };
                 },
                 episodeAudit:    async () => runTaskIfDue('episodeAudit', auditNewEpisodes, MIN_GAP_EPISODE_AUDIT),
-                claraModel:      async () => runTaskIfDue('claraModel', runClaraModelCycle, MIN_GAP_CLARA_MODEL),
+                userModel:      async () => runTaskIfDue('userModel', runUserModelCycle, MIN_GAP_USER_MODEL),
                 stop:            async () => 'stop',
             };
 
             // ── Clara Model always runs (not optional — core cognitive maintenance) ──
-            await dispatch.claraModel();
+            await dispatch.userModel();
 
             for (const taskName of gardenPlan) {
                 if (taskName === 'stop') break;
@@ -5990,7 +5990,7 @@ const GARDEN_TASKS = {
     episodeAudit:    { desc: 'Episode质检(LLM)', llm: true,  gapKey: 'MIN_GAP_EPISODE_AUDIT' },
     insights:        { desc: '碎片洞察提取(LLM)', llm: true,  gapKey: 'MIN_GAP_INSIGHTS' },
     entityScan:      { desc: '新实体扫描(LLM)', llm: true,  gapKey: 'MIN_GAP_ENTITY_VERIFY' },
-    claraModel:      { desc: 'Clara Model认知维护', llm: true,  gapKey: 'MIN_GAP_CLARA_MODEL' },
+    userModel:      { desc: 'Clara Model认知维护', llm: true,  gapKey: 'MIN_GAP_USER_MODEL' },
     stop:            { desc: '本轮无事可做，停止', llm: false, gapKey: null },
 };
 
@@ -6005,7 +6005,7 @@ GAP_VALUE_MAP.MIN_GAP_ENTITY_OVERVIEWS = MIN_GAP_ENTITY_OVERVIEWS;
 GAP_VALUE_MAP.MIN_GAP_EPISODE_AUDIT = MIN_GAP_EPISODE_AUDIT;
 GAP_VALUE_MAP.MIN_GAP_INSIGHTS = MIN_GAP_INSIGHTS;
 GAP_VALUE_MAP.MIN_GAP_ENTITY_VERIFY = MIN_GAP_ENTITY_VERIFY;
-GAP_VALUE_MAP.MIN_GAP_CLARA_MODEL = MIN_GAP_CLARA_MODEL;
+GAP_VALUE_MAP.MIN_GAP_USER_MODEL = MIN_GAP_USER_MODEL;
 
 async function decideGardenAction(health, llmAvailable) {
     const db = getDb();
@@ -6045,7 +6045,7 @@ async function decideGardenAction(health, llmAvailable) {
     // Fast path: nothing to do
     const hasWork = health.unclassified >= 5 || seedsReady > 0 || seedsAtRisk > 5
         || health.needsInsight >= 10 || health.staleEntityOverviews > 0;
-    if (!hasWork && !taskStatus.claraModel?.ready) {
+    if (!hasWork && !taskStatus.userModel?.ready) {
         console.log('[Archivist] 🌿 花园无需打理');
         return ['stop'];
     }
