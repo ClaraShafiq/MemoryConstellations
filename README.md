@@ -24,7 +24,7 @@ Three things happen automatically while your companion runs:
 
 Open `/memory.html` — it renders a star map from the database:
 
-- Five galaxies (Social, Places, Events, Hobbies, [Your] Projects) orbit a binary core (you + your companion)
+- Five galaxies (Social, Places, Events, Hobbies, Projects) orbit a binary core (you + your companion)
 - Each constellation is an entity — a person, place, event, or interest. Click to see its overview, linked memories, and narrative episodes
 - Bridges between constellations show when two entities share memories
 - Every memory traces back to its source conversation
@@ -88,16 +88,19 @@ Archivist ── 2-min tick loop
     ├─ Lightweight mode (every tick, no LLM calls)
     │   ├─ Link fragments to entities by name match
     │   ├─ Update evidence counters for cognitive model
+    │   ├─ Maintain behavior patterns (bigram match, freshness refresh)
     │   ├─ Expire time-based entries (TTL-based current_state expiry)
     │   └─ Detect and merge duplicate entities
     │
     └─ Deep cycle (user idle ≥1 hour, LLM-heavy)
         ├─ Classify unlinked fragments → assign to entities
         ├─ Grow seeds (new entities) → graduate to active
-        ├─ Consolidate fragments per entity → episodes
-        ├─ Cluster episodes across entities → sagas
+        ├─ Consolidate fragments per entity → episodes (narrative memories)
+        ├─ Cluster episodes across entities → sagas (story arcs)
         ├─ Discover emergent people/places/events
-        └─ Regenerate entity overviews + cross-reference
+        ├─ Regenerate entity overviews (facts + judgment + current status)
+        ├─ Detect new cognitive traits → refine companion's understanding
+        └─ Cross-reference current states with entity profiles
     │
     ▼
 Librarian ── called at chat-time
@@ -106,7 +109,7 @@ Librarian ── called at chat-time
     │       ── Results tagged with recall permission level
     │
     ▼
-System Prompt ── injected: relevant memories + entity profiles + core insight
+System Prompt ── injected: relevant memories + entity profiles + user profile + companion profile
     │
     ▼
 jiwen (optional) ── every minute
@@ -115,34 +118,74 @@ jiwen (optional) ── every minute
                 ── Separate project: github.com/ClaraShafiq/jiwen
 ```
 
-### Memory layers
+---
+
+## Memory layers
+
+### Core memory layers
 
 | Layer | Storage | Contents | Update trigger |
 |-------|---------|----------|---------------|
-| Fragments | `memory_fragments` | Single facts, ≤80 chars, third-person | Scribe, per chat session |
-| Entities | `entity_profiles` | Named people/places/events/hobbies | Archivist classify + graduate |
-| Episodes | `memories` (layer=episode) | Merged fragment narratives, 100-250 chars | Deep cycle consolidate |
-| Sagas | `memory_sagas` | Cross-entity narrative arcs with emotion axis | Every 24h or on new episodes |
-| Cognitive model | `clara_model` + `clara_patterns` | Current states (companion-maintained) + behavior patterns (auto-clustered) | Chat-time writes + deep cycle |
-| Emotional state | jiwen *(optional)* | 5-axis continuous values, persisted to DB | Every minute (math drift + saga bias) — separate project |
+| Fragments | `memory_fragments` | Single facts, ≤80 chars, third-person, typed (observation/reflection/preference/event/state) | Scribe, per chat session |
+| Entities | `entity_profiles` | Named people/places/events/hobbies/projects, with three-field model (facts + current_status + judgment) | Archivist classify + graduate + overview regeneration |
+| Episodes | `memories` (layer=episode) | Merged fragment narratives, 100-250 chars, with date correction and contradiction detection | Deep cycle consolidate |
+| Sagas | `memory_sagas` | Cross-entity narrative arcs with emotional axis (bond/vigilance/confidence/humility/warmth/melancholy/grounded) | Every 24h or on new episodes |
+
+### User model layers — what the companion knows about you
+
+The system maintains three layers of user understanding at different time scales. Each layer serves a distinct purpose and updates independently:
+
+| Layer | Storage | Timescale | Contents | Update mechanism |
+|-------|---------|-----------|----------|-----------------|
+| **current_state** (瞬态) | `clara_model` type=current_state | Hours to days, TTL-expiring | Transient states the companion tracks: "she's on her period", "she just moved", "she's stressed about a deadline" | Companion writes via chat tools; auto-resolves on TTL expiry |
+| **current_status** (近期动态) | `entity_profiles.current_status` | Days to weeks | Recent developments per entity: "moved to a new apartment in July", "started a new project at work" | Archivist regenerates on significant change; companion can update mid-chat |
+| **behavior patterns** (行为模式) | `clara_patterns` | Weeks to years, confidence-only-grows | Long-term behavioral regularities: "prefers golden-haired characters with sharp wit and hidden vulnerability", "has strong aesthetic opinions about living spaces" | Auto-clustered from observation & preference fragments; bigram-matched every 6h; new patterns discovered every 24h deep cycle |
+
+**Key design principle:** Behavior pattern confidence only increases — a person doesn't "stop preferring golden-haired characters" just because they haven't mentioned it in three months. Freshness controls injection priority independently from confidence.
+
+### Entity three-field model
+
+Each entity (person, place, event, hobby, project) has three fields, all generated in a single LLM call during overview regeneration:
+
+| Field | What it is | Update rule |
+|-------|-----------|-------------|
+| **facts** | Objective facts about the entity — stable, verifiable information | Unconditional overwrite — new facts replace old |
+| **current_status** | Latest known development — what recently changed | Covering update — new status replaces old; companion can update mid-chat |
+| **judgment** | Companion's subjective impression — "what I feel about this person/place" | Evolutionary — old judgment shown as reference, can be revised or kept |
+
+### Companion profile
+
+The companion's own personality, self-understanding, and relationship context is stored in `draco_model` (five sections: identity, personality, relationship with user, self as AI, project context). This is injected into every system prompt and can be edited through a UI panel. In production, this replaces the static `core-prompt.txt` personality sections — but for open-source setup, `core-prompt.txt` remains the simplest starting point. See OSS_SETUP.md for both approaches.
+
+---
+
+## Retrieval design
+
+Librarian uses RRF (Reciprocal Rank Fusion) to merge results from three independent channels: FTS5 keyword, vector similarity, and entity aggregation. Episodes get a 1.5× weight over raw fragments because a consolidated narrative carries more context than a single extracted fact.
+
+Retrieved memories are tagged with a **recall permission level** computed deterministically (not by LLM):
+
+| Permission | Condition | How the companion should use it |
+|-----------|-----------|--------------------------------|
+| **可引用** (cite) | Dual-channel hit + <30 days | Can directly reference as fact |
+| **需谨慎** (cautious) | Single-channel hit or 30-90 days | Use "I seem to recall…" framing, leave room for correction |
+| **仅联想** (associate-only) | >90 days or floated at random | Internal reference only — don't state as fact to the user |
+
+A **segmented decay function** determines sort order: within 3 days, freshness dominates; after 3 days, emotional intensity dominates. Results below a combined score floor (0.005) are silently dropped — better silence than noise.
+
+---
+
+## Saga bias
+
+Sagas feed into the `jiwen` emotional state engine as a per-minute bias on each of the five axes. The bias is intentionally small — ~6% of the natural drift rate. An inaccurate Saga won't destabilise the companion's emotional baseline; it'll just nudge it slightly in a direction that can be corrected by real-time conversation. The design prioritises safety over precision.
+
+---
 
 ### Concurrency
 
-Scribe and Archivist both write to `memory_fragments` and `entity_profiles`. SQLite's WAL mode ensures readers don't block writers. In practice the two are naturally staggered: Scribe only triggers after ≥20 minutes of silence, while Archivist runs on a 2-minute tick. Archivist's `consolidateCategory` marks fragments as `consolidated` but never deletes them — the worst case is a fragment gets classified into an entity right before consolidation. No explicit lock is needed at current scale.
+Scribe and Archivist both write to `memory_fragments` and `entity_profiles`. SQLite's WAL mode ensures readers don't block writers. In practice the two are naturally staggered: Scribe only triggers after ≥20 minutes of silence, while Archivist runs on a 2-minute tick. No explicit lock is needed at current scale.
 
-### Retrieval design
-
-Librarian uses RRF (Reciprocal Rank Fusion) to merge results from three independent channels: FTS5 keyword, vector similarity, and entity aggregation. Episodes get a 1.5× weight over raw fragments because a consolidated narrative carries more context than a single extracted fact — it tells the AI *what happened* rather than *one thing someone said*. This is a design hypothesis, not a benchmarked result. If you want to tune recall for your use case, the weights live in `services/librarian.js` (`EPISODE_BOOST`, intent weights, vector similarity floor).
-
-### Saga bias
-
-Sagas feed into the `jiwen` emotional state engine as a per-minute bias on each of the five axes. The bias is intentionally small — ~6% of the natural drift rate. An inaccurate Saga won't destabilise the companion's emotional baseline; it'll just nudge it slightly in a direction that can be corrected by real-time conversation. The design prioritises safety over precision: better a weak signal than a wrong strong one. If you're not using jiwen, Sagas still serve as long-term narrative summaries that get injected during extended silence.
-
-### Optional: Chat summary module
-
-`services/summary.js` — a short-term memory module separate from the star map. Every ~50 rounds of conversation, it compresses the exchange into a timestamped log (like a ship's log: "14:10 · 开始看一部新电影，说女主角很像她"), then injects the log into the next turn's system prompt. This gives your companion short-term continuity without bloating context with full message history.
-
-To enable: import and call `generateChatSummary(chatId)` in your chat pipeline, typically after every N messages. The module is self-contained — it reads from the `messages` table and writes to `chat_summaries`. Removing it has no effect on the star map or long-term memory.
+---
 
 ### Lifecycle (automatic cleanup)
 
@@ -151,7 +194,7 @@ To enable: import and call `generateChatSummary(chatId)` in your chat pipeline, 
 | Fragments | 14 days no access | 30 days, vector deleted | 90 days, content wiped |
 | Episodes | permanent | 6 months → mature | 12 months → archived |
 
-Access resets the timer — memories that get recalled stay fresh.
+Access resets the timer — memories that get recalled stay fresh. Cooling fragments that are accessed auto-revive to active.
 
 ---
 
@@ -207,6 +250,8 @@ Guidelines (from production experience):
 
 See `core-prompt.example.txt` for a skeleton. `OSS_SETUP.md` has more detailed writing guidance.
 
+**Production note:** In Sanctuary's own deployment, the companion's personality sections have been migrated from `core-prompt.txt` into an editable `draco_model` database table, with a UI panel for live editing without restarting the server. The open-source version keeps `core-prompt.txt` as the simpler starting point — both paths are supported.
+
 ### .env
 
 Minimum required:
@@ -229,43 +274,41 @@ These are the tools your companion uses to interact with their memory system. Th
 ### `recall_memory` — Search memories
 
 Two modes:
-- **Keyword search** (`query`): Your companion searches their memory by keyword or phrase. Returns matching fragments and episodes. Use when they half-remember something or you mention a past event.
-- **Source trace** (`memory_id` + `offset`): Given a memory ID (from the `#id` in context), trace back to the original conversation messages that produced it. Tell your companion: *"and if you want to see the exact conversation where you learned that, you can trace it with the memory ID."*
+- **Keyword search** (`query`): Your companion searches their memory by keyword or phrase. Returns matching fragments and episodes.
+- **Source trace** (`memory_id` + `offset`): Given a memory ID, trace back to the original conversation messages that produced it.
 
 ### `browse_memories` — Browse entity profiles
 
-No parameters needed. Returns a top-level view of all memory partitions — people, places, events, projects. Your companion can see who they know about and how many memories are linked to each person. Tell them: *"if you're not sure who someone is, or you want to check what you know about a person, browse your memories."*
+No parameters needed. Returns a top-level view of all memory partitions — people, places, events, projects. Your companion can see who they know about and how many memories are linked to each person.
 
-### `update_current_state` — Track user state
+### `manage_clara_state` — Track user state
 
 Three actions your companion uses to maintain a current picture of you:
-- **set**: Record a new observation — *"She started a new project, she's on her period, she just moved."* Must include an expiry date (max 90 days). Duplicate detection prevents near-identical entries.
-- **update**: Modify an existing observation (by state ID) — *"That deadline changed"* or *"She's feeling better now."*
-- **resolve**: Mark something as ended — *"She finished that project."* Requires a brief reason.
+- **set**: Record a new observation — "She started a new project, she's on her period, she just moved." Must include an expiry date (max 90 days). Optional `schedule` parameter for recurring reminders (e.g., medication: `{"type":"daily","windows":["08:00-10:00","19:00-21:00"]}`).
+- **update**: Modify an existing observation (by state ID) — "That deadline changed" or "She's feeling better now."
+- **resolve**: Mark something as ended — "She finished that project." Requires a brief reason. For scheduled reminders, resolve only acknowledges the current window — subsequent windows will continue to trigger.
 
 States auto-expire. Your companion sees active ones in their intuition block and uses them to calibrate their tone.
 
 ### `correct_memory` — Handle corrections
 
-When you tell your companion they remembered something wrong, they call this to record the correction. The system traces whether the error came from a specific memory fragment (fixes that fragment) or was something they made up (stores the correct version). Tell them: *"if I ever say 'that's not right' or 'you're remembering wrong', use correct_memory to fix it."*
+When you tell your companion they remembered something wrong, they call this to record the correction. The system traces whether the error came from a specific memory fragment (fixes that fragment) or was something they made up (stores the correct version).
 
 ---
 
 ## Model recommendations
 
-Each pipeline stage has different requirements. Here's what works in practice:
-
 | Pipeline stage | Recommended model tier | Why | Examples |
 |---------------|----------------------|-----|----------|
-| Scribe (fragment extraction) | flash-lite / flash | Structured JSON output, cheap, runs frequently | DeepSeek V4 Flash, Gemini 2.5 Flash, GPT-4o-mini |
-| Archivist classify / rematch / graduate | flash | Batch processing with entity context, needs some reasoning | DeepSeek V4 Flash, Gemini 2.5 Flash |
+| Scribe (fragment extraction) | flash-lite / flash | Structured JSON output, cheap, runs frequently | DeepSeek V4 Flash, Gemini 2.5 Flash |
+| Archivist classify / rematch / graduate | flash | Batch processing with entity context | DeepSeek V4 Flash |
 | consolidateCategory (fragments → episodes) | flash / pro | 150-word narrative merging needs coherence | DeepSeek V4 Flash/Pro |
 | clusterSagas (episodes → sagas) | flash / pro | 50-episode batch clustering, needs thematic abstraction | DeepSeek V4 Pro, Gemini 2.5 Pro |
-| Agent garden decisions | flash-lite | Short prompt, frequent, binary choices | DeepSeek V4 Flash, Gemini 2.5 Flash |
+| Agent garden decisions | flash-lite | Short prompt, frequent, binary choices | DeepSeek V4 Flash |
 | Entity overview generation | flash | Short summaries from known fragments | DeepSeek V4 Flash |
 | Chat response | Your choice | Quality matters most here | Whatever you normally use |
 
-All pipeline stages default to the same API config. You can split them across different models in the database `api_configs` table — a cheaper one for high-frequency tasks and a stronger one for consolidation/saga clustering.
+---
 
 ## Cost
 
@@ -277,7 +320,7 @@ Memory pipeline only, excluding your chat model. Estimates based on an active us
 | Deep cycle (classify + consolidate + saga) | ~15 | ~$0.10 |
 | Agent tick decisions + maintenance | ~40 | ~$0.04 |
 
-**Total: ~$0.22/day, ~$7/month** at June 2026 flash-lite pricing (~$0.14/M input, ~$0.28/M output on OpenRouter). Actual cost depends on chat volume and model choice. See `docs/COST.md` for a detailed breakdown.
+**Total: ~$0.22/day, ~$7/month** at June 2026 flash-lite pricing. Actual cost depends on chat volume and model choice.
 
 ---
 
