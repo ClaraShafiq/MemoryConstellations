@@ -509,7 +509,7 @@ async function scanForPatterns() {
         const sourcePattern = `${ent.name} 频繁出现在{user}的生活中（${ent.frag_count} 条碎片），但关系仍不确定（当前：${ent.relationship_to_clara || '未知'}，confidence: ${ent.relationship_confidence || 'low'}）`;
 
         await createSkill({
-            domain: 'clara',
+            domain: 'user',
             sourcePattern,
             entityIds: [ent.id],
             triggerConfig: {
@@ -545,7 +545,7 @@ async function scanForPatterns() {
         const sourcePattern = `${cluster.source_date} 当天出现了 ${cluster.cnt} 条高情绪碎片（avg ew=${cluster.avg_ew.toFixed(2)}），可能存在情绪触发事件`;
 
         await createSkill({
-            domain: 'clara',
+            domain: 'user',
             sourcePattern,
             entityIds: [],
             triggerConfig: {

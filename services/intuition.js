@@ -1,7 +1,7 @@
-// Clara Intuition — 上下文触发的认知直觉引擎
+// {{user.name}} Intuition — 上下文触发的认知直觉引擎
 // ================================================================
-// 替代 cognitiveModel.getModelContext() 的「全量 dump」模式。
-// 只在 Clara 的当前对话触发了某个行为模式时，才注入对应的直觉条目。
+// 替代 claraModel.getModelContext() 的「全量 dump」模式。
+// 只在 {{user.name}} 的当前对话触发了某个行为模式时，才注入对应的直觉条目。
 // 自包含模块，可插拔替换——开源后每个 user 可挂自己的直觉数据源。
 //
 // 分层触发规则：
@@ -80,7 +80,7 @@ function bigramOverlap(entryContent, contextText) {
 
 const BIGRAM_THRESHOLD = 5;
 
-// ── 高频词停用表：Clara 日常说烂了的词不能当触发器 ──
+// ── 高频词停用表：{{user.name}} 日常说烂了的词不能当触发器 ──
 // 「代码」「界面」「开源」这类词天天出现，挂上它们的条目等于永远激活，
 // 直觉注入退化成全量 dump。由 Archivist 深循环统计近30天高频词维护
 // （user_settings.intuition_stopwords），此处加载缓存 10 分钟。
@@ -154,7 +154,7 @@ function buildContextText(userMessage, recentMsgCount = 10) {
 // ═══════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════
 // v5.2: 会话级实体缓存 — 30分钟滑动窗口
-// Clara 提到某个朋友 → 注入 overview → 缓存。下一条消息继续聊他
+// {{user.name}} 提到某个朋友 → 注入 overview → 缓存。下一条消息继续聊他
 // 但没提名字 → overview 仍在。30分钟内无再次提及 → 过期清除。
 // ═══════════════════════════════════════════════════════════════
 
@@ -213,24 +213,36 @@ function getTriggeredIntuition(userMessage, maxTokens = 800) {
   // v5.0: stable_trait + active_hypothesis 不再注入聊天。
   // 它们的价值体现在 core_insight（始终在 system prompt 中）+
   // deep cycle 的持续认知迭代。这里只保留 current_state。
-  // v5.1: 新增 entity overview 注入——当 Clara 提到某人时，
-  // 星座描述（替代旧冥想盆）自动出现在 Draco 的感知中。
+  // v5.1: 新增 entity overview 注入——当 {{user.name}} 提到某人时，
+  // 星座描述（替代旧冥想盆）自动出现在 {{ai.name}} 的感知中。
 
   const states = db.prepare(`
-    SELECT content, confidence, last_evidence_at, created_at, expires_at, decay_params, source_quality
-    FROM clara_model
+    SELECT id, content, confidence, last_evidence_at, created_at, expires_at, decay_params, source_quality
+    FROM user_model
     WHERE type = 'current_state' AND status = 'active'
+      AND (expires_at IS NULL OR expires_at > datetime('now'))
     ORDER BY last_evidence_at DESC LIMIT 8
   `).all();
 
   const matchedEntities = lookupEntitiesInMessage(userMessage);
+
+  // Track entity hits for matched entities (fire and forget)
+  if (matchedEntities.length > 0) {
+    const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const trackHit = db.prepare(
+      'UPDATE entity_profiles SET hit_count = hit_count + 1, last_accessed_at = ? WHERE id = ?'
+    );
+    for (const e of matchedEntities) {
+      trackHit.run(now, e.id);
+    }
+  }
 
   if (states.length === 0 && matchedEntities.length === 0) {
     return { text: '', signals: [] };
   }
 
   const lines = ['<user_intuition>',
-    '（你此刻感知到的用户的状态——不是推理，是观察。）',
+    '（你此刻感知到的{{user.name}}的状态——不是推理，是观察。）',
     ''];
 
   // ── 当前状态（含 TTL 提示）──
@@ -255,7 +267,7 @@ function getTriggeredIntuition(userMessage, maxTokens = 800) {
         const dp = (() => { try { return JSON.parse(s.decay_params || '{}'); } catch (_) { return {}; } })();
         ttlHint = formatTtlHint(s.created_at, dp);
       }
-      lines.push(`- ${s.content}（${ago}更新${ttlHint}）`);
+      lines.push(`- [#${s.id}] ${s.content}（${ago}更新${ttlHint}）`);
     }
     lines.push('');
   }
@@ -285,15 +297,16 @@ function getTriggeredIntuition(userMessage, maxTokens = 800) {
       const freshness = cached ? '（从缓存保留）'
         : updatedAgo !== null && updatedAgo > 3 ? `（${updatedAgo}天前更新）`
         : '';
-      lines.push(`◇ ${e.name}：${e.overview}${freshness}`);
+      const text = e.facts || '';
+      lines.push(`◇ ${e.name}：${text}${freshness}`);
     }
     lines.push('');
   }
 
   // ── v5.2: 观察到的模式（日积月累的行为观察，话题触发）──
   const patterns = db.prepare(`
-    SELECT content, evidence_count, first_seen, last_seen, confidence, tags, strategy
-    FROM clara_patterns WHERE status = 'active'
+    SELECT content, evidence_count, first_seen, last_seen, confidence, tags
+    FROM user_patterns WHERE status = 'active'
     ORDER BY confidence DESC LIMIT 15
   `).all();
 
@@ -320,9 +333,7 @@ function getTriggeredIntuition(userMessage, maxTokens = 800) {
           ? Math.round((new Date(p.last_seen) - new Date(p.first_seen)) / (1000 * 60 * 60 * 24 * 30))
           : 0;
         const spanLabel = spanMonths > 0 ? `，跨${spanMonths}个月` : '';
-        let patternLine = `◇ ${p.content}（${p.evidence_count}次观察${spanLabel}）`;
-        if (p.strategy) patternLine += `\n   → ${p.strategy}`;
-        lines.push(patternLine);
+        lines.push(`◇ ${p.content}（${p.evidence_count}次观察${spanLabel}）`);
         triggered.push(p);
       }
     }
@@ -338,19 +349,20 @@ function getTriggeredIntuition(userMessage, maxTokens = 800) {
 
   // 超预算：保留 current_state + 缩减 entity overview
   const slim = ['<user_intuition>',
-    '（你此刻感知到的用户的状态——不是推理，是观察。）',
+    '（你此刻感知到的{{user.name}}的状态——不是推理，是观察。）',
     ''];
   if (states.length > 0) {
     slim.push('● 当前状态：');
     for (const s of states) {
-      slim.push(`- ${s.content}`);
+      slim.push(`- [#${s.id}] ${s.content}`);
     }
     slim.push('');
   }
   if (matchedEntities.length > 0) {
     slim.push('● 相关的星座：');
     for (const e of matchedEntities) {
-      slim.push(`◇ ${e.name}：${e.overview.slice(0, 200)}`);
+      const text = e.facts || '';
+      slim.push(`◇ ${e.name}：${text.slice(0, 200)}`);
     }
     slim.push('');
   }
@@ -365,10 +377,10 @@ function getTriggeredIntuition(userMessage, maxTokens = 800) {
 function getFullModel() {
   const db = getDb();
   return {
-    facts: db.prepare("SELECT * FROM clara_model WHERE type='immutable_fact' AND status='active' ORDER BY confidence DESC").all(),
-    traits: db.prepare("SELECT * FROM clara_model WHERE type='stable_trait' AND status='active' ORDER BY confidence DESC").all(),
-    states: db.prepare("SELECT * FROM clara_model WHERE type='current_state' AND status='active' ORDER BY last_evidence_at DESC").all(),
-    hyps: db.prepare("SELECT * FROM clara_model WHERE type='active_hypothesis' AND status='active' ORDER BY confidence DESC").all(),
+    facts: db.prepare("SELECT * FROM user_model WHERE type='immutable_fact' AND status='active' ORDER BY confidence DESC").all(),
+    traits: db.prepare("SELECT * FROM user_model WHERE type='stable_trait' AND status='active' ORDER BY confidence DESC").all(),
+    states: db.prepare("SELECT * FROM user_model WHERE type='current_state' AND status='active' ORDER BY last_evidence_at DESC").all(),
+    hyps: db.prepare("SELECT * FROM user_model WHERE type='active_hypothesis' AND status='active' ORDER BY confidence DESC").all(),
   };
 }
 
