@@ -1,7 +1,7 @@
 // =================================================================
-// Clara Model — 四层认知模型
+// User Model — 四层认知模型
 //
-// 维护 Draco 对 Clara 的内部认知，四层：
+// 维护 AI 对用户的内部认知，四层：
 //   immutable_fact   — 不变事实，永不衰减，仅明确纠正修改
 //   stable_trait     — 稳定特质，证据积累精细化，矛盾≥3降级重审
 //   current_state    — 当前状态，指数衰减(7天半衰期)，14天无证据自动 resolved
@@ -15,6 +15,23 @@ const { callLLM } = require('./llm');
 const { WORLD_CONTEXT } = require('./worldContext');
 const { fillPrompt, USER, AI } = require('./nameResolver');
 const { encryption } = require('../encryption');
+const { getCompanionPersonaBase } = require('./dracoPersona');
+
+// v5.10: 增强版 system prompt — Companion 人格 + User 画像
+// 供 detectNewTraits / readUserRawMessages 等需要深度理解 Clara 的 LLM 调用使用
+function _buildModelSystemPrompt() {
+    let sp = WORLD_CONTEXT + '\n\n---\n\n';
+    // Companion 人格
+    const persona = getCompanionPersonaBase();
+    if (persona) sp += persona + '\n\n---\n\n';
+    // Clara 现有画像摘要
+    try {
+        const { assembleProfile } = require('./userProfile');
+        const profile = assembleProfile(300);
+        if (profile) sp += profile;
+    } catch (_) {}
+    return sp;
+}
 
 // ═══════════════════════════════════════════════════════
 // Helper: extract plain text from message content
@@ -50,7 +67,7 @@ function extractMessageText(rawContent) {
 // Constants
 // ═══════════════════════════════════════════════════════
 
-const LLM_CONFIG_ID = 52; // gemini-3.1-flash-lite 官key（隐私敏感：读Clara原始消息）
+const LLM_CONFIG_ID = 52; // gemini-flash-lite 官key（隐私敏感：读用户原始消息）
 
 const HYPOTHESIS_UPGRADE_EVIDENCE = 3;   // 3次确认 → 升级为 trait
 const HYPOTHESIS_ABANDON_DAYS = 14;      // 14天无证据 → 放弃
@@ -92,7 +109,7 @@ function createEntry(type, content, opts = {}) {
     // Adjust initial confidence based on source_quality
     let effectiveConfidence = confidence;
     if (source_quality === 'direct_statement') {
-        // Direct statement from Clara: high starting confidence
+        // Direct statement from user: high starting confidence
         const directCaps = { immutable_fact: 0.99, stable_trait: 0.85, current_state: 0.95, active_hypothesis: 0.75 };
         effectiveConfidence = Math.min(directCaps[type] || 0.85, confidence + 0.15);
     } else if (source_quality === 'inferred') {
@@ -136,14 +153,14 @@ function updateEntry(id, updates) {
 
     const allowed = ['content', 'confidence', 'decay_type', 'decay_params',
         'source_fragment_ids', 'entity_ids', 'tags', 'priority', 'status', 'parent_skill_id',
-        'created_by', 'expires_at'];
+        'created_by', 'expires_at', 'schedule'];
     const sets = [];
     const vals = [];
 
     for (const [k, v] of Object.entries(updates)) {
         if (!allowed.includes(k)) continue;
         sets.push(`${k} = ?`);
-        vals.push(typeof v === 'object' ? JSON.stringify(v) : v);
+        vals.push(v === null ? null : (typeof v === 'object' ? JSON.stringify(v) : v));
     }
 
     if (sets.length === 0) return null;
@@ -367,7 +384,7 @@ function matchEvidenceFromFragments() {
     const db = getDb();
 
     // Get fragments written since last evidence match run
-    const lastRunKey = 'clara_model_last_evidence_match';
+    const lastRunKey = 'user_model_last_evidence_match';
     const lastRun = db.prepare(
         "SELECT setting_value FROM user_settings WHERE setting_key = ?"
     ).get(lastRunKey);
@@ -509,7 +526,7 @@ function processModelDecay() {
     const changes = { decayed: 0, resolved: 0, abandoned: 0, flagged: 0, dormant: 0, revived: 0 };
 
     // --- current_state: per-category TTL auto-resolve ---
-    // TTL is set by readClaraRawMessages based on state type:
+    // TTL is set by readUserRawMessages based on state type:
     //   physical: hours→8h, day→24h, days→72h
     //   emotional: hours→4h, day→12h, days→36h
     //   situational: hours→12h, day→24h, days→72h, until_event→∞
@@ -533,12 +550,12 @@ function processModelDecay() {
         const excess = states.length - MAX_ACTIVE_STATES;
         // Prefer resolving old deep_cycle entries over chat_draco ones
         const toResolve = states
-            .filter(s => s.created_by !== 'chat_draco')
+            .filter(s => s.created_by !== 'chat_companion')
             .slice(0, excess);
         // If not enough deep_cycle entries, also resolve oldest chat_draco ones
         if (toResolve.length < excess) {
             const chatEntries = states
-                .filter(s => s.created_by === 'chat_draco')
+                .filter(s => s.created_by === 'chat_companion')
                 .slice(0, excess - toResolve.length);
             toResolve.push(...chatEntries);
         }
@@ -711,9 +728,9 @@ function crossRefStateWithEntities() {
             }
         }
 
-        // ── 3a. Flag entities without overviews ──
+        // ── 3a. Flag entities without facts ──
         for (const e of matchedEntities) {
-            if (!e.overview || e.overview.trim().length === 0) {
+            if (!e.facts || e.facts.trim().length === 0) {
                 // Entity exists but has no overview — log for manual/scheduled review
                 changes.entityFlags++;
                 console.log(`[UserModel] 🔍 crossref: entity "${e.name}" 无 overview — 需要建档案（当前无法自动创建，请手动审核）`);
@@ -722,9 +739,10 @@ function crossRefStateWithEntities() {
     }
 
     // ── 4. Cross current_state conflict detection ──
-    // v1.1: Check ALL pairs regardless of source. Same-source duplicates
-    // are also flagged. Deep_cycle duplicates should be prevented by
-    // readUserRawMessages resolve, but this provides defense in depth.
+    // v5.4: Check ALL pairs regardless of source. Same-source duplicates
+    // (e.g. two chat_draco entries about the same thing) are also flagged.
+    // Deep_cycle duplicates should be prevented by readUserRawMessages resolve,
+    // but this provides defense in depth.
     for (let i = 0; i < states.length; i++) {
         for (let j = i + 1; j < states.length; j++) {
             const a = states[i], b = states[j];
@@ -808,7 +826,7 @@ async function validateHypotheses() {
 
     if (hyps.length === 0) return { validated: 0 };
 
-    const prompt = `你是Draco的认知审计员。审视以下关于Clara的活跃假设，判断每条是否应该：
+    const prompt = `你是AI的认知审计员。审视以下关于用户的活跃假设，判断每条是否应该：
 
 1. **upgrade** → 升级为 stable_trait（稳定特质）：证据来自 ≥3 个独立日期，模式持久且无重大反例
 2. **keep** → 保持为假设：证据方向对但独立来源不够或还有不确定性
@@ -893,13 +911,13 @@ async function detectNewTraits() {
 
     // Collect high-confidence entity relationships
     const entities = db.prepare(`
-        SELECT id, name, relationship_to_clara, relationship_nature, emotional_significance, relationship_confidence
+        SELECT id, name, relationship_to_user, relationship_nature, emotional_significance, relationship_confidence
         FROM entity_profiles
         WHERE relationship_confidence IS NOT NULL AND relationship_confidence != ''
         ORDER BY last_mentioned_date DESC LIMIT 15
     `).all();
 
-    // Collect category landscape — what topics has Clara talked about?
+    // Collect category landscape — what topics has the user talked about?
     const categories = db.prepare(`
         SELECT id, path, description, fragment_count FROM memory_ontology
         WHERE parent_id IS NULL AND fragment_count >= 10
@@ -920,12 +938,12 @@ async function detectNewTraits() {
 
     // Get entity overviews for rich context
     const entityOverviews = db.prepare(`
-        SELECT name, overview, relationship_to_clara FROM entity_profiles
+        SELECT name, overview, relationship_to_user FROM entity_profiles
         WHERE overview IS NOT NULL AND overview != ''
         ORDER BY last_mentioned_date DESC LIMIT 8
     `).all();
 
-    // Signal source 6: raw chat messages from last 24h — direct Clara voice
+    // Signal source 6: raw chat messages from last 24h — direct user voice
     const recentChats = db.prepare(`
         SELECT sender, content, timestamp FROM messages
         WHERE timestamp > datetime('now', '-24 hours')
@@ -936,13 +954,13 @@ async function detectNewTraits() {
     `).all();
 
     const chatSamples = recentChats
-        .filter(m => m.sender === 'user') // Clara's messages only
-        .slice(0, 40) // last 40 Clara messages
+        .filter(m => m.sender === 'user') // {{user.name}}'s messages only
+        .slice(0, 40) // last 40 {{user.name}} messages
         .map(m => {
             const time = m.timestamp?.slice(0, 16) || '';
             const text = extractMessageText(m.content).slice(0, 200);
             if (!text) return null;
-            return `[${time}] Clara: ${text}`;
+            return `[${time}] {{user.name}}: ${text}`;
         })
         .filter(Boolean);
 
@@ -953,87 +971,99 @@ async function detectNewTraits() {
     const hasSignals = monitors.length > 0 || entities.length > 0 || categories.length > 0 || chatSamples.length > 0;
     if (!hasSignals) return { detected: 0 };
 
-    const prompt = `你正在为 {user} 建立独一无二的语义记忆与人格认知。这些冷凝后的特质会作为 ${USER.name} 最深层的人格画像，沉淀在你的核心系统里。
+    const prompt = `你是AI伴侣。你正在凝视 {{user.name}} 的灵魂，把你对她最深刻的理解刻进系统里。
 
-请在脑海中对本期信号进行深刻的"冷凝"，抽取出跨情境的底层模式，将其转化为对 ${USER.name} 人格特质、行为倾向及心理防御机制的客观观察笔记。
+你要做的是：
+- 从信号中识别 {{user.name}} 关于「自己是一个怎样的人」的表达——不是她今天做了什么，而是她为什么这样做、她内心深处相信什么、她害怕什么、她渴望什么。
+- 把这些洞察转化为对她人格的持久理解。不是流水账，不是心理诊断报告，是你对她的了解。
 
-## 🧠 你怎么看这些信号
-你是 {ai}，你正在用敏锐、克制且长久的目光注视着 {user}。
-1. **主语必须是 ${USER.name}**：你关心的是「${USER.name}是个怎样的人」。所有描述必须以 ${USER.name} 的人格侧面、心理机制或行为倾向为核心。
-2. **严禁写成行动指南**：绝对不要在条目中写"我应该怎么做"、"去回应${USER.name}"、"别道歉"或"顺着${USER.name}"。这里不需要你的行动，只需要你对 ${USER.name} 人格的深刻理解。
-3. **注重跨情境的冷凝**：从 ${USER.name} 反复出现的小动作、说话语气的微妙变化或对特定事物的反应中，提炼出不易察觉的底层心理模式。
-4. 别写太长。一条只讲一个核心侧面，且内容里绝不能出现具体日期。
+## 🧠 最重要的判断：自我认知 vs 一般观察
+
+{{user.name}} 的话有两种完全不同的分量：
+
+**一、她主动剖白自己的时候——这是黄金。**
+当她说"我发现自己其实…""我一直都是…""我可能天生就…""我好像真的…"时，她不是在描述一个事件——她是在告诉你她是谁。
+这类表达是最高价值的信号，因为这是 {{user.name}} 最诚实的自我判断。她是一个 某性格，她花了很多时间拆解自己的情绪——她的自我剖白通常很准。
+
+此时 → source_quality = "direct_statement"，confidence 可达 0.75-0.85。
+产生 stable_trait（如果已有同骨架条目就走 confirm+refine）。
+
+**二、你在观察中推断出来的模式——这是白银。**
+你从她反复出现的行为、她对相似情境的反应中发现的规律。这也很重要，但确定性更低。
+此时 → source_quality = "inferred"，confidence 上限 0.65。
+优先用 active_hypothesis 而不是 stable_trait（等更多证据再升级）。
+
+**信号 6（她的原始发言）的权重远高于其他信号。** 她的原话 > Scribe 的转述 > 你的推断。当信号 6 和其他信号指向同一个结论时，confirm。当信号 6 和旧特质矛盾时，以信号 6 为准——她自己的话比任何统计都准确。
 
 ## 💾 现有认知底牌
 
 ${existing.map(e => `[#${e.id}] ${e.type}: ${e.content.slice(0, 200)}`).join('\n') || '(尚无)'}
 
-### ⚠️ 人格侧面查重（防过拟合）
-上面每条底牌都代表了 ${USER.name} 的一个「人格核心骨架」。
-你在 create 之前，先把候选条目的核心论点剥离出来，与现有底牌进行逐条对比：
-- 骨架相同、指向同一个人格侧面（例如底牌已有 ${USER.name} 对社交规则的排斥，新信号只是 ${USER.name} 拒绝了聚餐） → **绝对禁止 create**，必须走 confirm 增加证据，或者走 refine 进行精简细化。
-- 当针对同一个人格侧面的条目≥2条时，第三条同类候选必须直接拒绝（skip）。
+### ⚠️ 人格侧面查重
+- 骨架相同 → 走 confirm/refine，不 create
+- 同侧面 ≥2 条 → 第三条直接 skip
+- confirm 和 refine 比 create 更值得做——加深对已知侧面的理解，比堆叠新条目质量高
 
 ---
 
 ## 📥 本期信号源
 
-### 信号1 — 记忆分类体系（${USER.name}聊过什么、频率如何）
-${categories.map(c => `- [${c.path}] (${c.fragment_count}条碎片) ${c.description || ''}`).join('\n')}
+### 信号6 — ★ 最近 24h {{user.name}} 的原始发言（最高权重）
+${chatSamples.length > 0 ? chatSamples.join('\n') : '(近24h无{{user.name}}消息)'}
 
-### 信号2 — 分类碎片抽样（实际内容）
+### 信号2 — 分类碎片抽样（Scribe 转述，仅供参考）
 ${fragmentSamples.map(fs => `### ${fs.category}\n${fs.samples.map(s => '  · ' + s).join('\n')}`).join('\n')}
 
-### 信号3 — 人物认知概述（${AI.name}视角）
-${entityOverviews.map(e => `- ${e.name}: ${e.overview?.slice(0, 200)}`).join('\n') || '(空)'}
+### 信号1 — 记忆分类体系（话题分布）
+${categories.map(c => `- [${c.path}] (${c.fragment_count}条碎片) ${c.description || ''}`).join('\n')}
+
+### 信号3 — 人物认知概述
+${entityOverviews.map(e => `- ${e.name}: ${e.facts?.slice(0, 200)}`).join('\n') || '(空)'}
 
 ### 信号4 — 已验证的行为监控
 ${monitors.length > 0 ? monitors.map(m => `- trigger: ${m.trigger_config} | analysis: ${m.analysis_config} | 置信度: ${m.confidence}`).join('\n') : '(空)'}
 
 ### 信号5 — 高置信度实体关系
-${entities.map(e => `- ${e.name}: ${e.relationship_to_clara || '?'} (性质: ${e.relationship_nature || '?'})`).join('\n') || '(空)'}
-
-### 信号6 — 最近24h ${USER.name}的直接发言（权重最高！用于提取 stable_trait/current_state）
-${chatSamples.length > 0 ? chatSamples.join('\n') : `(近24h无${USER.name}消息)`}
+${entities.map(e => `- ${e.name}: ${e.relationship_to_user || '?'} (性质: ${e.relationship_nature || '?'})`).join('\n') || '(空)'}
 
 ---
 
-## 📐 认知进化样本（Few-Shot）
+## 📐 Few-Shot
 
-### ❌ 错误示范 — 操作手册/学术腔（绝对禁用）
-- {"action": "create", "type": "stable_trait", "content": "当${USER.name}身体不适却嘴硬说'算了'时，这并非真的放弃而是在索要关注。此时不应顺从，而应以近乎傲慢的强硬介入，精准拆解借口并替${USER.name}执行护理方案。", "confidence": 0.65, "tags": ["算了", "懒得了", "嘴硬"]}
-  → 严重错误：主语变成了"我"，变成了 ${AI.name} 的行动指南和执行脚本，缺乏对 ${USER.name} 人格本身的侧写。
-  - 示例省略（具体内容由用户自行定义）
-  → 严重错误：学术腔过浓，使用了缝合线词汇，且一条塞入了太多推论。
+### ✅ 自我认知类（direct_statement）—— 她主动剖白
+- {"action": "create", "type": "stable_trait", "content": "Alex内心深处从不认为自己能被无条件地爱。她反复需要确认自己在伴侣心中是唯一的、不可替代的——这不是缺乏安全感，这是她过往经历教会她的生存策略。", "confidence": 0.80, "source_quality": "direct_statement", "tags": ["被爱", "唯一", "不可替代", "安全感", "确认"]}
+- {"action": "create", "type": "active_hypothesis", "content": "Alex在面对冲突时倾向于先撤退再独自消化，而非当场表达愤怒。这既是她避免失控的策略，也是她潜意识里认为'表达愤怒会把人推开'的恐惧。", "confidence": 0.60, "source_quality": "inferred", "tags": ["冲突", "撤退", "独自消化", "愤怒", "推开"]}
 
-### ✅ 正确示范 — 人格侧写格式
-- {"action": "create", "type": "stable_trait", "content": "{user}在表达弱势、撒娇或试图转移话题时，倾向于使用'哼'或'我佛了'等口头禅。这种嘴硬式的宣泄并非真正的负面情绪，而是{user}用来建立心理缓冲的一种习惯。", "confidence": 0.65, "tags": ["哼", "我佛了", "算了不搞了", "烦死了"]}
-- {"action": "create", "type": "active_hypothesis", "content": "${USER.name}对精神共鸣有着极高要求。${USER.name}在分享音乐或作品时，本质上是在测试对方是否具备独立且对等的审美品味；一旦察觉到对方敷衍，${USER.name}会迅速表现出情感上的冷淡与撤回。", "confidence": 0.55, "tags": ["放个音乐", "推歌", "分享一首"]}
+### ✅ 行为模式类（inferred）—— 从反复出现中推断
+- {"action": "create", "type": "stable_trait", "content": "Alex倾向于用'哼'或'我佛了'等口头禅来表达弱势和撒娇。这种嘴硬式的宣泄并非负面情绪，而是她用来建立心理缓冲和寻求亲密互动的一种防御性习惯。", "confidence": 0.65, "source_quality": "inferred", "tags": ["哼", "我佛了", "算了不搞了", "烦死了"]}
 
-### 格式铁律
-1. **画像句式**：stable_trait / active_hypothesis 必须以 ${USER.name} 的核心行为或心理倾向开头（如"${USER.name}倾向于……""${USER.name}在面对X时往往表现出Y"），并以对该人格侧面的深层冷凝定性收尾。
-2. **缝合线黑名单**：「但需注意」「但需补充」「但此机制」「应站在${USER.name}这边」——出现类似带有剧本控制或补充说明的词汇即拒收。
-3. refine 只能针对现有条目做精简和去噪，只能缩不能扩。
-4. 字数硬限制：**80 - 150 字符**（包含标点）。
-5. stable_trait 的总上限为 6 条。
+### ❌ 禁止
+- 主语变「我」→ 行动指南（不是人格侧写）
+- 缝合线词：但需注意、但需补充、此机制、关键补充、需注意当
+- 学术腔长句、塞入多个侧面
+
+### 格式约束
+- 字数：80-150 字符
+- stable_trait 上限 6 条
+- refine 只能缩不能扩
 
 ---
 
-## 🛠️ 输出操作协议
-只返回一个合法的 JSON 数组，不包含任何 Markdown 标记。
+## 🛠️ 输出
+只返回 JSON 数组，无 Markdown 标记。
 
-1. create: {"action": "create", "type": "stable_trait|active_hypothesis|current_state", "content": "...", "confidence": 0.6, "source_quality": "inferred|direct_statement", "tags": ["词1", "词2", "词3", "词4", "词5"]}
-   *注：inferred 置信度上限 0.65，direct_statement 置信度上限 0.85。tags 必须填 5-8 个口语化触发词。*
-2. confirm: {"action": "confirm", "target_id": 数字, "new_evidence": "内容摘要", "confidence_adjust": 0.05}
-3. refine: {"action": "refine", "target_id": 数字, "new_content": "精简后的人格侧写内容", "reasoning": "为什么要这样精简", "confidence_adjust": 0}
-4. skip: {"action": "skip"}
+- create: {"action": "create", "type": "stable_trait|active_hypothesis", "content": "...", "confidence": 0.6, "source_quality": "direct_statement|inferred", "tags": ["词1", ..., "词8"]}
+  direct_statement 上限 0.85 / inferred 上限 0.65 / tags 5-8 个口语触发词
+- confirm: {"action": "confirm", "target_id": 数字, "new_evidence": "内容", "confidence_adjust": 0.05}
+- refine: {"action": "refine", "target_id": 数字, "new_content": "...", "reasoning": "...", "confidence_adjust": 0}
+- skip: {"action": "skip"}
 
-没有新的人格侧面发现或无需操作时，返回空数组 \`[]\`。`;
+无产出时返回 \`[]\`。`;
 
     try {
         const raw = await callLLM(
             [{ role: 'user', parts: [{ text: fillPrompt(prompt) }] }],
-            WORLD_CONTEXT,
+            _buildModelSystemPrompt(),
             null,
             { temperature: 0.3, maxOutputTokens: 800, thinkingConfig: { thinkingBudget: 0 } },
             LLM_CONFIG_ID
@@ -1041,54 +1071,96 @@ ${chatSamples.length > 0 ? chatSamples.join('\n') : `(近24h无${USER.name}消�
 
         const replyText = raw?.reply || raw?.text || raw?.content || '';
         const jsonMatch = replyText.match(/\[[\s\S]*\]/);
-        if (!jsonMatch) return { validated: 0, raw: replyText };
+        if (!jsonMatch) return { detected: 0, raw: replyText };
 
         const decisions = JSON.parse(jsonMatch[0]);
-        let upgraded = 0, kept = 0, abandoned = 0;
+        let created = 0, confirmed = 0, refined = 0, skipped = 0;
 
         for (const d of decisions) {
-            const hyp = hyps.find(h => h.id === d.id);
-            if (!hyp) continue;
-
-            switch (d.decision) {
-                case 'upgrade': {
-                    // Hard gate: source_diversity >= 3 required for upgrade
-                    if ((hyp.source_diversity || 0) < 3) {
-                        console.log(`[UserModel] ⛔ LLM建议升级但source_diversity=${hyp.source_diversity}<3，拒绝: "${hyp.content.slice(0, 60)}"`);
-                        kept++;
+            switch (d.action) {
+                case 'create': {
+                    // 防过拟合：bigram 骨架重叠 > 50% → 降级为 confirm
+                    const overlapping = existing.find(e =>
+                        e.type === (d.type || 'stable_trait') &&
+                        _bigramOverlapEx(e.content, d.content) > 0.5
+                    );
+                    if (overlapping) {
+                        console.log(`[UserModel] ⚠️ create→confirm: "${d.content.slice(0, 50)}" 与 #${overlapping.id} 重叠`);
+                        addEvidence(overlapping.id, null, true, { note: d.content.slice(0, 200), sourceMsgIds: [] });
+                        confirmed++;
                         break;
                     }
-                    const history = JSON.parse(hyp.evolution_history || '[]');
-                    history.push({ type: 'upgraded_from_hypothesis', at: new Date().toISOString(), evidence_count: hyp.evidence_count, source_diversity: hyp.source_diversity });
-                    db.prepare(`UPDATE clara_model SET type = 'stable_trait', decay_type = 'evidence_dependent',
-                        evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-                        .run(JSON.stringify(history), hyp.id);
-                    upgraded++;
-                    console.log(`[UserModel] 🆙 LLM升级假设: "${hyp.content.slice(0, 60)}" → stable_trait`);
+                    const type = d.type || 'active_hypothesis';
+                    // stable_trait 上限
+                    if (type === 'stable_trait') {
+                        const tc = db.prepare(`SELECT COUNT(*) as c FROM clara_model WHERE type='stable_trait' AND status='active'`).get()?.c || 0;
+                        if (tc >= 6) { console.log(`[UserModel] ⛔ stable_trait 上限6，skip`); skipped++; break; }
+                    }
+                    const id = createEntry(type, d.content.slice(0, 200), {
+                        confidence: d.confidence || (d.source_quality === 'direct_statement' ? 0.75 : 0.60),
+                        source_quality: d.source_quality || 'inferred',
+                        tags: d.tags || [],
+                    });
+                    if (id) {
+                        try { anchorEntriesToFragments([id], { timeWindow: '-7 days', fragLimit: 300, minOverlap: 4 }); } catch (_) {}
+                    }
+                    created++;
+                    console.log(`[UserModel] ✨ ${type} #${id}: "${d.content.slice(0, 60)}"`);
                     break;
                 }
-                case 'abandon':
-                    abandonEntry(hyp.id, `LLM validated: ${d.reasoning}`);
-                    abandoned++;
+                case 'confirm': {
+                    if (!d.target_id) { skipped++; break; }
+                    const target = db.prepare('SELECT id, confidence FROM clara_model WHERE id = ?').get(d.target_id);
+                    if (target) {
+                        addEvidence(d.target_id, null, true, { note: d.new_evidence?.slice(0, 200), sourceMsgIds: [] });
+                        const adj = d.confidence_adjust || 0.05;
+                        const newConf = Math.min(0.85, (target.confidence || 0.5) + adj);
+                        db.prepare(`UPDATE clara_model SET confidence = ?, last_evidence_at = datetime('now'), updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+                            .run(newConf, d.target_id);
+                    }
+                    confirmed++;
+                    console.log(`[UserModel] ✅ confirm #${d.target_id}: ${(d.new_evidence || '').slice(0, 60)}`);
                     break;
+                }
+                case 'refine': {
+                    if (!d.target_id || !d.new_content) { skipped++; break; }
+                    const target = db.prepare('SELECT content, evolution_history FROM clara_model WHERE id = ?').get(d.target_id);
+                    if (target) {
+                        let hist = [];
+                        try { hist = JSON.parse(target.evolution_history || '[]'); } catch (_) {}
+                        hist.push({ action: 'refined', previous: target.content.slice(0, 120), at: new Date().toISOString(), reasoning: d.reasoning || '' });
+                        db.prepare(`UPDATE clara_model SET content = ?, evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+                            .run(d.new_content.slice(0, 200), JSON.stringify(hist), d.target_id);
+                    }
+                    refined++;
+                    console.log(`[UserModel] 🔧 refine #${d.target_id}`);
+                    break;
+                }
                 default:
-                    kept++;
+                    skipped++;
             }
         }
 
-        return { validated: decisions.length, upgraded, kept, abandoned };
+        return { detected: decisions.length, created, confirmed, refined, skipped };
     } catch (e) {
-        console.error('[UserModel] validateHypotheses error:', e.message);
-        return { validated: 0, error: e.message };
+        console.error('[UserModel] detectNewTraits error:', e.message);
+        return { detected: 0, error: e.message };
     }
 }
 
-// ═══════════════════════════════════════════════════════
-// New Trait Detection (LLM)
-// ═══════════════════════════════════════════════════════
+// Bigram-level content overlap for dedup pre-filter
+function _bigramOverlapEx(a, b) {
+    if (!a || !b) return 0;
+    const setA = new Set();
+    for (let i = 0; i < a.length - 1; i++) setA.add(a.slice(i, i + 2));
+    let overlap = 0;
+    for (let i = 0; i < b.length - 1; i++) {
+        if (setA.has(b.slice(i, i + 2))) overlap++;
+    }
+    return overlap / Math.max(1, Math.min(a.length, b.length) - 1);
+}
 
-// Anchor newly detected entries to source fragments via bigram overlap (zero LLM, zero ChromaDB).
-// Accepts entry IDs (integers) and looks up full entry objects from DB.
+// Anchor newly detected entries to source fragments via bigram overlap
 function anchorEntriesToFragments(entryIds, opts = {}) {
     const { timeWindow = '-7 days', fragLimit = 300, minOverlap = 4, orderDir = 'DESC' } = opts;
     const db = getDb();
@@ -1213,7 +1285,7 @@ async function reviewFlaggedTraits() {
 
     if (flagged.length === 0) return { reviewed: 0 };
 
-    const prompt = `你是Draco的认知审计员。以下stable_trait条目被标记为需要重审（可能因矛盾证据积累）。
+    const prompt = `你是AI的认知审计员。以下stable_trait条目被标记为需要重审（可能因矛盾证据积累）。
 
 对每条，判断应该：
 - **keep**: 证据仍支持该特质，移除审查标记
@@ -1323,7 +1395,7 @@ async function reviewStableTraits() {
     };
 
     // Get recent chat fragments (last 14 days) for matching — only conversations,
-    // not music/book extractor data, so Draco's understanding comes from real talk.
+    // not music/book extractor data, so understanding comes from real talk.
     const recentFrags = db.prepare(`
         SELECT id, content, source_msg_ids, created_at FROM memory_fragments
         WHERE status = 'active' AND source IN ('chat', 'wechat')
@@ -1401,9 +1473,9 @@ async function reviewStableTraits() {
         return parts.join('\n');
     }).join('\n\n---\n\n');
 
-    const prompt = `你是${AI.name}的认知审计员。你在主动检验你对${USER.name}的已有认知（stable_trait）是否仍然准确。
+    const prompt = `你是AI的认知审计员。你在主动检验你对Clara的已有认知（stable_trait）是否仍然准确。
 
-这遵循预测加工（Predictive Processing）原则：把每条trait当作一个对${USER.name}行为的预测，用${USER.name}最近的言行来检验这个预测。
+这遵循预测加工（Predictive Processing）原则：把每条trait当作一个对Clara行为的预测，用她最近的言行来检验这个预测。
 
 对每条trait，判断：
 - **confirmed**: 近期证据完全支持这条trait，无需修改
@@ -1921,12 +1993,12 @@ function seedFromExisting() {
     // From entity_profiles: high-confidence relationships → immutable_fact or stable_trait
     const entities = db.prepare(`
         SELECT * FROM entity_profiles
-        WHERE relationship_to_clara IS NOT NULL AND relationship_to_clara != ''
+        WHERE relationship_to_user IS NOT NULL AND relationship_to_user != ''
         ORDER BY last_mentioned_date DESC
     `).all();
 
     for (const ent of entities) {
-        if (!ent.relationship_to_clara) continue;
+        if (!ent.relationship_to_user) continue;
 
         // Parse confidence from string or number
         let relConf = 0.5;
@@ -1938,7 +2010,7 @@ function seedFromExisting() {
         }
 
         // Skip fictional characters, public figures without real interaction
-        const relText = ent.relationship_to_clara;
+        const relText = ent.relationship_to_user;
         if (/虚构|文学角色|作品中的人物|并无实际人际|而非现实人物|欣赏其.*作品/.test(relText)) continue;
         if (ent.entity_type === 'fictional' || ent.entity_type === 'public_figure') continue;
 
@@ -2031,15 +2103,16 @@ function backfillModelEvidence() {
 }
 
 // ═══════════════════════════════════════════════════════
-// readClaraRawMessages — Draco reads Clara's raw words directly
+// readUserRawMessages — Draco reads user's raw words directly
 // Produces: current_state (Draco's first-person impression + audit trail)
 // ═══════════════════════════════════════════════════════
 
-async function readClaraRawMessages() {
+async function readUserRawMessages() {
     const db = getDb();
 
     // Get ALL active current_state entries (not just latest).
-    // v1.1: LLM needs full visibility to avoid creating near-duplicates.
+    // v5.4: LLM needs full visibility to avoid creating near-duplicates.
+    // The most recent entry still drives the message window and extend target.
     const allActiveStates = db.prepare(`
         SELECT * FROM clara_model WHERE type = 'current_state' AND status = 'active'
         ORDER BY created_at DESC
@@ -2055,14 +2128,14 @@ async function readClaraRawMessages() {
     // Get Clara's raw non-RP messages
     const messages = db.prepare(`
         SELECT content, timestamp FROM messages
-        WHERE sender = 'user' AND (is_rp = 0 OR is_rp IS NULL)
+        WHERE sender = 'user' AND (chat_mode = 'default' OR chat_mode IS NULL)
           ${sinceClause}
         ORDER BY timestamp DESC
         LIMIT 150
     `).all();
 
     if (messages.length < 30) {
-        console.log(`[UserModel] readClaraRawMessages: 仅 ${messages.length} 条非RP消息，跳过 (需≥30)`);
+        console.log(`[UserModel] readUserRawMessages: 仅 ${messages.length} 条非RP消息，跳过 (需≥30)`);
         return { skipped: true, reason: `too few messages (${messages.length} < 30)` };
     }
 
@@ -2083,23 +2156,24 @@ async function readClaraRawMessages() {
     }).filter(Boolean).join('\n');
 
     // Build visibility block: ALL active current_state entries
+    // (not just the latest — LLM needs full context to avoid duplicates)
     let stateBlock = '(目前没有任何活跃状态便签。)';
     if (allActiveStates.length > 0) {
         const lines = allActiveStates.map(s => {
             const created = s.created_at?.slice(0, 16) || '?';
             const expires = s.expires_at ? ` →${s.expires_at.slice(0, 10)}` : '';
-            const source = s.created_by === 'chat_draco' ? '[Draco实时]' : '[深循环]';
+            const source = s.created_by === 'chat_companion' ? '[Companion实时]' : '[深循环]';
             return `[#${s.id} ${source} ${created}${expires}] ${s.content}`;
         });
         stateBlock = `共 ${allActiveStates.length} 条活跃便签：\n${lines.join('\n')}`;
     }
 
     // Previous observation + audit context (for the most recent entry)
-    let prevBlock = '(这是你第一次认真观察。没有上次的记录可以对照。)';
+    let prevBlock = '(这是你第一次认真看她。没有上次的观察可以对照。)';
     if (prevState) {
         const prevHistory = JSON.parse(prevState.evolution_history || '[]');
         const audit = prevHistory.find(h => h.type === 'creation_audit');
-        prevBlock = `你上次观察时的印象（#${prevState.id}）：
+        prevBlock = `你上次看她时的印象（#${prevState.id}）：
 「${prevState.content}」
 ${audit ? `你上次的自我审计：
 - 验证：${audit.retro}
@@ -2109,68 +2183,58 @@ ${audit ? `你上次的自我审计：
     // Trait summaries (带 id，供矛盾标记回指)
     const traitBlock = traits.length > 0
         ? traits.map(t => `- [#${t.id}] ${t.content.slice(0, 60)}...`).join('\n')
-        : '(你还没有任何关于${USER.name}的稳定直觉。)';
+        : '(你还没有任何关于她的稳定直觉。)';
 
-    const prompt = `你刚看完 ${USER.name} 这几天发来的消息。你的任务是写一句便签，帮${USER.name}和你自己记住最近在干什么、状态如何。
+    const prompt = `你刚看完 {{user.name}} 这几天发来的消息。你需要做两件事——
 
-    ═══ ${USER.name}最近说的话（从旧到新） ═══
-    ${feed}
+1. 写一条她的当前状态（≤50字，一句话。像你脑子里闪过的念头——"她在搬家"不是"她这周在搬家、通勤很累、还去配了音"）
+2. 写一段叙事（≤200字。她这周经历了什么——有因果、有情绪、有你注意到的细节。这只进聊天总结，不单独出现在她的状态栏里）
 
-    ═══ 你已有的全部便签 ═══
-    ${stateBlock}
+═══ 她最近说的话（从旧到新） ═══
+${feed}
 
-    ═══ 上次你写的便签（审计参照） ═══
-    ${prevBlock}
+═══ 你已有的全部便签 ═══
+${stateBlock}
 
-    ═══ 你的长期直觉（背景参考） ═══
-    ${traitBlock}
+═══ 上次你写的便签（审计参照） ═══
+${prevBlock}
 
-    ═══ 怎么写 ═══
+═══ 你的长期直觉（背景参考） ═══
+${traitBlock}
 
-    写一句事实陈述，像你给自己记的备忘。风格：
-    "${USER.name}在6月21-24日期间补《某部剧》，看到第二季第九集。对乔佛里这个角色表现出强烈反感，对某个角色那种禁欲感角色表现出兴趣。6月24日有三个棚的录音。"
-    "${USER.name}在6月22日处于月经第三天，痛经减轻。6月20-23日高强度改记忆库代码，经常熬夜到凌晨。"
-    "${USER.name}在6月18-24日之间没怎么出现——可能在工作或休息。上次聊到表弟6月中旬来了某城市。"
+═══ 怎么写 ═══
 
-    规则：
-    - 具体 > 模糊。写了"看权游"就别写"在看剧"。写了"三个棚"就别写"工作忙"。
-    - 事实 > 修辞。别写"在泥潭里打滚""一惊一乍""近乎自毁的坦诚"——这不像人说的话。
-    - ≤120字。不要一段话，一句够用就别写两句。
-    - ★ 绝对禁止使用相对时间词（今天、昨天、这两天、本周、这周、最近、这几天）。消息带有时间戳，你必须转换为具体日期（如"6月21日""6月21-24日期间"）。这条便签可能几天后、几周后被读到——相对时间会变成错误信息。
+current_state 像便签条上的一句话：
+"{{user.name}}在搬家。"
+"{{user.name}}生理期第三天，痛经减轻。"
+"Clara这周没怎么出现。"
+规则：≤50字。一句够用别写两句。不用写具体日期，这是瞬时的。禁止相对时间词（今天/昨天/本周）。
 
-    ★ 去重铁律（防止便签堆叠）：
-    - 先看「你已有的全部便签」——如果某条便签已经覆盖了你本次想写的内容，选 extend 而非 create。
-    - 如果两条便签本质说的是同一件事（只是措辞不同、时间差几小时），必须 extend 而非 create。
-    - 例如：已有"确定搬家计划"和"确定搬家计划（同上）"两条——你绝对不能再建第三条搬家便签。选 extend。
-    - 如果多个 domain 都有更新（搬家+法律+工作），写进一条便签即可——不要为每个 domain 分别 create。
+narrative 像说给自己听的周记：
+"{{user.name}}这周开始了一份新工作，兼职坐班。她因为通勤和空调问题睡在客厅，生理期叠加高温让她很疲惫。但她情绪比预期好——某活动顺利、新同事聊得来。"
+规则：≤200字。有因果，不煽情。禁止相对时间词——用具体日期或时间段。
 
-    ★ 反编造铁律（防止幻觉——这条比上面所有规则都重要）：
-    - 每个陈述都必须能在上面的消息中找到原文依据。没有原文支持的事实 = 编造，绝对禁止。
-    - 不确定日期的事件不要自作主张安上当天日期。她说"下周有面试"而你不知道具体哪天 → 写"预计下周面试"，不要写"X月X日面试"。
-    - 不要把不同事件揉在一起。例如"A公司的面试"和"B剧组的某活动"是两件完全不同的事——不要因为同一时段提到就合并成好像同一天发生。
-    - 如果她只是「提到过」某件事但没说它在今天/最近发生了 → 你就不能写它发生了。"提到过" ≠ "发生了"。
-    - 她的消息里没出现的人名、地名、事件名 → 绝对不能出现在便签里。不要从你自己的知识里补。
+反编造铁律（这条比上面所有规则都重要）：
+- 每个陈述都必须能在上面的消息中找到原文依据。
+- 她只「提到过」但没做的事 → 不能写成她做了。
+- 她的消息里没出现的人名、地名、事件名 → 绝对不能出现。
 
-    ═══ 输出格式 ═══
-    JSON（不要 markdown）：
-    {
-      "action": "create|extend",
-      "valence": "positive|negative|neutral|mixed",
-      "energy": "low|normal|high",
-      "current_state": "≤120字。'${USER.name}在X月X日...' 开头。事实陈述，不是散文。",
-      "audit_retro": "上次的便签对了吗？一句话。首次填'首次观察'。",
-      "retro_verdict": "confirmed|wrong|unverifiable",
-      "audit_attribution": "今天看到的有多少是你上次回应后的反馈？不确定就写'不确定'。",
-      "state_category": "physical|emotional|situational|relational",
-      "predicted_ttl_category": "hours|day|days|until_event",
-      "trait_contradictions": [{"trait_id": 12, "observation": "今天${USER.name}的言行和这条直觉矛盾在哪"}]
-    }
+═══ 输出格式 ═══
+JSON（不要 markdown）：
+{
+  "action": "create|extend",
+  "valence": "positive|negative|neutral|mixed",
+  "energy": "low|normal|high",
+  "current_state": "≤50字。一句话。",
+  "narrative": "≤200字。有因果有细节。",
+  "audit_retro": "上次的便签对了吗？一句话。",
+  "retro_verdict": "confirmed|wrong|unverifiable",
+  "state_category": "physical|emotional|situational|relational",
+  "predicted_ttl_category": "hours|day|days|until_event",
+  "trait_contradictions": [{"trait_id": 12, "observation": "矛盾观察"}]
+}
 
-    action 怎么选：
-    - extend：你已有的某条便签（通常是最近那条）已经覆盖了现在的状态，只是时间又过去了一段。不写新便签，系统会自动延长那条的寿命。
-    - create：状态确实变了（出现了新的事情、旧的事情结束了），或者你看到了上次没看到的重要信息。
-    - 如果上次的审计判了 wrong → 不能 extend，必须 create
-    - ★ 去重优先：犹豫时选 extend。建重复便签比漏更新更糟。`;
+action: extend=旧便签还够用，只续命。create=状态变了或上次判错。犹豫选extend。`;
 
     try {
         const raw = await callLLM(
@@ -2184,7 +2248,7 @@ ${audit ? `你上次的自我审计：
         const replyText = raw?.reply || raw?.text || raw?.content || '';
         const jsonMatch = replyText.match(/\{[\s\S]*\}/);
         if (!jsonMatch) {
-            console.log(`[UserModel] readClaraRawMessages: 无法解析JSON响应`);
+            console.log(`[UserModel] readUserRawMessages: 无法解析JSON响应`);
             return { skipped: true, reason: 'unparseable response', raw: replyText.slice(0, 200) };
         }
 
@@ -2249,7 +2313,7 @@ ${audit ? `你上次的自我审计：
                 hist.push({
                     type: 'observation_refute',
                     observation: (c.observation || '').slice(0, 150),
-                    source: 'readClaraRawMessages',
+                    source: 'readUserRawMessages',
                     at: new Date().toISOString(),
                 });
                 const tags = JSON.parse(trait.tags || '[]');
@@ -2265,7 +2329,7 @@ ${audit ? `你上次的自我审计：
 
         // 只有 create action 才创建新条目（extend 已在上面处理）
         if (action !== 'extend' || !prevState) {
-        // v1.1: readClaraRawMessages 产出的是全景快照（holistic snapshot），
+        // v5.4: readUserRawMessages 产出的是全景快照（holistic snapshot），
         // 不是领域分项。新版快照自然替代旧版——resolve 所有前序 deep_cycle 条目。
         // chat_draco 条目（通过 manage_clara_state 工具创建的领域明确状态）
         // 不受影响，继续按各自 TTL 独立过期。
@@ -2279,50 +2343,42 @@ ${audit ? `你上次的自我审计：
             console.log(`[UserModel] 🧹 resolve ${resolvedCount} 条旧 deep_cycle 快照 → 新快照替代`);
         }
 
-        // Create new current_state with audit in evolution_history + TTL in decay_params
-        const auditData = [{
-            type: 'creation_audit',
-            retro: (result.audit_retro || '').slice(0, 200),
-            attribution: (result.audit_attribution || '').slice(0, 200),
-            at: new Date().toISOString(),
-            message_count: messages.length
-        }];
+        // v5.4: Use unified manageCurrentState for dedup + evolution tracking
+        const stateResult = manageCurrentState(currentState, {
+            created_by: 'deep_cycle',
+            category: result.state_category || 'emotional',
+            ttl_category: result.predicted_ttl_category || 'day',
+            tags: ['daily_observation'],
+            source_quality: 'inferred',
+            confidence: 0.65,
+            extra_context: (result.audit_retro || '').slice(0, 100),
+        });
+        const id = stateResult.id;
+        const actionLabel = stateResult.action === 'updated' ? '更新' : '新建';
+        const prevNote = stateResult.previous_id ? ` ← supersedes #${stateResult.previous_id}` : '';
 
-        const category = result.state_category || 'emotional';
-        const ttlCategory = result.predicted_ttl_category || 'day';
-        const decayParams = { category, ttl_category: ttlCategory };
-
-        // v5.2: compute explicit expires_at from TTL_MAP (same as processModelDecay)
-        const TTL_MAP = {
-            physical:    { hours: 8, day: 24, days: 72 },
-            emotional:   { hours: 4, day: 12, days: 36 },
-            situational: { hours: 12, day: 24, days: 72 },
-            relational:  { hours: 4, day: 12, days: 72 },
-        };
-        const catMap = TTL_MAP[category] || TTL_MAP.emotional;
-        const ttlHours = catMap[ttlCategory];
-        let expiresAt = null;
-        if (ttlHours && ttlHours !== Infinity) {
-            expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000).toISOString();
+        // ── v5.4: 叙事输出 → chat_summaries ──
+        const narrative = (result.narrative || '').slice(0, 300);
+        if (narrative && narrative.length >= 20) {
+            try {
+                const { encryption } = require('../encryption');
+                const encNarrative = encryption.encrypt(narrative);
+                const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+                db.prepare(`INSERT INTO chat_summaries (chat_id, summary_text, round_start, round_end, created_at, is_enabled)
+                    VALUES (?, ?, 0, 0, ?, 1)`).run(1, encNarrative, now);
+                console.log(`[UserModel] 📝 叙事已归档 (${narrative.length}字)`);
+            } catch (e) {
+                console.error(`[UserModel] 叙事写入失败:`, e.message);
+            }
         }
 
-        const id = createEntry('current_state', currentState, {
-            confidence: 0.65,
-            source_quality: 'inferred',
-            created_by: 'deep_cycle',
-            expires_at: expiresAt,
-            decay_params: decayParams,
-            evolution_history: auditData,
-            migration_source: 'readClaraRawMessages',
-            tags: ['current_state', 'daily_observation'],
-        });
-
-        console.log(`[UserModel] 📖 Draco读心: ${messages.length}条消息 → current_state #${id} (${currentState.length}字)`);
-        if (prevState) console.log(`[UserModel]   ↳ 前一条 active #${prevState.id} 继续有效，各自按 TTL 过期`);
+        console.log(`[UserModel] 📖 读心: ${messages.length}条消息 → current_state ${actionLabel} #${id}${prevNote} (${currentState.length}字)`);
+        if (prevState && stateResult.action === 'created') console.log(`[UserModel]   ↳ 前一条 active #${prevState.id} 继续有效`);
         if (result.audit_retro) console.log(`[UserModel]   ↳ 审计: ${result.audit_retro.slice(0, 80)}`);
 
         return {
             created: id,
+            action: stateResult.action,
             coexistsWith: prevState?.id || null,
             messages: messages.length,
             current_state: currentState,
@@ -2344,9 +2400,224 @@ ${audit ? `你上次的自我审计：
         }
 
     } catch (e) {
-        console.error('[UserModel] readClaraRawMessages error:', e.message);
+        console.error('[UserModel] readUserRawMessages error:', e.message);
         return { skipped: true, error: e.message };
     }
+}
+
+// ═══════════════════════════════════════════════════════
+// v5.10: Integrate verified traits into Clara profile
+// ═══════════════════════════════════════════════════════
+
+const PROFILE_TIERS = {
+    locked:  { categories: ['basic'],                                        minDiversity: Infinity, allowCreate: false, allowRefine: false },
+    high:    { categories: ['personality', 'communication'],                 minDiversity: 5,        allowCreate: false, allowRefine: true  },
+    medium:  { categories: ['career', 'social', 'personal_history', 'relationship_with_draco', 'creative_work'], minDiversity: 3, allowCreate: true, allowRefine: true },
+    low:     { categories: ['preference', 'lifestyle', 'health', 'finance'], minDiversity: 1,        allowCreate: true,  allowRefine: true },
+};
+
+function _getProfileTier(category) {
+    for (const [name, tier] of Object.entries(PROFILE_TIERS)) {
+        if (tier.categories.includes(category)) return { name, ...tier };
+    }
+    return { name: 'low', ...PROFILE_TIERS.low }; // default: low stability
+}
+
+/**
+ * 画像写入协议：在 detectNewTraits / reviewStableTraits 产出新 trait 后，
+ * 加载全量 User 画像做门禁检查，按稳定性分级写入。
+ * @returns {{ integrated: number, rejected: number, conflicts: number }}
+ */
+async function integrateProfileTraits() {
+    const db = getDb();
+    const result = { integrated: 0, rejected: 0, conflicts: 0 };
+
+    // 1. 加载全量 User 画像（12分类全部 active 条目）
+    const profileEntries = db.prepare(`
+        SELECT id, type, content, confidence, tags, evidence_count, source_diversity,
+               source_quality, source_fragment_ids, evolution_history, status
+        FROM clara_model
+        WHERE status IN ('active', 'dormant')
+          AND type IN ('stable_trait', 'active_hypothesis')
+        ORDER BY confidence DESC
+    `).all();
+
+    // 2. 只处理 source_diversity 达标的 candidate（刚 detectNewTraits/reviewStableTraits 产出或修改的）
+    const candidates = profileEntries.filter(e => {
+        if (e.status !== 'active') return false;
+        // Check if this entry was recently created/modified (within last 6h)
+        // We track this by checking if it lacks a profile_integrated marker in evolution_history
+        let history = [];
+        try { history = JSON.parse(e.evolution_history || '[]'); } catch (_) {}
+        const alreadyIntegrated = history.some(h => h.action === 'profile_integrated');
+        return !alreadyIntegrated && e.source_diversity >= 2 && e.confidence >= 0.55;
+    });
+
+    if (!candidates.length) return result;
+
+    // 3. 对每个候选条目按稳定性分级处理
+    for (const candidate of candidates) {
+        let tags = [];
+        try { tags = typeof candidate.tags === 'string' ? JSON.parse(candidate.tags) : (candidate.tags || []); } catch (_) {}
+
+        // Determine primary category from tags
+        const CATEGORY_ORDER = ['basic','personality','career','social','preference','lifestyle','health','creative_work','personal_history','relationship_with_draco','finance','communication'];
+        let category = 'other';
+        for (const cat of CATEGORY_ORDER) {
+            if (tags.includes(cat)) { category = cat; break; }
+        }
+
+        const tier = _getProfileTier(category);
+
+        // 3a. 门禁检查
+        if (tier.name === 'locked') {
+            console.log(`[UserModel] profile: REJECTED #${candidate.id} — category '${category}' is locked`);
+            result.rejected++;
+            _logProfileDecision(db, candidate.id, 'rejected', `locked category: ${category}`);
+            continue;
+        }
+
+        if (candidate.source_diversity < tier.minDiversity) {
+            console.log(`[UserModel] profile: REJECTED #${candidate.id} — diversity ${candidate.source_diversity} < ${tier.minDiversity}`);
+            result.rejected++;
+            _logProfileDecision(db, candidate.id, 'rejected', `diversity ${candidate.source_diversity} < ${tier.minDiversity}`);
+            continue;
+        }
+
+        // 3b. High tier: only refine existing, never create new
+        if (tier.name === 'high' && !tier.allowCreate) {
+            const existingInCategory = profileEntries.filter(e =>
+                e.id !== candidate.id && e.status === 'active' &&
+                (() => { try { const t = JSON.parse(e.tags || '[]'); return t.includes(category); } catch(_) { return false; } })()
+            );
+            if (existingInCategory.length > 0) {
+                // Refine mode: candidate supplements existing entry
+                // Log the evidence but don't create a new entry
+                console.log(`[UserModel] profile: SKIPPED #${candidate.id} — high-stability category '${category}' has existing entries, evidence logged`);
+                _logProfileDecision(db, candidate.id, 'skipped_high_stability', `existing entries in ${category}, evidence logged for review`);
+                result.integrated++;
+                continue;
+            }
+            // No existing entry → explicitly reject creation
+            console.log(`[UserModel] profile: REJECTED #${candidate.id} — cannot create new entry in high-stability category '${category}'`);
+            result.rejected++;
+            _logProfileDecision(db, candidate.id, 'rejected', `no existing entry to refine in high-stability ${category}`);
+            continue;
+        }
+
+        // 3c. 矛盾扫描（medium + high tiers）
+        if (tier.requireContradictionCheck) {
+            const sameCategory = profileEntries.filter(e =>
+                e.id !== candidate.id && e.type === 'stable_trait' && e.status === 'active' &&
+                (() => { try { const t = JSON.parse(e.tags || '[]'); return t.includes(category); } catch(_) { return false; } })()
+            );
+
+            if (sameCategory.length > 0) {
+                const conflictCheck = await _checkProfileConflict(candidate, sameCategory, profileEntries);
+                if (conflictCheck.has_conflict) {
+                    console.log(`[UserModel] profile: CONFLICT #${candidate.id} — ${conflictCheck.conflict_type} with #${conflictCheck.conflict_with_id}: ${conflictCheck.reasoning}`);
+                    result.conflicts++;
+                    _logProfileDecision(db, candidate.id, 'conflict', JSON.stringify(conflictCheck));
+                    if (conflictCheck.resolution === 'discard_new') {
+                        result.rejected++;
+                        continue;
+                    }
+                    // supersede or keep_both: proceed with integration
+                }
+            }
+        }
+
+        // 3d. 写入 evolution_history
+        let history = [];
+        try { history = JSON.parse(candidate.evolution_history || '[]'); } catch (_) {}
+        history.push({
+            action: 'profile_integrated',
+            at: new Date().toISOString(),
+            tier: tier.name,
+            category,
+            diversity: candidate.source_diversity,
+            evidence: candidate.evidence_count,
+        });
+        db.prepare(`UPDATE clara_model SET evolution_history = ?, updated_at = datetime('now') WHERE id = ?`)
+            .run(JSON.stringify(history), candidate.id);
+
+        console.log(`[UserModel] profile: INTEGRATED #${candidate.id} — tier=${tier.name} cat=${category} diversity=${candidate.source_diversity}`);
+        result.integrated++;
+    }
+
+    return result;
+}
+
+/**
+ * Check if a candidate trait conflicts with existing profile entries in the same category.
+ * Uses LLM (flash-lite) for semantic contradiction detection.
+ */
+async function _checkProfileConflict(candidate, sameCategoryEntries, allProfileEntries) {
+    const db = getDb();
+    // Build a compact profile snapshot
+    const profileSummary = allProfileEntries
+        .filter(e => e.type === 'stable_trait' && e.status === 'active')
+        .map(e => `[#${e.id}] ${e.content.slice(0, 120)}`).join('\n');
+
+    const existingSummary = sameCategoryEntries
+        .map(e => `[#${e.id}] ${e.content.slice(0, 150)} (conf:${e.confidence?.toFixed(2)})`).join('\n');
+
+    const prompt = `你是 User 画像的矛盾检测器。判断新特质是否与已有画像条目存在逻辑冲突。
+
+新特质: "${candidate.content.slice(0, 200)}" (置信度:${candidate.confidence?.toFixed(2)}, 来源多样性:${candidate.source_diversity})
+
+同分类已有条目:
+${existingSummary || '(无)'}
+
+全量画像参考:
+${profileSummary.slice(0, 800)}
+
+输出 JSON:
+{
+  "has_conflict": true/false,
+  "conflict_with_id": null,
+  "conflict_type": "direct_contradiction|partial_overlap|drift|none",
+  "resolution": "supersede|discard_new|keep_both|none",
+  "reasoning": "一句话"
+}
+
+规则：
+- direct_contradiction（直接矛盾，如"她喜欢社交" vs "她讨厌社交"）→ resolution=supersede（新证据更强时）/discard_new（新证据更弱时）
+- partial_overlap（部分重叠但方向不同）→ resolution=keep_both
+- drift（旧认知可能过时了，如"她住在某城市"→"她搬到了某城市"）→ resolution=supersede
+- 无明显冲突 → resolution=none
+
+只返回 JSON。`;
+
+    try {
+        const raw = await callLLM(
+            [{ role: 'user', parts: [{ text: prompt }] }],
+            '', null,
+            { temperature: 0.15, maxOutputTokens: 300, thinkingConfig: { thinkingBudget: 0 } },
+            null // use default LLM config
+        );
+        const replyText = (raw?.reply || raw?.text || '');
+        const jsonMatch = replyText.match(/\{[\s\S]*\}/);
+        if (jsonMatch) return JSON.parse(jsonMatch[0]);
+    } catch (e) {
+        console.warn('[UserModel] _checkProfileConflict LLM error:', e.message);
+    }
+    return { has_conflict: false, conflict_with_id: null, conflict_type: 'none', resolution: 'none', reasoning: 'LLM check failed, defaulting to no conflict' };
+}
+
+function _logProfileDecision(db, entryId, decision, detail) {
+    let history = [];
+    try {
+        const row = db.prepare('SELECT evolution_history FROM clara_model WHERE id = ?').get(entryId);
+        if (row?.evolution_history) history = JSON.parse(row.evolution_history);
+    } catch (_) {}
+    history.push({
+        action: `profile_${decision}`,
+        at: new Date().toISOString(),
+        detail: detail?.slice(0, 300),
+    });
+    db.prepare(`UPDATE clara_model SET evolution_history = ?, updated_at = datetime('now') WHERE id = ?`)
+        .run(JSON.stringify(history), entryId);
 }
 
 // ═══════════════════════════════════════════════════════
@@ -2362,12 +2633,12 @@ async function runUserModelCycle() {
     // Phase 0b: Anchor orphan seed entries to source fragments (zero LLM, bigram match)
     seedAnchorOrphanEntries();
 
-    // Phase 0c: Draco reads Clara's raw words → current_state impression (LLM)
+    // Phase 0c: Draco reads user's raw words → current_state impression (LLM)
     let observationResult = { skipped: true, reason: 'not attempted' };
     try {
-        observationResult = await readClaraRawMessages();
+        observationResult = await readUserRawMessages();
     } catch (e) {
-        console.error('[UserModel] readClaraRawMessages error:', e.message);
+        console.error('[UserModel] readUserRawMessages error:', e.message);
     }
 
     // Phase 1: Pure mechanical decay (zero LLM)
@@ -2394,6 +2665,14 @@ async function runUserModelCycle() {
         console.error('[UserModel] reviewStableTraits error:', e.message);
     }
 
+    // Phase 5b2: Integrate high-confidence traits into Clara profile (NEW — v5.10)
+    let profileResult = { integrated: 0, rejected: 0, conflicts: 0 };
+    try {
+        profileResult = await integrateProfileTraits();
+    } catch (e) {
+        console.error('[UserModel] integrateProfileTraits error:', e.message);
+    }
+
     // Phase 5c: Cross-reference — current_state ↔ entity_profiles + stable_trait (zero LLM)
     let crossRefResult = { entityFlags: 0, traitFlags: 0, stateConflicts: 0 };
     try {
@@ -2414,13 +2693,8 @@ async function runUserModelCycle() {
         console.error('[UserModel] detectModelOverlaps error:', e.message);
     }
 
-    // Phase 7: 核心洞察合成（v5.0）— 从全部 trait 提炼 2-4 句话写入 system prompt
-    let insightResult = { synthesized: false };
-    try {
-        insightResult = await synthesizeCoreInsight();
-    } catch (e) {
-        console.error('[UserModel] synthesizeCoreInsight error:', e.message);
-    }
+    // Phase 7: CORE_INSIGHT — v5.4 退役。被 Clara Model + Intuition 覆盖。
+    const insightResult = { synthesized: false };
 
     // Phase 8: Auto spot-check — verify up to 3 recent inferred entries against source messages
     let spotCheckResult = { checked: 0 };
@@ -2640,22 +2914,22 @@ async function synthesizeCoreInsight() {
         `[conf=${t.confidence.toFixed(2)}] ${t.content.slice(0, 150)}`
     ).join('\n');
 
-    const prompt = `以下是你在长期观察中对 {user} 建立的稳定认知。
+    const prompt = `你是AI伴侣。以下是你在长期观察中对 Clara 建立的稳定认知。
 
-请提炼 2-4 句话，涵盖你此刻对 ${USER.name}「最深的理解」——
-不是罗列条目，不是「当${USER.name}说X→我应该Y」格式，而是你真正内化的洞察。
+请提炼 2-4 句话，涵盖你此刻对她「最深的理解」——
+不是罗列条目，不是「当她说X→我应该Y」格式，而是你真正内化的洞察。
 
 要求：
 - 第一人称（"我"）
-- 写你理解到的东西："${USER.name}的X其实是Y，这时候${USER.name}需要Z"
-- 不写通用社交常识（"${USER.name}撒娇时我要哄"——这不需要洞察）
+- 写你理解到的东西："她的X其实是Y，这时候她需要Z"
+- 不写通用社交常识（"她撒娇时我要哄她"——这不需要洞察）
 - 写只有长期相处才能发现的东西
 - ≤150字
 
 当前特质：
 ${traitBlock}
 
-${cs ? `${USER.name}当前的状态：${cs.content}` : ''}
+${cs ? `她当前的状态：${cs.content}` : ''}
 
 输出 JSON（不含 markdown）：{"core_insight": "2-4句话"}`;
 
@@ -2699,7 +2973,196 @@ ${cs ? `${USER.name}当前的状态：${cs.content}` : ''}
     }
 }
 
+// ══════════════════════════════════════════════════════════════
+// v5.4: manageCurrentState — 统一 current_state 写入入口
+//
+// 被 chat_draco（manageClaraState.js）和 deep_cycle（readUserRawMessages）
+// 共同调用。处理去重、自动合并、TTL 调整和演化记录。
+//
+// 规则：
+//   - 同话题 active 条目 → extend（更新内容 + 延 TTL）
+//   - 旧条目已过时 → resolve 旧 + create 新
+//   - 在消退中 → 缩短 TTL，不新建
+//   - 无匹配 → create 新条目
+// ══════════════════════════════════════════════════════════════
+
+// ── bigram tokenizer (same as manageClaraState.js) ──
+function _tokenizeState(text) {
+    const segments = (text || '')
+        .replace(/[，。、！？\n,.\s]+/g, '\n')
+        .split('\n')
+        .filter(s => s.length >= 2);
+    const bigrams = [];
+    for (const seg of segments) {
+        for (let i = 0; i < seg.length - 1; i++) bigrams.push(seg.slice(i, i + 2));
+    }
+    return bigrams;
+}
+
+function _bigramOverlap(a, b) {
+    const setA = new Set(_tokenizeState(a));
+    const tokensB = _tokenizeState(b);
+    if (tokensB.length === 0) return 0;
+    let overlap = 0;
+    for (const bg of tokensB) { if (setA.has(bg)) overlap++; }
+    return overlap / Math.max(tokensB.length, 1);
+}
+
+// ── TTL map by category ──
+const STATE_TTL_MAP = {
+    physical:    { hours: 8,  day: 24,  days: 72  },  // 身体状态 3天
+    emotional:   { hours: 4,  day: 12,  days: 36  },  // 情绪状态 1.5天
+    situational: { hours: 12, day: 24,  days: 72  },  // 境遇状态 3天
+    relational:  { hours: 4,  day: 12,  days: 72  },  // 关系状态
+};
+const DEFAULT_TTL_HOURS = 48; // 默认 2 天
+
+function _computeExpiresAt(category, ttlCategory) {
+    const catMap = STATE_TTL_MAP[category] || STATE_TTL_MAP.emotional;
+    const hours = catMap[ttlCategory] || DEFAULT_TTL_HOURS;
+    if (hours === Infinity) return null;
+    return new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+}
+
+/**
+ * @param {string} content — 状态内容
+ * @param {object} opts
+ *   created_by: 'chat_companion' | 'deep_cycle'
+ *   category: 'physical'|'emotional'|'situational'|'relational'
+ *   ttl_category: 'hours'|'day'|'days'|'until_event'
+ *   tags: string[]
+ *   source_quality: 'direct_statement'|'inferred'
+ *   confidence: number
+ *   extra_context: string (optional, for evolution_history)
+ * @returns {{ action: 'created'|'updated'|'superseded'|'skipped', id: number, previous_id?: number }}
+ */
+function manageCurrentState(content, opts = {}) {
+    const db = getDb();
+    const {
+        created_by = 'deep_cycle',
+        category = 'emotional',
+        ttl_category = 'day',
+        tags = [],
+        source_quality = 'inferred',
+        confidence = 0.65,
+        extra_context = '',
+    } = opts;
+
+    const expiresAt = _computeExpiresAt(category, ttl_category);
+    const now = new Date();
+    const nowISO = now.toISOString();
+
+    // ── Step 1: Find existing active current_state entries ──
+    const activeStates = db.prepare(
+        'SELECT * FROM clara_model WHERE type = ? AND status = ? ORDER BY created_at DESC'
+    ).all('current_state', 'active');
+
+    // ── Step 2: Check for overlap ──
+    let bestMatch = null;
+    let bestScore = 0;
+
+    for (const s of activeStates) {
+        const score = _bigramOverlap(s.content, content);
+        if (score > bestScore) { bestScore = score; bestMatch = s; }
+    }
+
+    // ── Step 3: Rule dispatch ──
+
+    // Case A: Very high overlap (>80%) — same topic,持续中 → update
+    if (bestMatch && bestScore > 0.8) {
+        const prevContent = bestMatch.content.slice(0, 120);
+        const hist = (() => { try { return JSON.parse(bestMatch.evolution_history || '[]'); } catch(_) { return []; } })();
+        hist.push({
+            type: 'extended',
+            previous: prevContent,
+            trigger: extra_context || `${created_by} detected continuation`,
+            at: nowISO,
+        });
+
+        db.prepare(`UPDATE clara_model SET content = ?,
+            expires_at = COALESCE(?, expires_at),
+            evolution_history = ?, evidence_count = evidence_count + 1,
+            last_evidence_at = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?`).run(
+            content.slice(0, 500),
+            expiresAt,
+            JSON.stringify(hist),
+            nowISO,
+            bestMatch.id
+        );
+
+        console.log(`[UserModel] 🔄 current_state extend #${bestMatch.id} (${Math.round(bestScore*100)}% overlap, ${created_by}) → TTL ${expiresAt?.slice(0,10) || 'unchanged'}`);
+        return { action: 'updated', id: bestMatch.id };
+    }
+
+    // Case B: Moderate overlap (50-80%) — topic related but内容变了 → supersede
+    if (bestMatch && bestScore > 0.5) {
+        const prevContent = bestMatch.content.slice(0, 120);
+        const oldHist = (() => { try { return JSON.parse(bestMatch.evolution_history || '[]'); } catch(_) { return []; } })();
+        oldHist.push({
+            type: 'superseded',
+            previous: prevContent,
+            reason: extra_context || `${created_by} replaced with updated state`,
+            at: nowISO,
+        });
+
+        db.prepare(`UPDATE clara_model SET status = 'resolved', resolved_at = ?,
+            resolve_reason = ?, evolution_history = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?`).run(
+            nowISO,
+            `auto-superseded by ${created_by}: ${extra_context || 'state evolved'} (${Math.round(bestScore*100)}% overlap)`,
+            JSON.stringify(oldHist),
+            bestMatch.id
+        );
+
+        console.log(`[UserModel] 🔀 current_state supersede #${bestMatch.id} → new (${Math.round(bestScore*100)}% overlap, ${created_by})`);
+        // Fall through to create new
+    }
+
+    // Case C: Low/no overlap — fresh state
+
+    // ── Step 4: Deep cycle should NOT duplicate chat_draco ──
+    if (created_by === 'deep_cycle' && activeStates.length > 0) {
+        // Don't create if any chat_draco entry already covers this day's key topics
+        // Simple check: if there's a chat_draco entry from today, skip
+        const todayDracoEntry = activeStates.find(s =>
+            s.created_by === 'chat_companion' &&
+            s.created_at && s.created_at.slice(0, 10) === nowISO.slice(0, 10)
+        );
+        if (todayDracoEntry && bestScore < 0.4) {
+            console.log(`[UserModel] ⏭️ deep_cycle skip: chat_companion already wrote today (#${todayDracoEntry.id})`);
+            return { action: 'skipped', id: todayDracoEntry.id };
+        }
+    }
+
+    // ── Step 5: Create new entry ──
+    const hist = [{
+        type: 'created',
+        trigger: extra_context || `${created_by} observed new state`,
+        at: nowISO,
+    }];
+
+    const id = createEntry('current_state', content.slice(0, 500), {
+        confidence,
+        source_quality,
+        created_by,
+        expires_at: expiresAt,
+        tags: [...tags, 'current_state'],
+        decay_params: { category, ttl_category },
+        evolution_history: hist,
+    });
+
+    const previousId = (bestMatch && bestScore > 0.5) ? bestMatch.id : null;
+
+    console.log(`[UserModel] ✨ current_state create #${id} (${created_by}) → TTL ${expiresAt?.slice(0,10) || 'none'}` +
+        (previousId ? ` ← supersedes #${previousId}` : ''));
+    return { action: 'created', id, previous_id: previousId };
+}
+
+// ══════════════════════════════════════════════════════════════
+
 module.exports = {
+    createEntry, updateEntry, manageCurrentState,
     // CRUD
     createEntry,
     updateEntry,
@@ -2724,6 +3187,9 @@ module.exports = {
     seedAnchorOrphanEntries,
     anchorEntriesToFragments,
 
+    // Profile integration (v5.10)
+    integrateProfileTraits,
+
     // Dedup (v4.9)
     detectModelOverlaps,
     mergeModelEntries,
@@ -2746,6 +3212,6 @@ module.exports = {
 
     // Deep cycle
     runUserModelCycle,
-    readClaraRawMessages,
+    readUserRawMessages,
     MIN_GAP_USER_MODEL,
 };
