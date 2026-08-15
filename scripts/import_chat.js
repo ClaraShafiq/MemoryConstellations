@@ -39,16 +39,16 @@ function parseArgs(argv) {
     return args;
 }
 
-// ── 归一化 sender → DB 值（'user' / 'draco'）──
+// ── 归一化 sender → DB 值（'user' / 'ai'）──
 function mapSender(raw) {
     const s = String(raw || '').trim().toLowerCase();
     if (s === 'user' || s === 'human' || s === 'me') return 'user';
-    if (s === 'assistant' || s === 'ai' || s === 'draco' || s === 'bot' || s === 'system') return 'draco';
+    if (s === 'assistant' || s === 'ai' || s === 'bot' || s === 'system') return 'ai';
     // 匹配配置里的名字
     if (s && (s === String(USER.name).toLowerCase() || s === String(USER.name))) return 'user';
-    if (s && (s === String(AI.name).toLowerCase() || s === String(AI.name))) return 'draco';
+    if (s && (s === String(AI.name).toLowerCase() || s === String(AI.name))) return 'ai';
     // 未知名字默认归用户——导入自己的聊天时，用户消息占多数；
-    // AI 消息通常会用 assistant/ai/draco 等关键词或 AI.name，已被上面拦截。
+    // AI 消息通常会用 assistant/ai 等关键词或 AI.name，已被上面拦截。
     return 'user';
 }
 
@@ -202,7 +202,7 @@ async function main() {
 
     console.log(`\n📥 解析到 ${msgs.length} 条消息`);
     console.log(`   用户消息: ${msgs.filter(m => m.sender === 'user').length} 条`);
-    console.log(`   伴侣消息: ${msgs.filter(m => m.sender === 'draco').length} 条`);
+    console.log(`   伴侣消息: ${msgs.filter(m => m.sender === 'ai').length} 条`);
     console.log('   预览：');
     for (const m of msgs.slice(0, 5)) {
         console.log(`     [${m.timestamp}] ${m.sender === 'user' ? USER.name : AI.name}: ${m.content.slice(0, 40)}`);

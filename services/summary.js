@@ -102,13 +102,13 @@ async function generateChatSummary(chatId, startMessageId = null, endMessageId =
                 continue;
             }
 
-            if (msg.sender === 'draco') {
+            if (msg.sender === 'ai') {
                 roundCount++;
                 // {{ai.name}}消息以300字缩略注入，提供上下文供模型判断猜测/纠正
-                const dracoText = extractText(msg);
-                if (dracoText.trim()) {
-                    const preview = dracoText.slice(0, 300);
-                    conversationText += `${timePrefix}${AI.name}: ${preview}${dracoText.length > 300 ? '…' : ''}\n\n`;
+                const aiText = extractText(msg);
+                if (aiText.trim()) {
+                    const preview = aiText.slice(0, 300);
+                    conversationText += `${timePrefix}${AI.name}: ${preview}${aiText.length > 300 ? '…' : ''}\n\n`;
                 }
                 continue;
             }
@@ -261,7 +261,7 @@ async function checkAndTriggerSummary(chatId, label) {
         const roundsSinceLastSummary = db.prepare(`
             SELECT COUNT(*) as count
             FROM messages
-            WHERE chat_id = ? AND id > ? AND sender = 'draco'
+            WHERE chat_id = ? AND id > ? AND sender = 'ai'
         `).get(chatId, lastSummaryId).count;
 
         console.log(`📊 [${label}] 自动总结检测: 距上次总结${roundsSinceLastSummary}轮，阈值${interval}轮`);
