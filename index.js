@@ -96,6 +96,9 @@ app.use('/api', require('./routes/ingest'));
 // ── Memory recall API（外部机器人回复前查记忆）──
 app.use('/api', require('./routes/recall'));
 
+// ── Import/Export API（memory.html 前端导入导出）──
+app.use('/api', require('./routes/import'));
+
 // ── Root redirect ──
 app.get('/', requireAuth, (req, res) => res.redirect('/memory.html'));
 
