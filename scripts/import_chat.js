@@ -178,16 +178,11 @@ async function main() {
     const db = getDb();
 
     const raw = fs.readFileSync(args.file, 'utf8');
-    const ext = path.extname(args.file).toLowerCase();
 
     // 依次尝试：整文件 JSON 数组 → JSONL（每行一个 JSON）→ TXT（名字: 内容）
-    let msgs = [];
-    if (ext === '.txt') {
-        msgs = parseTxt(raw);
-    } else {
-        msgs = parseJsonArray(raw);
-        if (msgs.length === 0) msgs = parseJsonl(raw);
-    }
+    // 不管扩展名都先试 JSON——很多前端导出的「TXT」其实是 JSON 内容
+    let msgs = parseJsonArray(raw);
+    if (msgs.length === 0) msgs = parseJsonl(raw);
     if (msgs.length === 0) msgs = parseTxt(raw);
     if (msgs.length === 0) {
         console.error('❌ 没有解析出任何消息。请检查格式（JSON 数组 / JSONL 每行一个 JSON / TXT 每行「名字: 内容」）。');
