@@ -15,6 +15,7 @@ try { ({ getActiveCorrections, getMergedGuidelines } = require('./correction'));
 
 const { chromaDBOperation } = require('./memory');
 const { WORLD_CONTEXT } = require('./worldContext');
+const { hashFragmentContent } = require('../utils/text');
 const { spawn } = require('child_process');
 const path = require('path');
 
@@ -623,7 +624,18 @@ async function runScribe(messages, since) {
     }
 
     let written = 0;
-    const sourceDate = messages[messages.length - 1].timestamp?.slice(0, 10);
+    let hashDedupCount = 0;
+    // source_date 必须是有效日期。历史上出现过 JSON 对象误入 message.timestamp，
+    // 会把 source_date 写成脏值（如 {"llm_call 之类）。与下方 safeUntil 同款守卫：
+    // 从末尾往前找最后一个有效时间戳，取它的日期。
+    let sourceDate = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (isValidTimestamp(messages[i]?.timestamp)) {
+            sourceDate = messages[i].timestamp.slice(0, 10);
+            break;
+        }
+    }
+    if (!sourceDate) sourceDate = new Date().toISOString().slice(0, 10);
     const newFragmentIds = [];
 
     // 收集分析窗口内的所有消息 ID（buffer + main messages），作为证据链
@@ -664,12 +676,29 @@ async function runScribe(messages, since) {
         }
 
         const insert = db.prepare(`
-            INSERT INTO memory_fragments (type, entity, content, emotional_weight, source, source_date, source_msg_ids, is_rp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO memory_fragments (type, entity, content, emotional_weight, source, source_date, source_msg_ids, is_rp, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
+        // 确定性硬去重：同「内容 + 同一天」命中已有碎片即跳过（零 LLM/零向量成本）
+        // 与上面的 ChromaDB 向量去重（find_duplicates）互补——哈希抓字面重复，向量抓语义近重复。
+        //
+        // ⚠️ 必须带 source_date 条件：跨天的「同一句话」是 source_diversity（独立日期证据）的来源，
+        //    是认知模型判断稳定特质（≥3 独立日期）的信号，绝不能当重复合并。
+        //    只有同一天的字面重复（Scribe 重复提取同一事件）才该去重。
+        const findHashDup = db.prepare('SELECT id FROM memory_fragments WHERE content_hash = ? AND source_date = ? LIMIT 1');
         for (let i = 0; i < result.entries.length; i++) {
             if (skipIndices.has(i)) continue;
             const entry = result.entries[i];
+
+            // ── 确定性硬去重：同内容 + 同一天 ──
+            const contentHash = hashFragmentContent(entry.entity || USER.name, entry.content);
+            const hashDup = findHashDup.get(contentHash, sourceDate);
+            if (hashDup) {
+                hashDedupCount++;
+                console.log(`[Scribe] hash去重: "${String(entry.content).slice(0, 40)}" = 已有片段 #${hashDup.id}（同天）`);
+                continue;
+            }
+
             const info = insert.run(
                 entry.type || 'observation',
                 entry.entity || USER.name,
@@ -678,7 +707,8 @@ async function runScribe(messages, since) {
                 entry.source || 'chat',
                 sourceDate,
                 sourceMsgIds,
-                isRP ? 1 : 0
+                isRP ? 1 : 0,
+                contentHash
             );
             newFragmentIds.push(info.lastInsertRowid);
             written++;
@@ -714,7 +744,7 @@ async function runScribe(messages, since) {
         VALUES (?, ?, ?, 'done')
     `).run(safeUntil, messages.length, written);
 
-    console.log(`[Scribe] 完成：处理${messages.length}条消息，写入${written}条记忆片段`);
+    console.log(`[Scribe] 完成：处理${messages.length}条消息，写入${written}条记忆片段${hashDedupCount > 0 ? `（hash去重${hashDedupCount}条）` : ''}`);
 
     // 新碎片写入完成 → 通知 Archivist Agent（事件驱动，秒级响应）
     if (written > 0) {
