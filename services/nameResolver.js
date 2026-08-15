@@ -6,15 +6,18 @@
 // After open-sourcing, users only need to edit memory_config.json
 // and core-prompt.txt — the code auto-adapts to their chosen names.
 
-const { USER, AI, SKIP_NAMES } = require('./memoryConfig');
+const { USER, AI, SKIP_NAMES, resolveTemplate } = require('./memoryConfig');
 
 /**
  * Replace hardcoded "Clara"/"Draco" with configured names in prompt strings.
  * Aligns with the existing fillPrompt pattern used across the codebase.
+ *
+ * 先解析 {{user.name}}/{{user.pronoun}}/{{ai.name}} 等双花括号模板，
+ * 再处理 {user}/{ai} 单花括号与旧版硬编码 Clara/Draco 字面量。
  */
 function fillPrompt(str) {
     if (typeof str !== 'string') return str;
-    return str
+    return resolveTemplate(str)
         .replace(/\{user\}/g, USER.name)
         .replace(/\{ai\}/g, AI.name)
         .replace(/Clara/g, USER.name)      // 向后兼容旧版硬编码
