@@ -22,3 +22,4 @@ gen-lang-client-*.json
 .DS_Store
 Thumbs.db
 *.tmp
+__pycache__/
