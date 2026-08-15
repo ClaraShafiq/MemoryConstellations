@@ -60,5 +60,5 @@ MEMORY_API_BASE=http://memory-constellations:3000
 
 ## 备注
 
-- 记忆库的**向量检索需要 ChromaDB 服务**（`chroma_service.py`，端口 7707），已随仓库提供（`deploy/Dockerfile.chroma` + compose 里的 `chroma` 服务）。⚠️ 但 `services/memory.js` 的 `CHROMA_URL` 目前还是写死的 `127.0.0.1:7707`，**待改成读环境变量后**，在 compose 的 `memory-constellations` 服务里加 `CHROMA_URL=http://chroma:7707` 才能真正连上（这项改动会跟记忆库 v5.12 同步一起做）。在此之前，没有 ChromaDB 时记忆库仍能跑、能提取碎片，只是「向量语义检索」降级为「关键词检索」。
+- 记忆库的**向量检索需要 ChromaDB 服务**（`chroma_service.py`，端口 7707），已随仓库提供（`deploy/Dockerfile.chroma` + compose 里的 `chroma` 服务）。记忆库通过 `CHROMA_URL` 环境变量连 chroma 容器（compose 里已配好 `CHROMA_URL=http://chroma:7707`）。没有 ChromaDB 时记忆库仍能跑、能提取碎片，只是「向量语义检索」降级为「关键词检索」。
 - `deploy/astrbot-plugin/main.py` 里的 `on_decorating_result` 是 AstrBot 的 LLM 生命周期钩子，如果 AstrBot 版本不同导致报错，删掉这个函数、只留 `on_user_message` 也能用（只是不记机器人回复）。

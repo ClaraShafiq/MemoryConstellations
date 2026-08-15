@@ -5,8 +5,8 @@
 const { getDb } = require('../database');
 const { encryption } = require('../encryption');
 
-// ChromaDB 常驻服务地址
-const CHROMA_URL = 'http://127.0.0.1:7707';
+// ChromaDB 常驻服务地址（Docker 部署时通过环境变量 CHROMA_URL 指向 chroma 容器）
+const CHROMA_URL = process.env.CHROMA_URL || 'http://127.0.0.1:7707';
 
 // =================================================================
 // ChromaDB 操作（HTTP 调用 chroma_service.py 常驻服务）
