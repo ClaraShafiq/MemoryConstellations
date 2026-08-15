@@ -1311,6 +1311,96 @@ function initDatabase() {
         `ALTER TABLE memory_fragments ADD COLUMN content_hash TEXT;
          CREATE INDEX IF NOT EXISTS idx_memory_fragments_hash ON memory_fragments(content_hash);`);
 
+    // ── v5.4: memory_fragments.value_tags — 记忆价值标签 ──
+    runMigration(88, 'v5.4: memory_fragments.value_tags — 记忆价值标签',
+        `ALTER TABLE memory_fragments ADD COLUMN value_tags TEXT DEFAULT '[]';`);
+
+    // ── v5.4: entity_profiles 拆分 — 三字段模型 facts/judgment ──
+    runMigration(89, 'v5.4: entity_profiles 拆分为 facts + judgment + evolution_history + talking_points',
+        `ALTER TABLE entity_profiles ADD COLUMN facts TEXT DEFAULT NULL;
+         ALTER TABLE entity_profiles ADD COLUMN judgment TEXT DEFAULT NULL;
+         ALTER TABLE entity_profiles ADD COLUMN evolution_history TEXT DEFAULT '[]';
+         ALTER TABLE entity_profiles ADD COLUMN talking_points TEXT DEFAULT '[]';`);
+
+    // ── v5.4: entity_profiles 时间范围 + 实体类型 ──
+    runMigration(90, 'v5.4: entity_profiles — 时间范围 + 实体类型',
+        `ALTER TABLE entity_profiles ADD COLUMN valid_from TEXT DEFAULT NULL;
+         ALTER TABLE entity_profiles ADD COLUMN valid_until TEXT DEFAULT NULL;
+         ALTER TABLE entity_profiles ADD COLUMN entity_scope TEXT DEFAULT 'instance'
+            CHECK(entity_scope IN ('instance','template','alias'));`);
+
+    // ── v5.6: clara_patterns 矛盾计数 + dormant 状态 ──
+    runMigration(91, 'clara_patterns.contradiction_count — 用户行为模式矛盾计数',
+        'ALTER TABLE clara_patterns ADD COLUMN contradiction_count INTEGER DEFAULT 0');
+
+    runMigration(92, 'clara_patterns: status 支持 dormant',
+        `CREATE TABLE IF NOT EXISTS clara_patterns_v2 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL,
+            category TEXT DEFAULT 'behavior' CHECK(category IN ('behavior','preference','emotional','social','other')),
+            evidence_count INTEGER DEFAULT 0,
+            first_seen TEXT,
+            last_seen TEXT,
+            confidence REAL DEFAULT 0.25,
+            source_fragment_ids TEXT DEFAULT '[]',
+            tags TEXT DEFAULT '[]',
+            status TEXT DEFAULT 'active' CHECK(status IN ('active','dormant','merged','superseded')),
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            strategy TEXT, last_mismatch_at DATETIME, mismatch_count INTEGER DEFAULT 0, contradiction_count INTEGER DEFAULT 0
+        );
+        INSERT OR IGNORE INTO clara_patterns_v2 (id, content, category, evidence_count, first_seen, last_seen, confidence, source_fragment_ids, tags, status, created_at, updated_at, strategy, last_mismatch_at, mismatch_count, contradiction_count)
+            SELECT id, content, category, evidence_count, first_seen, last_seen, confidence, source_fragment_ids, tags, status, created_at, updated_at, strategy, last_mismatch_at, mismatch_count, contradiction_count FROM clara_patterns;
+        DROP TABLE clara_patterns;
+        ALTER TABLE clara_patterns_v2 RENAME TO clara_patterns;`);
+
+    // ── v5.9: entity_profiles 热度追踪 ──
+    runMigration(93, 'v5.9: entity_profiles — 热度追踪',
+        `ALTER TABLE entity_profiles ADD COLUMN hit_count INTEGER DEFAULT 0;
+         ALTER TABLE entity_profiles ADD COLUMN last_accessed_at DATETIME;`);
+    // 回填：用 fragment_count 作为初始 hit_count 的合理估算
+    db.prepare(`UPDATE entity_profiles SET hit_count = MIN(fragment_count, 100) WHERE hit_count = 0 AND fragment_count > 0`).run();
+
+    // ── v5.11: L0 定时提醒系统 — schedule + last_triggered_at + pending_signals ──
+    runMigration(94, 'v5.11: clara_model.schedule + last_triggered_at — 定时提醒',
+        `ALTER TABLE clara_model ADD COLUMN schedule TEXT DEFAULT NULL;
+         ALTER TABLE clara_model ADD COLUMN last_triggered_at TEXT DEFAULT NULL;`);
+
+    runMigration(95, 'v5.11: pending_signals — L0 提醒信号队列表',
+        `CREATE TABLE IF NOT EXISTS pending_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_type TEXT NOT NULL DEFAULT 'reminder',
+            clara_model_id INTEGER REFERENCES clara_model(id),
+            title TEXT NOT NULL,
+            context TEXT NOT NULL,
+            priority INTEGER DEFAULT 5,
+            signal_window_start TEXT,
+            signal_window_end TEXT,
+            status TEXT DEFAULT 'pending' CHECK(status IN ('pending','injected','consumed','expired')),
+            first_injected_at TEXT,
+            consumed_at TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_ps_status ON pending_signals(status);
+        CREATE INDEX IF NOT EXISTS idx_ps_clara_model ON pending_signals(clara_model_id);`);
+
+    // ── v5.12: messages.is_activity — 活动时间线 ──
+    runMigration(96, 'v5.12: messages.is_activity — 活动时间线',
+        `ALTER TABLE messages ADD COLUMN is_activity INTEGER DEFAULT 0;`);
+
+    // ── v5.13: entity_profiles.gender — 人物实体性别/代词 ──
+    runMigration(97, 'v5.13: entity_profiles.gender — 人物实体性别/代词',
+        `ALTER TABLE entity_profiles ADD COLUMN gender TEXT DEFAULT NULL;`);
+
+    // ── v5.14: entity_profiles 结构化 person profile ──
+    runMigration(98, 'v5.14: entity_profiles 结构化 person profile',
+        `ALTER TABLE entity_profiles ADD COLUMN relationship_category TEXT DEFAULT NULL;
+         ALTER TABLE entity_profiles ADD COLUMN mbti TEXT DEFAULT NULL;
+         ALTER TABLE entity_profiles ADD COLUMN location TEXT DEFAULT NULL;
+         ALTER TABLE entity_profiles ADD COLUMN occupation TEXT DEFAULT NULL;
+         ALTER TABLE entity_profiles ADD COLUMN age_text TEXT DEFAULT NULL;
+         ALTER TABLE entity_profiles ADD COLUMN birthday TEXT DEFAULT NULL;`);
+
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {
         const existingRoots = db.prepare('SELECT COUNT(*) as c FROM memory_ontology WHERE parent_id IS NULL').get();
