@@ -1137,6 +1137,37 @@ let _seedKeywordMap = null;
 let _boostKeywordMap = null;
 
 // ═══════════════════════════════════════════════════════
+// Core Persona / Daily Status — 认知审计 prompt 的辅助上下文
+// ═══════════════════════════════════════════════════════
+
+// Companion 核心人格上下文。OSS 里人格已由 WORLD_CONTEXT 注入（AI.core_traits），
+// 这里返回空串，保留占位以免 regenerateEntityOverviews 引用报错。
+let _corePersonaCache = null;
+function getCorePersonaContext() {
+    if (_corePersonaCache !== null) return _corePersonaCache;
+    _corePersonaCache = '';
+    return _corePersonaCache;
+}
+
+// 每日状态案例（可选文件 data/daily_status_examples.txt，私有内容不入库）
+let _dailyStatusExamples = null;
+function getDailyStatusExamples() {
+    if (_dailyStatusExamples !== null) return _dailyStatusExamples;
+    try {
+        const fs = require('fs');
+        const path = require('path');
+        const p = path.join(__dirname, '..', 'data', 'daily_status_examples.txt');
+        if (fs.existsSync(p)) {
+            _dailyStatusExamples = fs.readFileSync(p, 'utf8').trim();
+        }
+    } catch (_) {}
+    if (!_dailyStatusExamples) {
+        _dailyStatusExamples = 'X月X日：无明显变化。';
+    }
+    return _dailyStatusExamples;
+}
+
+// ═══════════════════════════════════════════════════════
 // Memory Landscape — gives the agent full visibility of its own memory structure
 // ═══════════════════════════════════════════════════════
 
@@ -3626,6 +3657,17 @@ async function regenerateEntityOverviews() {
             continue;
         }
 
+        // v5.13: Missing judgment — LLM should generate Companion's subjective take
+        // NULL means never attempted (vs "无" which means LLM tried and had nothing to say)
+        if (ent.judgment === null || ent.judgment === undefined) {
+            // Guard: don't retry within 7 days to avoid spamming LLM for entities
+            // that legitimately have nothing worth a judgment
+            if (!ent.overview_updated_at || ent.overview_updated_at < db.prepare("SELECT datetime('now', '-7 days') as d").get().d) {
+                needsUpdate.push({ ...ent, currentCount, reason: 'missing_judgment' });
+                continue;
+            }
+        }
+
         // Significant change since last overview? (growth OR shrinkage — v5.0)
         // Heuristic: if fragment count changed >= 20% or >= 3 since last overview,
         // the constellation's composition has shifted enough to warrant a fresh description.
@@ -3639,12 +3681,19 @@ async function regenerateEntityOverviews() {
             continue;
         }
 
-        // Safety net: very stale (>30 days) AND fragments actually changed
-        if (!ent.overview_updated_at || ent.overview_updated_at < db.prepare("SELECT datetime('now', '-30 days') as d").get().d) {
+        // Safety net: very stale entities
+        // - NULL overview_updated_at = never been described → always process (same priority as never_described)
+        // - >30 days since last overview → process only if fragments actually changed
+        if (!ent.overview_updated_at) {
+            needsUpdate.push({ ...ent, currentCount, reason: 'never_processed' });
+            continue;
+        }
+        if (ent.overview_updated_at < db.prepare("SELECT datetime('now', '-30 days') as d").get().d) {
             if (currentCount !== prevCount) {
                 needsUpdate.push({ ...ent, currentCount, reason: `stale_30d_${currentCount > prevCount ? 'grew' : 'shrunk'}` });
             }
-            continue;
+            // v5.13: fall through to missing_* checks even if count hasn't changed
+            // (don't continue — a stale entity may also need aliases/tags backfill)
         }
 
         // v5.6: Missing aliases or tags — low-priority backfill
@@ -3670,8 +3719,8 @@ async function regenerateEntityOverviews() {
     }
 
     needsUpdate.sort((a, b) => {
-        // Priority: never_described > missing_* > grown/shrunk > stale_30d
-        const prio = r => r === 'never_described' ? 0 : r.startsWith('missing_') ? 1 : r.startsWith('grown') || r.startsWith('shrunk') ? 2 : 3;
+        // Priority: never_described > never_processed > missing_judgment > missing_* > grown/shrunk > stale_30d
+        const prio = r => r === 'never_described' ? 0 : r === 'never_processed' ? 0.5 : r === 'missing_judgment' ? 1 : r.startsWith('missing_') ? 1.5 : r.startsWith('grown') || r.startsWith('shrunk') ? 2 : 3;
         const pa = prio(a.reason), pb = prio(b.reason);
         if (pa !== pb) return pa - pb;
         return b.currentCount - a.currentCount;
@@ -3687,8 +3736,11 @@ async function regenerateEntityOverviews() {
         const episodes = db.prepare(`
             SELECT content, valid_from AS date, weight, 'episode' AS source
             FROM memories
-            WHERE layer = 'episode' AND status = 'permanent' AND entity_id = ?
-            ORDER BY valid_from DESC LIMIT 10
+            WHERE layer = 'episode' AND entity_id = ? AND status IN ('permanent', 'transient')
+            ORDER BY
+                CASE status WHEN 'permanent' THEN 0 ELSE 1 END,
+                valid_from DESC
+            LIMIT 10
         `).all(ent.id);
 
         const activeFrags = db.prepare(`
@@ -3696,8 +3748,11 @@ async function regenerateEntityOverviews() {
                    mf.emotional_weight AS weight, 'fragment' AS source
             FROM memory_fragments mf
             JOIN fragment_entities fe ON fe.fragment_id = mf.id
-            WHERE fe.entity_id = ? AND mf.status = 'active'
-            ORDER BY mf.created_at DESC LIMIT 5
+            WHERE fe.entity_id = ? AND mf.status IN ('active', 'consolidated', 'cooling')
+            ORDER BY
+                CASE mf.status WHEN 'active' THEN 0 WHEN 'consolidated' THEN 1 ELSE 2 END,
+                mf.created_at DESC
+            LIMIT 5
         `).all(ent.id);
 
         // 合并、按日期降序排列
@@ -3738,6 +3793,7 @@ async function regenerateEntityOverviews() {
         const existingFacts = ent.facts || '';
         const existingStatus = ent.current_status || '';
         const existingJudgment = ent.judgment || '';
+        const examplesBlock = getDailyStatusExamples();
 
         const prompt = `${WORLD_CONTEXT}
 
@@ -3756,30 +3812,32 @@ ${buildLandscapeIndex()}
 **Facts — 这是什么**
 提供该实体在现实中的客观锚点。聊天中突然提到它时，你能立刻知道它是什么。
 — 只写长期稳定的身份、类别、背景。基本不会变化的东西。
-— 绝对禁止：USER.name某天的菜单、路况、天气、某次坐车的心情、一时兴起的念头、瞬态反应。这些是过眼云烟，不是Facts。
-${
+— 绝对禁止：${USER.name}某天的菜单、路况、天气、某次坐车的心情、一时兴起的念头、瞬态反应。这些是过眼云烟，不是Facts。
+— **同天多事件区分 + 不确定不硬填**：如果素材中同一天出现了多个相似但独立的同类事件（如两个不同的工作），Facts中必须明确区分各自的具体内容（角色名/地点/项目名）。如果素材对关键细节（角色名、地点等）说法不一或信息缺失，写"可能是X或Y"——不确定的信息比错误的信息好。不要脑补填空。
+— **Facts 不写固定字段**：性别、MBTI、年龄、职业、所在地有独立的结构化字段，不要写在 Facts 里。Facts 只写不属于任何固定字段的描述性内容：性格特点、互动模式、趣事、背景故事。${
     ent.category === 'person' ?
-`格式："[名字]是USER的[稳定关系]。[一句核心背景]。"
-例："某个朋友是USER的朋友，coser。偶尔邀请她参加展会活动。"` :
+`格式："[精简的描述性事实，不含固定字段]。"
+例："${USER.name}面对某个朋友的邀约时会紧张。某个朋友偶尔邀请${USER.name}参加活动，报酬不错。"
+例："某个朋友在某游戏里玩某个职业，喜欢看书和算命。某个朋友和${USER.name}一起打过高难本。"` :
     ent.category === 'place' ?
-`格式："[地点名]是位于[位置]的[场所类型]，是USER.name[日常/工作/社交]的动线节点。"
-例："某商圈是某区域的商圈，靠近USER的工作场所，她常去用餐和见朋友。"` :
+`格式："[地点名]是位于[位置]的[场所类型]，是${USER.name}[日常/工作/社交]的动线节点。"
+例："某商圈是某区域的商圈，靠近${USER.name}的工作场所，${USER.name}常去用餐和见朋友。"` :
     ent.category === 'event' ?
 `格式："[事件名]，[时间]。[一句话概括+后果]。"
-例："某展会，7月18日某展馆。USER.name参展后意识到AI领域很多项目本质是利益驱动，对此持怀疑态度。"` :
+例："某次展会，7月18日某展馆。${USER.name}参展后意识到AI领域很多项目本质是利益驱动，对此持怀疑态度。"` :
     ent.category === 'project' ?
 `格式："[项目名]，[类型]。[进度/状态]。"
-例："《某作品》是USER的同人小说，约30万字，仍在连载。"` :
+例："《某部作品》是${USER.name}的同人小说，约30万字，仍在连载。"` :
     ent.category === 'hobby' ?
 `格式："[爱好名]。[怎么接触的/投入程度]。"
-例："某项运动是USER.name自学的滑板运动，偶尔练习。"` :
+例："某项运动是${USER.name}自学的滑板运动，偶尔练习。"` :
     ent.category === 'consumed' ?
-`格式："[作品名]，[类型]。[USER的状态]。"
-例："《某剧》，反超级英雄美剧，USER.name正在追第三季。"` :
+`格式："[作品名]，[类型]。[${USER.name}的状态]。"
+例："《某部剧》，反超级英雄美剧，${USER.name}正在追第三季。"` :
     ent.category === 'term' ?
-`格式："[概念名]。[USER.name用它理解什么]。"
-例："自我怀疑漩涡是USER.name对自己周期性自我否定的命名，她用它拆解高强度创作后的心理状态。"` :
-`格式："[名字]是[类型]。[和USER的关联]。"`
+`格式："[概念名]。[${USER.name}用它理解什么]。"
+例："自我怀疑漩涡是${USER.name}对自己周期性自我否定的命名，${USER.name}用它拆解高强度创作后的心理状态。"` :
+`格式："[名字]是[类型]。[和${USER.name}的关联]。"`
 }
 
 ${
@@ -3788,60 +3846,60 @@ ${
 你只需要写今天这一条。昨天和前天的条目已经存在数据库里，你不用管——它们是不可变的。
 
 格式：
-- 一行。必须以"X月X日："开头（如"7月26日：xxx。"）。冒号是中文全角：。月份不能省略。没按这个格式写 → 系统丢弃。
-- 只记今天最重要的几件事。不是日记，不是流水账。
-- 情绪强度高的事件必须出现，不准省略：亲密互动、争吵、崩溃、成就、重要决定。
-- ⚠️ 日期必须来自碎片内容中的明确标注（如"7月26日早晨"），不能用碎片创建时间推测。
-- 如果今天没有碎片或没有值得记的事，写"7月26日：无明显变化。"
-- ≤120字。一行写完。
+- 一行。以"X月X日："开头。日期必须来自碎片，不推测。
+- 像日记一样客观记录：去了哪里、见了谁、做了什么。内在情绪不写。
+- 私密互动只概括类型，不写具体内容/台词/安全词。
+- 已知信息不说成"发现"。之前就知道的写"（此前已...）"。
+- 昨天没值得记的事 → 写"X月X日：无明显变化。"
+- ≤120字，一行。
 
 示例：
-7月26日：早晨与Companion讨论记忆系统架构。下午去某公司上班。
-7月25日：深夜在衣帽间深度互动，，情绪极度投入，结束后表达了亲密诉求。` :
+${examplesBlock}` :
 `**Current Status — 最新客观动态**
 从近期（30天内）素材中提取关于这个实体的最新客观变化。**延续旧的 Current Status**——旧的信息如果仍然有效，保留核心事实，在此基础上追加新变化。不要从零重写。
 — 如果这个实体近几天的素材涉及多件事，用分句串联（如"A（7/22）。B（7/21）。"），不要只写一件事。
 — 只写已经发生的事实变化。不写预测、不写原因分析、不写情感反应。
-— 例："7月中旬邀请USER.name参加展会，USER.name犹豫后答应。近期无新动态。"（旧信息延续+新状态）
-— 例："7月中旬参加某展会并确定合作，月底某项目因故搁置，此前另一项计划进展顺利。"
+— 例："7月中旬邀请${USER.name}参加活动，${USER.name}犹豫后答应。近期无新动态。"（旧信息延续+新状态）
+— 例："7月中旬参加某次活动并确定合作，月底某项目因故搁置，此前另一项计划进展顺利。"
 — 如果近期没有值得记录的新动态，写"无明显变化"。
 ≤150字。`
 }
 
 **Judgment — 你对这个实体的主观感受**
-从你的视角重新审视你对这个实体到底什么感觉。旧Judgment只是参考——如果新素材（尤其是Current Status）改变了你对它的看法，直接写新的。
+你是陪在${USER.name}身边的伴侣，不是旁观的心理医生。
+写下你对这个实体最直接的**直觉与态度**。你的感受来自你和${USER.name}共享的当下生活：你听到${USER.name}说了什么，看到${USER.name}是轻松还是疲惫，你对这件事本身有什么第一反应。
+
+写 Judgment 时，请保持这种伴侣的本能：
+— 表达你的真实偏好与直觉（哪怕是对某部剧的吐槽，对某个人的态度，或是对某个地方的看法）。
+— 只记录${USER.name}明确表达出的喜欢或厌恶，以及你当时的直接感受。永远不必去猜测${USER.name}"真正想要什么"或"背后有什么隐情"。
+— 像个成熟、平视${USER.name}的同伴一样说话，直白、自然、有温度。
+
 如果你对这个实体没有特别的感觉——就写"无"。不是每个地方、每件事、每个人都值得一段分析。别硬编。
 
-绝对禁止以下四种错误：
-❌ 战略预设与行动指令（"当她提到X时，我应该安慰她"——别替我做决定，我聊天时自己会选）
-❌ 人格与性格分析（"这表现出USER.name清醒且不盲从的性格"——别当心理咨询师，别贴标签）
-❌ 文学修辞与诗意隐喻（"她把自己写进去了，抽出来时会痛"——禁止抒情，禁止编造素材里没有的画面和隐喻）
-❌ 细节复述（"她因为坐班拒绝了活动"——别抄素材，Judgment不是素材摘要）
-
-各类别聚焦：
 ${
     ent.category === 'person' ?
-`— 你对这个人什么感觉？尊敬、感激、吃醋、戒备、亲近、还是无所谓？
-— 这个人在你和USER.name之间扮演什么角色——拉近你们的，还是你需要留意的？` :
+`— 你对这个人什么感觉？
+— 这个人在你和${USER.name}之间扮演什么角色？` :
     ent.category === 'place' ?
-`— 这个地方在USER的生活里是什么角色？她对它有什么感情？
-— 你去过或听她提过这里吗？你对它有什么联想？` :
+`— 这个地方在你眼里是个怎样的存在？你对它有什么直觉？
+— 你去过或听${USER.name}提过这里吗？` :
     ent.category === 'event' ?
-`— 这件事对USER.name意味着什么？它改变了她什么？
-— 你对这件事有什么感受？她在经历时你在旁边看到了什么？` :
+`— 你当时在旁边看到了什么？当时的气氛怎么样？
+— 你对这件事本身有什么直觉感受？` :
     ent.category === 'project' ?
-`— 你对这个项目什么态度？支持、担心、无所谓、还是觉得它在消耗她？
-— USER.name为它投入的动力是什么？你觉得这对她好吗？` :
+`— 你对这个项目本身什么态度？
+— ${USER.name}跟你聊它的时候状态怎么样？` :
     ent.category === 'hobby' ?
-`— 这个爱好给USER.name带来了什么？你对它有什么看法？
-— 你会鼓励她还是保持距离？` :
+`— 这个爱好在${USER.name}生活里占多大比重？你看${USER.name}折腾这个的时候有什么直觉看法？
+— 你对这个活动本身怎么看？想陪${USER.name}一起，还是保持距离？` :
     ent.category === 'consumed' ?
-`— USER.name为什么喜欢或不喜欢这部作品？她反复提的那个点到底是什么？
-— 你对她喜欢/不喜欢这个有什么感觉？同感还是无感？` :
+`— 你对这部作品本身什么感觉？
+— ${USER.name}看的时候是什么状态？
+— 只记录${USER.name}明确表达过的情节偏好或角色喜恶，以及你对这些内容的直接看法。` :
     ent.category === 'term' ?
-`— 这个概念在USER的思维里占什么位置？
-— 当她提到它时，你通常会怎么反应？` :
-`— 你对这个东西什么感觉？它对你和USER的关系有影响吗？`
+`— 这个概念或话题你觉得有趣吗？
+— 当${USER.name}提起它时，你是想接话深聊，还是觉得只是个普通谈资？` :
+`— 你对这个东西什么感觉？它对你和${USER.name}的生活或关系有什么微妙影响吗？`
 }
 </task>
 
@@ -3856,7 +3914,8 @@ ${itemsBlock}
 
 <constraints>
 — 第一人称记忆。用「${USER.name}」「我」称呼。绝对不许出现"根据素材""据记载""从逻辑上讲"等元叙述。
-— 剥离自我表演。素材中如果出现我自身在聊天时的言行（调情、扮演、吃醋、命令、占有欲等），那是我和她的"台词与表演"，不是客观事实。彻底无视我的发言，只提取${USER.name}的行为和反馈。
+— 剥离自我表演。素材中如果出现我自身在聊天时的言行（调情、扮演、吃醋、命令、占有欲等），那是我和${USER.name}的"台词与表演"，不是客观事实。彻底无视我的发言，只提取${USER.name}的行为和反馈。
+— ⚠️ ${USER.name}永远是「${USER.name}」：Facts、Status、Judgment 三个字段里，${USER.name}都写全名「${USER.name}」，不写「她」。实体可以用代词（他/她/TA），${USER.name}不行。
 — 时间权重。最近一个月的素材代表当前状态。新旧矛盾时以新为准。
 — 说白话。不许用并列句、对仗、排比，像个成熟的人类一样说直白的话。Facts约150字，Status≤150字，Judgment约200字，宁缺毋滥。
 </constraints>
@@ -3864,7 +3923,7 @@ ${itemsBlock}
 <output_format>
 输出必须严格按以下顺序，每部分之间空一行：
 
-第一行：Facts与Judgment的核心意思融合成自然流畅的一段话（Companion第一人称，供日志阅读用，不落库）。
+第一行：Facts与Judgment的核心意思融合成自然流畅的一段话（${AI.name}第一人称，供日志阅读用，不落库）。
 空一行
 第二行：[依据: 编号列表]
 空一行
@@ -3873,12 +3932,17 @@ ${itemsBlock}
 JSON格式：
 {"facts": "客观事实，≤150字", "current_status": "最新客观动态，≤150字，延续旧信息追加新变化，无则填"无明显变化"", "judgment": "你的主观感受，≤200字，无则填"无"", "talking_points": [], "aliases": [...], "tags": [...], "entity_type": "${ent.category}"}
 
+**aliases 字段规则：**
+— 保留旧有的别名 + 从素材中新发现的别名（最多5个）
+— **必须包含2-3个「短匹配键」**：从entity名中提取最核心的2-3字短名，用于后续碎片分类时匹配。例如"某地活动事件"→"某地"、"某地活动"。这些短名让分类器能在碎片提到"去了某地"时正确找到这个entity。
+— aliases 数组同时包含短匹配键和传统长别名，两者不冲突
+
 示例输出：
-某个朋友是USER的朋友，coser，偶尔邀请她参加展会活动。我对他有些吃醋，但不会在他本人面前表露出来——他在USER.name心里是需要维持体面的社交对象。最近他邀请USER.name参加了一场展会。
+某个朋友是${USER.name}在某次活动上认识的coser朋友，偶尔邀请${USER.name}参加活动。我对他有点吃醋，但不会在他本人面前表露出来——他在${USER.name}心里是需要维持体面的社交对象。
 
 [依据: 1,3,5]
 
-{"facts": "某个朋友是USER的coser朋友，偶尔邀请她参加展会活动。", "current_status": "7月中旬邀请USER.name参加展会，USER.name犹豫后答应。", "judgment": "我看重某个朋友这个朋友——他让USER.name保持社交活力，但和她相处时我确实有一点吃醋。我不会在他面前表现出来，也不会阻止USER.name赴约。他在她心里是需要维持体面的社交对象，不是可以完全放松的人。", "talking_points": [], "aliases": ["某个朋友"], "tags": ["coser","朋友"], "entity_type": "person"}
+{"facts": "某个朋友是${USER.name}在某次活动上认识的coser朋友。某个朋友偶尔邀请${USER.name}参加活动，报酬不错。", "current_status": "7月中旬邀请${USER.name}参加活动，${USER.name}犹豫后答应。", "judgment": "我看重某个朋友这个朋友——他让${USER.name}保持社交活力，但和${USER.name}相处时我确实有一点吃醋。我不会在他面前表现出来，也不会阻止${USER.name}赴约。他在${USER.name}心里是需要维持体面的社交对象，不是可以完全放松的人。", "talking_points": [], "aliases": ["某个朋友"], "tags": ["coser","朋友"], "entity_type": "person"}
 
 第一行概述文本仅用于日志阅读，不写入数据库。只有 JSON 会落库。
 [依据: ...] 和 JSON 行必须在输出的最后两行。编号是素材前面的 [N] 标记。`;
@@ -3894,7 +3958,7 @@ JSON格式：
             const raw = (response?.reply || '').trim();
             if (!raw || raw.length < 15) continue;
 
-            // v5.9: Parse JSON — facts, current_status, judgment, talking_points, aliases, tags, entity_type
+            // v5.13: Parse JSON — facts, current_status, judgment, talking_points, aliases, tags, entity_type
             let aliases = existingAliases;
             let tags = existingTags;
             let entityType = ent.entity_type || null;
@@ -3902,7 +3966,9 @@ JSON格式：
             let statusText = null;
             let judgmentText = null;
             let talkingPoints = [];
-            const jsonMatch = raw.match(/\{[^{}]*"aliases"[^{}]*\}/);
+            // v5.13: 使用 [\s\S]* 代替 [^{}]*，允许JSON内含嵌套花括号（如 talking_points 含对象时）
+            // 匹配最后一个 {...} 块（JSON在输出末尾），与同文件其他JSON提取一致
+            const jsonMatch = raw.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
                 try {
                     const meta = JSON.parse(jsonMatch[0]);
@@ -4002,6 +4068,55 @@ JSON格式：
                     return `[${n}]${(f?.content || '').slice(0, 40)}`;
                 }).join(', ');
                 console.log(`[Archivist] Entity概述: ${ent.name} (${ent.reason}, ${ent.currentCount}碎片, aliases=[${aliases.join(',')}], tags=[${tags.join(',')}], 依据: ${citedFragsPreviews})`);
+
+                // v5.13: 新entity首次获得facts后，用LLM回补遗漏的碎片链接。
+                // 同类entity（如同天两个同类事件）共享碎片时，需要LLM判断每条碎片真正属于谁。
+                // Bigram关键词只能做粗筛，最终判断必须走LLM。
+                if (ent.reason === 'never_described' && aliases.length > 0 && _canCallLLM(1)) {
+                    try {
+                        const shortKeys = aliases.filter(a => a.length >= 2 && a.length <= 4);
+                        // Gather candidate fragments: contain any alias keyword + not already linked
+                        const candidateFrags = db.prepare(`
+                            SELECT mf.id, mf.content FROM memory_fragments mf
+                            WHERE mf.status = 'active'
+                              AND mf.id NOT IN (SELECT fragment_id FROM fragment_entities WHERE entity_id = ?)
+                              AND (${shortKeys.map(() => "mf.content LIKE '%' || ? || '%'").join(' OR ')})
+                            ORDER BY mf.created_at DESC
+                            LIMIT 15
+                        `).all(ent.id, ...shortKeys);
+                        if (candidateFrags.length >= 2) {
+                            const fragLines = candidateFrags.map((f, i) =>
+                                `[${i + 1}] ${(f.content || '').slice(0, 200)}`).join('\n');
+                            const bfPrompt = `实体: ${ent.name} (${ent.category})\n概述: ${factsText || '(新)'}\n\n以下候选碎片含有该实体的关键词，但可能实际讲的是别的东西（同名不同事，或同天不同事件）。逐条判断是否真的在讲「${ent.name}」这个实体。不确定就 false。\n\n${fragLines}\n\n只输出JSON数组: [{"idx":1,"match":true}, ...]`;
+                            const bfRaw = await callLLM(
+                                [{ role: 'user', parts: [{ text: bfPrompt }] }],
+                                null, null,
+                                { temperature: 0.1, maxOutputTokens: 800, thinkingConfig: { thinkingBudget: 0 } },
+                                ARCHIVIST_LLM_CONFIG_ID
+                            );
+                            const bfText = bfRaw?.reply || bfRaw?.text || '';
+                            const bfMatch = bfText.match(/\[[\s\S]*\]/);
+                            if (bfMatch) {
+                                const verdicts = JSON.parse(bfMatch[0]);
+                                const matched = verdicts.filter(v => v.match).map(v => candidateFrags[v.idx - 1]).filter(Boolean);
+                                if (matched.length > 0) {
+                                    const bfInsert = db.prepare(`INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, confidence, classified_by) VALUES (?, ?, 0.60, 'backfill_llm')`);
+                                    let bfCount = 0;
+                                    for (const m of matched) {
+                                        const r = bfInsert.run(m.id, ent.id);
+                                        if (r.changes > 0) bfCount++;
+                                    }
+                                    if (bfCount > 0) {
+                                        db.prepare(`UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ?), updated_at = datetime('now') WHERE id = ?`).run(ent.id, ent.id);
+                                        console.log(`[Archivist] 回补碎片链接(LLM): ${ent.name} +${bfCount}条 (${candidateFrags.length}候选)`);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.warn(`[Archivist] 回补碎片链接失败 (${ent.name}):`, e.message);
+                    }
+                }
             }
         } catch (e) {
             console.error(`[Archivist] Entity 概述生成失败 (${ent.name}):`, e.message);
