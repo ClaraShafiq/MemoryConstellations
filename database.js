@@ -1401,6 +1401,23 @@ function initDatabase() {
          ALTER TABLE entity_profiles ADD COLUMN age_text TEXT DEFAULT NULL;
          ALTER TABLE entity_profiles ADD COLUMN birthday TEXT DEFAULT NULL;`);
 
+    // ── 会话模式标记：messages + memory_fragments 的 chat_mode（过滤非对话消息用）──
+    runMigration(99, 'messages.chat_mode — 会话模式标记',
+        `ALTER TABLE messages ADD COLUMN chat_mode TEXT DEFAULT 'default';`);
+    runMigration(100, 'memory_fragments.chat_mode — 记忆片段模式标记',
+        `ALTER TABLE memory_fragments ADD COLUMN chat_mode TEXT DEFAULT 'default';`);
+    // 回填：NULL → 'default'，is_rp=1 → 'roleplay'
+    try {
+        const nullMsgs = db.prepare(`UPDATE messages SET chat_mode = 'default' WHERE chat_mode IS NULL`).run();
+        const nullFrags = db.prepare(`UPDATE memory_fragments SET chat_mode = 'default' WHERE chat_mode IS NULL`).run();
+        const rpMsgs = db.prepare(`UPDATE messages SET chat_mode = 'roleplay' WHERE is_rp = 1 AND chat_mode = 'default'`).run();
+        const rpFrags = db.prepare(`UPDATE memory_fragments SET chat_mode = 'roleplay' WHERE is_rp = 1 AND chat_mode = 'default'`).run();
+        const total = nullMsgs.changes + nullFrags.changes + rpMsgs.changes + rpFrags.changes;
+        if (total > 0) console.log(`[migration] chat_mode 回填: NULL→default ${nullMsgs.changes + nullFrags.changes}条, RP→roleplay ${rpMsgs.changes + rpFrags.changes}条`);
+    } catch (e) {
+        console.warn('[migration] chat_mode 回填非致命错误:', e.message);
+    }
+
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {
         const existingRoots = db.prepare('SELECT COUNT(*) as c FROM memory_ontology WHERE parent_id IS NULL').get();
