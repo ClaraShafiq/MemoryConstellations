@@ -5,6 +5,7 @@
 const { getDb } = require('../database');
 const { callLLM } = require('./llm');
 const { WORLD_CONTEXT } = require('./worldContext');
+const { USER, AI } = require('./nameResolver');
 
 const ENTITY_EXTRACT_PROMPT = `${WORLD_CONTEXT}
 
@@ -76,6 +77,13 @@ async function updateEntityProfiles(newEpisodes) {
     for (const u of result.updates) {
         if (!u.entity || !u.new_status) continue;
 
+        // v5.13: 主角的 current_status 由每日 cron (generateDailyEntityStatus) 独占维护。
+        // updateEntityProfiles 是深循环 consolidator 的副产品，不能覆盖主角的日式日志。
+        if (u.entity === USER.name) {
+            console.log(`[EntityProfile] ${USER.name} 跳过（每日cron独占维护 current_status）`);
+            continue;
+        }
+
         // 时间校验：新 status_since 不比旧的新 → 跳过（防止过期信息覆盖新信息）
         const newSince = u.status_since || '';
         const oldSince = existingMap.get(u.entity) || '';
@@ -135,7 +143,8 @@ function getEntityContext(fragments) {
     const idList = [...entityIds];
     const profiles = db.prepare(`
         SELECT id, name, category, related_entities, overview_updated_at, fragment_count,
-               facts, current_status, judgment
+               facts, current_status, judgment, gender,
+               relationship_category, mbti, location, occupation, age_text
         FROM entity_profiles
         WHERE id IN (${idList.map(() => '?').join(',')})
           AND name NOT IN (?, ?)
@@ -155,13 +164,25 @@ function getEntityContext(fragments) {
     }
 
     return profiles.map(p => {
-        let line = `※ ${p.name}（${p.category}）`;
+        // Build compact header with structured fields for person entities
+        const badges = [];
+        if (p.relationship_category) badges.push(p.relationship_category);
+        if (p.mbti) badges.push(p.mbti);
+        if (p.location) badges.push(p.location);
+        if (p.occupation) badges.push(p.occupation);
+        if (p.age_text) badges.push(p.age_text);
+        const headerExtra = badges.length > 0 ? ` | ${badges.join(' · ')}` : '';
+        // 性别直接挂在名字旁——是事实，不是指令
+        const genderTag = (p.gender && p.gender !== 'unknown') ? ` — ${p.gender}` : '';
+        let line = `※ ${p.name}${genderTag}（${p.category}${headerExtra}）`;
 
         if (p.facts) {
             line += `\n  Facts: ${p.facts}`;
         }
         if (p.current_status) {
-            line += `\n  Status: ${p.current_status}`;
+            // 日式日志只注入最新3行，节省token
+            const lines = p.current_status.replace(/\r/g, '').split('\n').filter(l => l.trim()).slice(0, 3);
+            line += `\n  Status: ${lines.join('\n')}`;
         }
         if (p.judgment) {
             line += `\n  Judgment: 你回想起这个以后，内心升起的想法是"${p.judgment}"`;
