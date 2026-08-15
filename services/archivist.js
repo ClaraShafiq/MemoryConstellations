@@ -2561,7 +2561,7 @@ async function discoverRelatedEntities() {
     `).all(...SKIP_NAMES, ...SKIP_NAMES);
 
     // 语义关系检测：零共享碎片但有日期重叠的实体对 → LLM 判断
-    // （某地区某城市之旅 vs 某景点 — 碎片内容不重叠但属于同一旅行）
+    // （某地之旅 vs 某景点 — 碎片内容不重叠但属于同一旅行）
     if (pairs.length < 20 && _canCallLLM(2)) {
         const semanticPairs = db.prepare(`
             SELECT DISTINCT ea.id AS a_id, ea.name AS a_name, ea.category AS a_cat,
