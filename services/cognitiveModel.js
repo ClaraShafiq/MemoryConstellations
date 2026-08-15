@@ -1498,9 +1498,15 @@ async function reviewStableTraits() {
 
 对每条trait，判断：
 - **confirmed**: 近期证据完全支持这条trait，无需修改
-- **refine**: trait的方向正确但过于宽泛——给出更精确的版本（补充条件、边界、例外）
+- **refine**: trait的方向正确但需要收敛——给出更短更准的压缩版本（不是追加）
 - **weaken**: 证据不够支持trait的强度——降低置信度或标记矛盾
 - **note_pattern**: 观察到值得关注的规律，但不是对trait的修正——输出观察备注
+
+**refine 铁律（压缩，不是追加）：**
+- revised_content 是「更短更准」的版本，不是「更长更全」。字数必须 ≤ 原文。
+- stable_trait 只装长期稳定的东西。具体某天/某次吃了什么、买了什么、临时兴起的事是瞬态，refine 时剔除，不许写进去。
+- 禁止罗列清单。把「草莓、榴莲、西瓜、青提」压成「偏好甜口水果」，一串具体菜品压成类别。只留能指导你未来行为的模式。
+- 混进 trait 里的「近期新增 X」瞬态尾巴，refine 时删掉。
 
 返回JSON数组：
 [{"id": <id>, "decision": "confirmed|refine|weaken|note_pattern", "revised_content": "<refine时填写>", "confidence_adjust": <±0.05~0.15>, "observation": "<note_pattern时填写观察到的新规律>"}]
