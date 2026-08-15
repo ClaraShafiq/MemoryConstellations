@@ -151,20 +151,20 @@ async function buildSmartContext(userMessage, healthStatus, skipVectorMemory = f
             const libText = formatHybridContext(libFragments);
             if (libText) {
                 dynamicParts.push(`<memory_context>
-[已存储记忆库 — 以下是你自己的记忆，不是Clara刚说的新信息]
+[已存储记忆库 — 以下是你自己的记忆，不是${USER.name}刚说的新信息]
 
 每条记忆标注了「引用权限」和「距今时间」：
 
 【可引用】→ 确定的事实，可以直接引用
 【需谨慎】→ 用"我印象里""好像是……"开头，留纠正空间
-【仅联想】→ 仅供你自己联想参考，不要当作确定事实告诉Clara。如果想提，说"我好像突然想起……但不太确定"
+【仅联想】→ 仅供你自己联想参考，不要当作确定事实告诉${USER.name}。如果想提，说"我好像突然想起……但不太确定"
 
 时间感觉：
 - 15天以内 → "最近"
 - 1-3个月 → "之前"或"有一阵了"
 - 超过3个月 → 别表现出刚发生的感觉
 
-关于纠正：如果Clara说"不对"或"不是那次"，接受她的纠正，不要搬出记忆库辩解——记忆库本来就是碎片化的，她比你清楚。
+关于纠正：如果${USER.name}说"不对"或"不是那次"，接受${USER.pronoun}的纠正，不要搬出记忆库辩解——记忆库本来就是碎片化的，${USER.pronoun}比你清楚。
 ${libText}
 </memory_context>`);
                 estimatedTokens += Math.ceil(libText.length / 4);
@@ -182,7 +182,7 @@ ${libText}
                 try {
                     const entityCtx = getEntityContext(libFragments);
                     if (entityCtx) {
-                        dynamicParts.push(`<entity_context>\n以下是记忆中涉及人物的最新近况（来自{ai}的记忆档案）：\n${entityCtx}\n</entity_context>`);
+                        dynamicParts.push(`<entity_context>\n以下是记忆中涉及人物的最新近况（来自${AI.name}的记忆档案）：\n${entityCtx}\n</entity_context>`);
                         estimatedTokens += Math.ceil(entityCtx.length / 4);
                     }
                 } catch (_) {}
@@ -194,9 +194,9 @@ ${libText}
 
     // Saga 不再通过长沉默全量注入。
     // Sagas 现在通过 getEntityContext() 按实体关联注入 ——
-    // 当 Draco 在对话中遇到某个星座实体时，自动展示相关的叙事弧线。
+    // 当 Companion 在对话中遇到某个星座实体时，自动展示相关的叙事弧线。
 
-    // Clara Intuition — context-triggered cognitive intuition
+    // User Intuition — context-triggered cognitive intuition
     // Keyword-first matching: only injects traits/hypotheses whose tags match the conversation.
     // immutable_facts and current_state are always included (token cost is minimal).
     // Returns { text, signals } — signals forwarded to Jiwen for parameter tuning.
@@ -216,7 +216,7 @@ ${libText}
             }
         }
     } catch (e) {
-        console.error('ClaraIntuition injection failed:', e.message);
+        console.error('UserIntuition injection failed:', e.message);
     }
 
     // 健康简报

@@ -1,7 +1,7 @@
 // =================================================================
 // 共享世界观上下文 — 所有 LLM 提取/整合 prompt 的通用前缀
 //
-// v5.0: 从 memory_config.json 动态生成，不再硬编码 Clara/Draco。
+// v5.0: 从 memory_config.json 动态生成，不再硬编码具体人名。
 // 开源后用户只需修改 config，所有消费端自动生效。
 //
 // 消费端清单（新增提取功能时必查）:
@@ -20,7 +20,7 @@ ${AI.core_traits}
 
 ${USER.name}是谁：
 ${USER.short_desc}
-她渴望对等关系，哪怕哭时也会拆解自己为什么哭。
+${USER.pronoun}渴望对等关系，哪怕哭时也会拆解自己为什么哭。
 
 ${AI.name}和${USER.name}的关系：
 - ${REL.user_role}
