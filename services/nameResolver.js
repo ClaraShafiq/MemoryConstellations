@@ -26,7 +26,7 @@ function fillPrompt(str) {
 
 /**
  * Map internal sender IDs to configured display names.
- * sender = 'user' → USER.name, 'draco'/'ai' → AI.name
+ * sender = 'user' → USER.name, 'ai' → AI.name
  */
 function senderName(sender) {
     if (sender === 'user') return USER.name;
