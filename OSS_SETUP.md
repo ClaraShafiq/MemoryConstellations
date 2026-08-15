@@ -282,3 +282,36 @@ node scripts/import_memory.js backup.jsonl
 ```
 
 默认跳过已存在的记录，可安全重复导入。导出文件是纯文本 JSONL，可直接 diff / 查看 / 归档。
+
+---
+
+## 7. 接入聊天机器人（旁路攒记忆）
+
+记忆库是「旁路管线」——它不负责回复，只接收聊天记录、提取记忆。你的 AI 机器人（如 AstrBot / SnowLuma 链路）继续做自己的对话，把每条消息转发给记忆库即可。
+
+### 7.1 接收消息的接口
+
+`POST /api/messages`（无鉴权，仅供内网/localhost 使用，别暴露公网）：
+
+```bash
+curl -X POST http://localhost:3000/api/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"sender":"user","content":"今天好累","timestamp":"2026-08-15 14:30:00"}'
+```
+
+支持三种格式（`sender` 映射：`user`/`human`/`我`→用户，`assistant`/`ai`/`bot`→机器人）：
+
+```json
+{"sender":"user","content":"...","timestamp":"..."}          // 简单格式（推荐）
+[{"sender":"user","content":"..."},{"sender":"bot","content":"..."}]  // 批量
+{"post_type":"message","user_id":111,"self_id":456,"raw_message":"...","time":1755234600}  // OneBot v11 事件
+```
+
+### 7.2 在 AstrBot 里转发
+
+AstrBot 收到 QQ 消息（经 SnowLuma 的 OneBot v11）后，把消息 POST 到上面的 `/api/messages` 即可。你可以：
+
+- 用 AstrBot 的**插件/事件钩子**，在收到消息时调用 `POST /api/messages`，把 `sender`（用户 or 机器人）、`content`、`timestamp` 带上；
+- 或者用 SnowLuma 的 OneBot HTTP 上报，直接指向记忆库（用上面的 OneBot 事件格式）。
+
+消息进来后，Scribe 会在沉默期自动提取碎片，星图随之生长。回复的事完全由 AstrBot 自己的 LLM 负责，记忆库不碰。
