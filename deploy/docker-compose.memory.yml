@@ -21,8 +21,7 @@
       # ── 必填：至少配一个 LLM API key（记忆管线用）──
       - API_KEY=改成你的LLMkey
       # - GEMINI_API_KEY=或填Gemini的key
-      # ⚠️ 待办：memory.js 的 CHROMA_URL 还是写死的 127.0.0.1:7707，
-      #    等改成读环境变量后，这里加 - CHROMA_URL=http://chroma:7707
+      - CHROMA_URL=http://chroma:7707     # 向量检索服务地址（chroma 容器）
     volumes:
       - ./memory-data:/app/data          # 持久化数据库 + 配置
 
