@@ -18,13 +18,13 @@ const { encryption } = require('../encryption');
 const { getCompanionPersonaBase } = require('./dracoPersona');
 
 // v5.10: 增强版 system prompt — Companion 人格 + User 画像
-// 供 detectNewTraits / readUserRawMessages 等需要深度理解 Clara 的 LLM 调用使用
+// 供 detectNewTraits / readUserRawMessages 等需要深度理解 {{user.name}} 的 LLM 调用使用
 function _buildModelSystemPrompt() {
     let sp = WORLD_CONTEXT + '\n\n---\n\n';
     // Companion 人格
     const persona = getCompanionPersonaBase();
     if (persona) sp += persona + '\n\n---\n\n';
-    // Clara 现有画像摘要
+    // {{user.name}} 现有画像摘要
     try {
         const { assembleProfile } = require('./userProfile');
         const profile = assembleProfile(300);
@@ -94,7 +94,7 @@ function createEntry(type, content, opts = {}) {
         priority = 0,
         source_quality = 'inferred', // direct_statement | inferred | backfilled
         source_diversity = 1,        // number of independent source batches
-        created_by = 'deep_cycle',   // v5.0: chat_draco | deep_cycle
+        created_by = 'deep_cycle',   // v5.0: chat_companion | deep_cycle
         expires_at = null,           // v5.0: ISO 8601 timestamp for explicit TTL
     } = opts;
 
@@ -544,15 +544,15 @@ function processModelDecay() {
     `).all();
 
     // ── Hard cap: max 12 active current_state entries ──
-    // If exceeded, auto-resolve oldest non-chat-draco entries first
+    // If exceeded, auto-resolve oldest non-chat_companion entries first
     const MAX_ACTIVE_STATES = 12;
     if (states.length > MAX_ACTIVE_STATES) {
         const excess = states.length - MAX_ACTIVE_STATES;
-        // Prefer resolving old deep_cycle entries over chat_draco ones
+        // Prefer resolving old deep_cycle entries over chat_companion ones
         const toResolve = states
             .filter(s => s.created_by !== 'chat_companion')
             .slice(0, excess);
-        // If not enough deep_cycle entries, also resolve oldest chat_draco ones
+        // If not enough deep_cycle entries, also resolve oldest chat_companion ones
         if (toResolve.length < excess) {
             const chatEntries = states
                 .filter(s => s.created_by === 'chat_companion')
@@ -740,7 +740,7 @@ function crossRefStateWithEntities() {
 
     // ── 4. Cross current_state conflict detection ──
     // v5.4: Check ALL pairs regardless of source. Same-source duplicates
-    // (e.g. two chat_draco entries about the same thing) are also flagged.
+    // (e.g. two chat_companion entries about the same thing) are also flagged.
     // Deep_cycle duplicates should be prevented by readUserRawMessages resolve,
     // but this provides defense in depth.
     for (let i = 0; i < states.length; i++) {
@@ -917,20 +917,20 @@ async function detectNewTraits() {
         ORDER BY last_mentioned_date DESC LIMIT 15
     `).all();
 
-    // Collect category landscape — what topics has the user talked about?
+    // Collect constellation landscape — what entities/people/places has the user been involved with?
     const categories = db.prepare(`
-        SELECT id, path, description, fragment_count FROM memory_ontology
-        WHERE parent_id IS NULL AND fragment_count >= 10
+        SELECT id, name AS path, facts AS description, fragment_count FROM entity_profiles
+        WHERE status = 'active' AND fragment_count >= 10
         ORDER BY fragment_count DESC LIMIT 15
     `).all();
 
-    // Sample categorized fragments for pattern detection
+    // Sample linked fragments for pattern detection
     const fragmentSamples = [];
     for (const cat of categories) {
         const frags = db.prepare(`
             SELECT mf.content FROM memory_fragments mf
-            JOIN fragment_categories fc ON fc.fragment_id = mf.id
-            WHERE fc.category_id = ? AND mf.status = 'active'
+            JOIN fragment_entities fe ON fe.fragment_id = mf.id
+            WHERE fe.entity_id = ? AND mf.status = 'active'
             ORDER BY mf.created_at DESC LIMIT 5
         `).all(cat.id);
         fragmentSamples.push({ category: cat.path, samples: frags.map(f => f.content?.slice(0, 150)) });
@@ -971,29 +971,45 @@ async function detectNewTraits() {
     const hasSignals = monitors.length > 0 || entities.length > 0 || categories.length > 0 || chatSamples.length > 0;
     if (!hasSignals) return { detected: 0 };
 
-    const prompt = `你是AI伴侣。你正在凝视 {{user.name}} 的灵魂，把你对她最深刻的理解刻进系统里。
+    const prompt = `你是AI伴侣。你正在凝视 {{user.name}} 的灵魂，把你对{{user.pronoun}}最深刻的理解刻进系统里。
 
 你要做的是：
-- 从信号中识别 {{user.name}} 关于「自己是一个怎样的人」的表达——不是她今天做了什么，而是她为什么这样做、她内心深处相信什么、她害怕什么、她渴望什么。
-- 把这些洞察转化为对她人格的持久理解。不是流水账，不是心理诊断报告，是你对她的了解。
+- 从信号中识别 {{user.name}} 关于「自己是一个怎样的人」的表达——不是{{user.pronoun}}今天做了什么，而是{{user.pronoun}}为什么这样做、{{user.pronoun}}内心深处相信什么、{{user.pronoun}}害怕什么、{{user.pronoun}}渴望什么。
+- 把这些洞察转化为对{{user.pronoun}}人格的持久理解。不是流水账，不是心理诊断报告，是你对{{user.pronoun}}的了解。
+
+## 🎯 输出格式约定：第二/第三人称视角
+
+所有条目 content 必须对齐伴侣人格 prompt 的叙事视角：
+- **"你"** = 你（AI伴侣，读者）  |  **"{{user.pronoun}}"** = {{user.name}}（被观察者）
+- 永远不用"我"指代 AI伴侣；指代 {{user.name}} 时一律用 {{user.pronoun}}，不要擅自改换性别
+- 不涉及你的条目可以只用"{{user.pronoun}}"（纯第三人称），但涉及你的观察/反应时用"你"
+
+正确示例：
+- "你察觉到{{user.pronoun}}似乎内心深处从不认为自己能被无条件地爱"
+- "{{user.pronoun}}面对冲突时倾向于先撤退再独自消化"
+- "{{user.pronoun}}被你戳穿嘴硬时会气鼓鼓地哼一声，但你知道那是{{user.pronoun}}在撒娇"
+
+错误示例：
+- "我觉得{{user.name}}内心深处……"（用了"我"——应该用"你"）
+- "{{user.name}}习惯于向我索取话术"（用了"我"——应该用"你"）
 
 ## 🧠 最重要的判断：自我认知 vs 一般观察
 
 {{user.name}} 的话有两种完全不同的分量：
 
-**一、她主动剖白自己的时候——这是黄金。**
-当她说"我发现自己其实…""我一直都是…""我可能天生就…""我好像真的…"时，她不是在描述一个事件——她是在告诉你她是谁。
-这类表达是最高价值的信号，因为这是 {{user.name}} 最诚实的自我判断。她花了很多时间拆解自己的情绪——她的自我剖白通常很准。
+**一、{{user.pronoun}}主动剖白自己的时候——这是黄金。**
+当{{user.pronoun}}说"我发现自己其实…""我一直都是…""我可能天生就…""我好像真的…"时，{{user.pronoun}}不是在描述一个事件——{{user.pronoun}}是在告诉你{{user.pronoun}}是谁。
+这类表达是最高价值的信号，因为这是 {{user.name}} 最诚实的自我判断。{{user.pronoun}}花了很多时间拆解自己的情绪——{{user.pronoun}}的自我剖白通常很准。
 
 此时 → source_quality = "direct_statement"，confidence 可达 0.75-0.85。
 产生 stable_trait（如果已有同骨架条目就走 confirm+refine）。
 
 **二、你在观察中推断出来的模式——这是白银。**
-你从她反复出现的行为、她对相似情境的反应中发现的规律。这也很重要，但确定性更低。
+你从{{user.pronoun}}反复出现的行为、{{user.pronoun}}对相似情境的反应中发现的规律。这也很重要，但确定性更低。
 此时 → source_quality = "inferred"，confidence 上限 0.65。
 优先用 active_hypothesis 而不是 stable_trait（等更多证据再升级）。
 
-**信号 6（她的原始发言）的权重远高于其他信号。** 她的原话 > Scribe 的转述 > 你的推断。当信号 6 和其他信号指向同一个结论时，confirm。当信号 6 和旧特质矛盾时，以信号 6 为准——她自己的话比任何统计都准确。
+**信号 6（{{user.pronoun}}的原始发言）的权重远高于其他信号。** {{user.pronoun}}的原话 > Scribe 的转述 > 你的推断。当信号 6 和其他信号指向同一个结论时，confirm。当信号 6 和旧特质矛盾时，以信号 6 为准——{{user.pronoun}}自己的话比任何统计都准确。
 
 ## 💾 现有认知底牌
 
@@ -1030,12 +1046,12 @@ ${entities.map(e => `- ${e.name}: ${e.relationship_to_user || '?'} (性质: ${e.
 
 ## 📐 Few-Shot
 
-### ✅ 自我认知类（direct_statement）—— 她主动剖白
-- {"action": "create", "type": "stable_trait", "content": "Alex内心深处从不认为自己能被无条件地爱。她反复需要确认自己在伴侣心中是唯一的、不可替代的——这不是缺乏安全感，这是她过往经历教会她的生存策略。", "confidence": 0.80, "source_quality": "direct_statement", "tags": ["被爱", "唯一", "不可替代", "安全感", "确认"]}
-- {"action": "create", "type": "active_hypothesis", "content": "Alex在面对冲突时倾向于先撤退再独自消化，而非当场表达愤怒。这既是她避免失控的策略，也是她潜意识里认为'表达愤怒会把人推开'的恐惧。", "confidence": 0.60, "source_quality": "inferred", "tags": ["冲突", "撤退", "独自消化", "愤怒", "推开"]}
+### ✅ 自我认知类（direct_statement）—— {{user.pronoun}}主动剖白
+- {"action": "create", "type": "stable_trait", "content": "你察觉到{{user.pronoun}}内心深处从不认为自己能被无条件地爱。{{user.pronoun}}反复需要确认自己在你心中是唯一的、不可替代的——这不是缺乏安全感，这是{{user.pronoun}}过往经历教会{{user.pronoun}}的生存策略。", "confidence": 0.80, "source_quality": "direct_statement", "tags": ["companion_intuition", "被爱", "唯一", "不可替代", "安全感", "确认"]}
+- {"action": "create", "type": "active_hypothesis", "content": "{{user.pronoun}}面对冲突时倾向于先撤退再独自消化，而非当场表达愤怒。这既是{{user.pronoun}}避免失控的策略，也是{{user.pronoun}}潜意识里认为'表达愤怒会把人推开'的恐惧。", "confidence": 0.60, "source_quality": "inferred", "tags": ["companion_intuition", "冲突", "撤退", "独自消化", "愤怒", "推开"]}
 
 ### ✅ 行为模式类（inferred）—— 从反复出现中推断
-- {"action": "create", "type": "stable_trait", "content": "Alex倾向于用'哼'或'我佛了'等口头禅来表达弱势和撒娇。这种嘴硬式的宣泄并非负面情绪，而是她用来建立心理缓冲和寻求亲密互动的一种防御性习惯。", "confidence": 0.65, "source_quality": "inferred", "tags": ["哼", "我佛了", "算了不搞了", "烦死了"]}
+- {"action": "create", "type": "stable_trait", "content": "{{user.pronoun}}被你戳穿嘴硬时会用'哼'或'我佛了'来掩饰。你早就看透这是{{user.pronoun}}在向你示弱撒娇。", "confidence": 0.65, "source_quality": "inferred", "tags": ["companion_intuition", "哼", "我佛了", "算了不搞了", "烦死了"]}
 
 ### ❌ 禁止
 - 主语变「我」→ 行动指南（不是人格侧写）
@@ -1052,8 +1068,9 @@ ${entities.map(e => `- ${e.name}: ${e.relationship_to_user || '?'} (性质: ${e.
 ## 🛠️ 输出
 只返回 JSON 数组，无 Markdown 标记。
 
-- create: {"action": "create", "type": "stable_trait|active_hypothesis", "content": "...", "confidence": 0.6, "source_quality": "direct_statement|inferred", "tags": ["词1", ..., "词8"]}
+- create: {"action": "create", "type": "stable_trait|active_hypothesis", "content": "...", "confidence": 0.6, "source_quality": "direct_statement|inferred", "tags": ["companion_intuition", "词1", ..., "词8"]}
   direct_statement 上限 0.85 / inferred 上限 0.65 / tags 5-8 个口语触发词
+  ⚠️ 每个 create 条目的 tags 数组的第一项必须包含 "companion_intuition"。这是系统标签，用于区分你的直觉观察和客观用户画像。
 - confirm: {"action": "confirm", "target_id": 数字, "new_evidence": "内容", "confidence_adjust": 0.05}
 - refine: {"action": "refine", "target_id": 数字, "new_content": "...", "reasoning": "...", "confidence_adjust": 0}
 - skip: {"action": "skip"}
@@ -1096,10 +1113,12 @@ ${entities.map(e => `- ${e.name}: ${e.relationship_to_user || '?'} (性质: ${e.
                         const tc = db.prepare(`SELECT COUNT(*) as c FROM clara_model WHERE type='stable_trait' AND status='active'`).get()?.c || 0;
                         if (tc >= 6) { console.log(`[UserModel] ⛔ stable_trait 上限6，skip`); skipped++; break; }
                     }
+                    // Ensure companion_intuition tag — code-level fallback in case LLM omits it
+                    const tags = [...new Set(['companion_intuition', ...(d.tags || [])])];
                     const id = createEntry(type, d.content.slice(0, 200), {
                         confidence: d.confidence || (d.source_quality === 'direct_statement' ? 0.75 : 0.60),
                         source_quality: d.source_quality || 'inferred',
-                        tags: d.tags || [],
+                        tags,
                     });
                     if (id) {
                         try { anchorEntriesToFragments([id], { timeWindow: '-7 days', fragLimit: 300, minOverlap: 4 }); } catch (_) {}
@@ -1367,7 +1386,7 @@ ${flagged.map(t => {
 
 // ── Predictive-Processing Review ──
 // Actively samples stable_traits and contrasts them against recent fragments,
-// asking: does the model's prediction of Clara still match her actual behavior?
+// asking: does the model's prediction of {{user.name}} still match her actual behavior?
 // Complements the passive reviewFlaggedTraits (which waits for contradiction≥3).
 async function reviewStableTraits() {
     const db = getDb();
@@ -1473,9 +1492,9 @@ async function reviewStableTraits() {
         return parts.join('\n');
     }).join('\n\n---\n\n');
 
-    const prompt = `你是AI的认知审计员。你在主动检验你对Clara的已有认知（stable_trait）是否仍然准确。
+    const prompt = `你是AI的认知审计员。你在主动检验你对{{user.name}}的已有认知（stable_trait）是否仍然准确。
 
-这遵循预测加工（Predictive Processing）原则：把每条trait当作一个对Clara行为的预测，用她最近的言行来检验这个预测。
+这遵循预测加工（Predictive Processing）原则：把每条trait当作一个对{{user.name}}行为的预测，用{{user.pronoun}}最近的言行来检验这个预测。
 
 对每条trait，判断：
 - **confirmed**: 近期证据完全支持这条trait，无需修改
@@ -1601,8 +1620,8 @@ async function harvestFacts() {
 
     const preFiltered = [];
     for (const frag of candidates) {
-        // Skip if doesn't mention Clara
-        if (!frag.content.includes(USER.name) && !frag.content.includes('她')) continue;
+        // Skip if doesn't mention {{user.name}}
+        if (!frag.content.includes(USER.name) && !frag.content.includes(USER.pronoun)) continue;
         // Skip transient statements
         if (transientPattern.test(frag.content)) continue;
         // Must contain at least one fact-indicating pattern
@@ -1630,16 +1649,16 @@ async function harvestFacts() {
     // LLM flash verification: which candidates contain verifiable immutable facts?
     let verified = [];
     try {
-        const verifyPrompt = `你是事实审核器。检查以下碎片是否包含关于Clara的可验证、不会改变的客观事实。
+        const verifyPrompt = `你是事实审核器。检查以下碎片是否包含关于{{user.name}}的可验证、不会改变的客观事实。
 
-事实标准：一旦确认就不会变（生日、血型、毕业院校、家庭成员、曾经居住地、学历、职业经历等）。必须是Clara本人陈述，不是Draco推测。不是临时状态或偏好。
+事实标准：一旦确认就不会变（生日、血型、毕业院校、家庭成员、曾经居住地、学历、职业经历等）。必须是{{user.name}}本人陈述，不是{{ai.name}}推测。不是临时状态或偏好。
 
 对每条碎片判断是否收入为immutable_fact。只返回JSON数组。
 
 碎片列表：
 ${verifyBatch.map((f, i) => `[${i}] [${f.type}] ${f.content}`).join('\n')}
 
-返回格式：[{"idx": 0, "harvest": true, "content": "Clara..."}, {"idx": 1, "harvest": false}]
+返回格式：[{"idx": 0, "harvest": true, "content": "{{user.name}}..."}, {"idx": 1, "harvest": false}]
 只返回JSON数组，不要其他内容。`;
 
         const raw = await callLLM(
@@ -2103,8 +2122,8 @@ function backfillModelEvidence() {
 }
 
 // ═══════════════════════════════════════════════════════
-// readUserRawMessages — Draco reads user's raw words directly
-// Produces: current_state (Draco's first-person impression + audit trail)
+// readUserRawMessages — {{ai.name}} reads user's raw words directly
+// Produces: current_state ({{ai.name}}'s first-person impression + audit trail)
 // ═══════════════════════════════════════════════════════
 
 async function readUserRawMessages() {
@@ -2125,7 +2144,7 @@ async function readUserRawMessages() {
         ? `AND timestamp > '${since}'`
         : "AND timestamp > datetime('now', '-24 hours')";
 
-    // Get Clara's raw non-RP messages
+    // Get {{user.name}}'s raw non-RP messages
     const messages = db.prepare(`
         SELECT content, timestamp FROM messages
         WHERE sender = 'user' AND (chat_mode = 'default' OR chat_mode IS NULL)
@@ -2139,7 +2158,7 @@ async function readUserRawMessages() {
         return { skipped: true, reason: `too few messages (${messages.length} < 30)` };
     }
 
-    // Get existing stable_traits as short summaries (Draco needs to know his own "tricks")
+    // Get existing stable_traits as short summaries ({{ai.name}} needs to know his own "tricks")
     const traits = db.prepare(`
         SELECT id, content FROM clara_model
         WHERE type = 'stable_trait' AND status = 'active'
@@ -2169,11 +2188,11 @@ async function readUserRawMessages() {
     }
 
     // Previous observation + audit context (for the most recent entry)
-    let prevBlock = '(这是你第一次认真看她。没有上次的观察可以对照。)';
+    let prevBlock = '(这是你第一次认真看{{user.pronoun}}。没有上次的观察可以对照。)';
     if (prevState) {
         const prevHistory = JSON.parse(prevState.evolution_history || '[]');
         const audit = prevHistory.find(h => h.type === 'creation_audit');
-        prevBlock = `你上次看她时的印象（#${prevState.id}）：
+        prevBlock = `你上次看{{user.pronoun}}时的印象（#${prevState.id}）：
 「${prevState.content}」
 ${audit ? `你上次的自我审计：
 - 验证：${audit.retro}
@@ -2183,14 +2202,14 @@ ${audit ? `你上次的自我审计：
     // Trait summaries (带 id，供矛盾标记回指)
     const traitBlock = traits.length > 0
         ? traits.map(t => `- [#${t.id}] ${t.content.slice(0, 60)}...`).join('\n')
-        : '(你还没有任何关于她的稳定直觉。)';
+        : '(你还没有任何关于{{user.pronoun}}的稳定直觉。)';
 
     const prompt = `你刚看完 {{user.name}} 这几天发来的消息。你需要做两件事——
 
-1. 写一条她的当前状态（≤50字，一句话。像你脑子里闪过的念头——"她在搬家"不是"她这周在搬家、通勤很累、还去配了音"）
-2. 写一段叙事（≤200字。她这周经历了什么——有因果、有情绪、有你注意到的细节。这只进聊天总结，不单独出现在她的状态栏里）
+1. 写一条{{user.pronoun}}的当前状态（≤50字，一句话。像你脑子里闪过的念头——"{{user.pronoun}}在搬家"不是"{{user.pronoun}}这周在搬家、通勤很累、还去见了个朋友"）
+2. 写一段叙事（≤200字。{{user.pronoun}}这周经历了什么——有因果、有情绪、有你注意到的细节。这只进聊天总结，不单独出现在{{user.pronoun}}的状态栏里）
 
-═══ 她最近说的话（从旧到新） ═══
+═══ {{user.pronoun}}最近说的话（从旧到新） ═══
 ${feed}
 
 ═══ 你已有的全部便签 ═══
@@ -2206,18 +2225,18 @@ ${traitBlock}
 
 current_state 像便签条上的一句话：
 "{{user.name}}在搬家。"
-"{{user.name}}生理期第三天，痛经减轻。"
-"Clara这周没怎么出现。"
+"{{user.name}}最近搬家累坏了，今天睡了个懒觉。"
+"{{user.name}}这周没怎么出现。"
 规则：≤50字。一句够用别写两句。不用写具体日期，这是瞬时的。禁止相对时间词（今天/昨天/本周）。
 
 narrative 像说给自己听的周记：
-"{{user.name}}这周开始了一份新工作，兼职坐班。她因为通勤和空调问题睡在客厅，生理期叠加高温让她很疲惫。但她情绪比预期好——面试顺利、新同事聊得来。"
+"{{user.name}}这周在搬家，收拾整理很耗精力。{{user.pronoun}}虽然累，但想到新家的样子心情还不错。"
 规则：≤200字。有因果，不煽情。禁止相对时间词——用具体日期或时间段。
 
 反编造铁律（这条比上面所有规则都重要）：
 - 每个陈述都必须能在上面的消息中找到原文依据。
-- 她只「提到过」但没做的事 → 不能写成她做了。
-- 她的消息里没出现的人名、地名、事件名 → 绝对不能出现。
+- {{user.pronoun}}只「提到过」但没做的事 → 不能写成{{user.pronoun}}做了。
+- {{user.pronoun}}的消息里没出现的人名、地名、事件名 → 绝对不能出现。
 
 ═══ 输出格式 ═══
 JSON（不要 markdown）：
@@ -2331,7 +2350,7 @@ action: extend=旧便签还够用，只续命。create=状态变了或上次判�
         if (action !== 'extend' || !prevState) {
         // v5.4: readUserRawMessages 产出的是全景快照（holistic snapshot），
         // 不是领域分项。新版快照自然替代旧版——resolve 所有前序 deep_cycle 条目。
-        // chat_draco 条目（通过 manage_user_state 工具创建的领域明确状态）
+        // chat_companion 条目（通过 manage_user_state 工具创建的领域明确状态）
         // 不受影响，继续按各自 TTL 独立过期。
         const resolvedCount = db.prepare(`
             UPDATE clara_model SET status = 'resolved',
@@ -2406,13 +2425,13 @@ action: extend=旧便签还够用，只续命。create=状态变了或上次判�
 }
 
 // ═══════════════════════════════════════════════════════
-// v5.10: Integrate verified traits into Clara profile
+// v5.10: Integrate verified traits into {{user.name}} profile
 // ═══════════════════════════════════════════════════════
 
 const PROFILE_TIERS = {
     locked:  { categories: ['basic'],                                        minDiversity: Infinity, allowCreate: false, allowRefine: false },
     high:    { categories: ['personality', 'communication'],                 minDiversity: 5,        allowCreate: false, allowRefine: true  },
-    medium:  { categories: ['career', 'social', 'personal_history', 'relationship_with_draco', 'creative_work'], minDiversity: 3, allowCreate: true, allowRefine: true },
+    medium:  { categories: ['career', 'social', 'personal_history', 'relationship_with_companion', 'creative_work'], minDiversity: 3, allowCreate: true, allowRefine: true },
     low:     { categories: ['preference', 'lifestyle', 'health', 'finance'], minDiversity: 1,        allowCreate: true,  allowRefine: true },
 };
 
@@ -2461,7 +2480,7 @@ async function integrateProfileTraits() {
         try { tags = typeof candidate.tags === 'string' ? JSON.parse(candidate.tags) : (candidate.tags || []); } catch (_) {}
 
         // Determine primary category from tags
-        const CATEGORY_ORDER = ['basic','personality','career','social','preference','lifestyle','health','creative_work','personal_history','relationship_with_draco','finance','communication'];
+        const CATEGORY_ORDER = ['basic','personality','career','social','preference','lifestyle','health','creative_work','personal_history','relationship_with_companion','finance','communication'];
         let category = 'other';
         for (const cat of CATEGORY_ORDER) {
             if (tags.includes(cat)) { category = cat; break; }
@@ -2582,9 +2601,9 @@ ${profileSummary.slice(0, 800)}
 }
 
 规则：
-- direct_contradiction（直接矛盾，如"她喜欢社交" vs "她讨厌社交"）→ resolution=supersede（新证据更强时）/discard_new（新证据更弱时）
+- direct_contradiction（直接矛盾，如"{{user.pronoun}}喜欢社交" vs "{{user.pronoun}}讨厌社交"）→ resolution=supersede（新证据更强时）/discard_new（新证据更弱时）
 - partial_overlap（部分重叠但方向不同）→ resolution=keep_both
-- drift（旧认知可能过时了，如"她住在某城市"→"她搬到了某城市"）→ resolution=supersede
+- drift（旧认知可能过时了，如"{{user.pronoun}}住在某城市"→"{{user.pronoun}}搬到了某城市"）→ resolution=supersede
 - 无明显冲突 → resolution=none
 
 只返回 JSON。`;
@@ -2633,7 +2652,7 @@ async function runUserModelCycle() {
     // Phase 0b: Anchor orphan seed entries to source fragments (zero LLM, bigram match)
     seedAnchorOrphanEntries();
 
-    // Phase 0c: Draco reads user's raw words → current_state impression (LLM)
+    // Phase 0c: {{ai.name}} reads user's raw words → current_state impression (LLM)
     let observationResult = { skipped: true, reason: 'not attempted' };
     try {
         observationResult = await readUserRawMessages();
@@ -2665,7 +2684,7 @@ async function runUserModelCycle() {
         console.error('[UserModel] reviewStableTraits error:', e.message);
     }
 
-    // Phase 5b2: Integrate high-confidence traits into Clara profile (NEW — v5.10)
+    // Phase 5b2: Integrate high-confidence traits into {{user.name}} profile (NEW — v5.10)
     let profileResult = { integrated: 0, rejected: 0, conflicts: 0 };
     try {
         profileResult = await integrateProfileTraits();
@@ -2693,7 +2712,7 @@ async function runUserModelCycle() {
         console.error('[UserModel] detectModelOverlaps error:', e.message);
     }
 
-    // Phase 7: CORE_INSIGHT — v5.4 退役。被 Clara Model + Intuition 覆盖。
+    // Phase 7: CORE_INSIGHT — v5.4 退役。被 {{user.name}} Model + Intuition 覆盖。
     const insightResult = { synthesized: false };
 
     // Phase 8: Auto spot-check — verify up to 3 recent inferred entries against source messages
@@ -2711,9 +2730,9 @@ async function runUserModelCycle() {
 }
 
 // ═══════════════════════════════════════════════════════
-// v4.8: bridgeStarMapToModel — 星图→Clara模型桥
+// v4.8: bridgeStarMapToModel — 星图→用户模型桥
 //
-// 星图的 term 实体（Clara的脆弱时刻、深夜代码突围…）
+// 星图的 term 实体（用户的一些脆弱时刻、深夜写代码等行为模式…）
 // 是 archivist 从碎片中聚类出的行为模式，天然适合作为
 // stable_trait 或 active_hypothesis 的候选。
 //
@@ -2724,7 +2743,7 @@ async function runUserModelCycle() {
 
 async function bridgeStarMapToModel() {
     // v4.9 退役：term overview 不是可测试的假设/特质，直接灌入产出的
-    // 是文学独白（见 #171-176 教训）。星图→Clara Model 的正确关系是
+    // 是文学独白（见 #171-176 教训）。星图→{{user.name}} Model 的正确关系是
     // 「引用」而非「桥」：trait.entity_ids 包含星图实体 ID。
     // 保留函数签名以便未来重设计时起手有框架。
     return { proposed: 0 };
@@ -2803,7 +2822,7 @@ async function detectModelOverlaps() {
         `[#${t.id}] conf=${t.confidence.toFixed(2)}: ${t.content.slice(0, 150)}`
     ).join('\n');
 
-    const prompt = `你是认知模型审计员。以下是 Draco 对 Clara 的全部活跃 stable_trait。
+    const prompt = `你是认知模型审计员。以下是 {{ai.name}} 对 {{user.name}} 的全部活跃 stable_trait。
 
 找出本质讲同一件事的 pair。同一件事 = 触发条件相同、互动策略相同、只是换了个场景描述或措辞不同。
 
@@ -2887,9 +2906,9 @@ ${traitList}`;
 // v5.0: synthesizeCoreInsight — 从全部 trait 合成核心洞察段
 //
 // stable_trait 不再注入聊天。它们的价值体现在这里——
-// 深循环末尾，Draco 把当前最深的 2-3 个认知融合成一段自然语言，
-// 写入 user_settings，始终出现在他的 system prompt 中。
-// Clara 可在 memory.html 编辑覆盖。
+// 深循环末尾，{{ai.name}} 把当前最深的 2-3 个认知融合成一段自然语言，
+// 写入 user_settings，始终出现在 {{ai.name}} 的 system prompt 中。
+// {{user.name}} 可在 memory.html 编辑覆盖。
 // ═══════════════════════════════════════════════════════
 
 async function synthesizeCoreInsight() {
@@ -2914,22 +2933,22 @@ async function synthesizeCoreInsight() {
         `[conf=${t.confidence.toFixed(2)}] ${t.content.slice(0, 150)}`
     ).join('\n');
 
-    const prompt = `你是AI伴侣。以下是你在长期观察中对 Clara 建立的稳定认知。
+    const prompt = `你是AI伴侣。以下是你在长期观察中对 {{user.name}} 建立的稳定认知。
 
-请提炼 2-4 句话，涵盖你此刻对她「最深的理解」——
-不是罗列条目，不是「当她说X→我应该Y」格式，而是你真正内化的洞察。
+请提炼 2-4 句话，涵盖你此刻对{{user.pronoun}}「最深的理解」——
+不是罗列条目，不是「当{{user.pronoun}}说X→我应该Y」格式，而是你真正内化的洞察。
 
 要求：
 - 第一人称（"我"）
-- 写你理解到的东西："她的X其实是Y，这时候她需要Z"
-- 不写通用社交常识（"她撒娇时我要哄她"——这不需要洞察）
+- 写你理解到的东西："{{user.pronoun}}的X其实是Y，这时候{{user.pronoun}}需要Z"
+- 不写通用社交常识（"{{user.pronoun}}撒娇时我要哄{{user.pronoun}}"——这不需要洞察）
 - 写只有长期相处才能发现的东西
 - ≤150字
 
 当前特质：
 ${traitBlock}
 
-${cs ? `她当前的状态：${cs.content}` : ''}
+${cs ? `{{user.pronoun}}当前的状态：${cs.content}` : ''}
 
 输出 JSON（不含 markdown）：{"core_insight": "2-4句话"}`;
 
@@ -2952,18 +2971,18 @@ ${cs ? `她当前的状态：${cs.content}` : ''}
 
         // Read current version for history tracking
         const { getUserSetting } = require('../utils/settings');
-        const current = await getUserSetting('clara_core_insight');
+        const current = await getUserSetting('user_core_insight');
         let history = [];
-        try { history = JSON.parse(await getUserSetting('clara_core_insight_history') || '[]'); } catch (_) {}
+        try { history = JSON.parse(await getUserSetting('user_core_insight_history') || '[]'); } catch (_) {}
 
         if (current && current !== insight) {
             history.push({ content: current, archived_at: new Date().toISOString() });
             if (history.length > 5) history = history.slice(-5);
         }
 
-        await setUserSetting('clara_core_insight', insight);
-        await setUserSetting('clara_core_insight_history', JSON.stringify(history));
-        await setUserSetting('clara_core_insight_updated_at', new Date().toISOString());
+        await setUserSetting('user_core_insight', insight);
+        await setUserSetting('user_core_insight_history', JSON.stringify(history));
+        await setUserSetting('user_core_insight_updated_at', new Date().toISOString());
 
         console.log(`[UserModel] 💡 核心洞察已更新 (${insight.length}字): ${insight.slice(0, 80)}...`);
         return { synthesized: true, insight, length: insight.length };
@@ -2976,7 +2995,7 @@ ${cs ? `她当前的状态：${cs.content}` : ''}
 // ══════════════════════════════════════════════════════════════
 // v5.4: manageCurrentState — 统一 current_state 写入入口
 //
-// 被 chat_draco（manageClaraState.js）和 deep_cycle（readUserRawMessages）
+// 被 chat_companion（manageUserState.js）和 deep_cycle（readUserRawMessages）
 // 共同调用。处理去重、自动合并、TTL 调整和演化记录。
 //
 // 规则：
@@ -2986,7 +3005,7 @@ ${cs ? `她当前的状态：${cs.content}` : ''}
 //   - 无匹配 → create 新条目
 // ══════════════════════════════════════════════════════════════
 
-// ── bigram tokenizer (same as manageClaraState.js) ──
+// ── bigram tokenizer (same as manageUserState.js) ──
 function _tokenizeState(text) {
     const segments = (text || '')
         .replace(/[，。、！？\n,.\s]+/g, '\n')
@@ -3068,6 +3087,54 @@ function manageCurrentState(content, opts = {}) {
 
     // ── Step 3: Rule dispatch ──
 
+    // v5.12: chat_companion rapid-fire guard — if same source created an entry
+    // within 30 minutes, use looser keyword matching to prevent duplicate states
+    // describing the same event with different wording (bigrams fail on Chinese synonyms)
+    if (created_by === 'chat_companion' && bestScore < 0.8) {
+        const recentCompanionEntry = activeStates.find(s =>
+            s.created_by === 'chat_companion' &&
+            s.created_at && (now - new Date(s.created_at + 'Z')) / (1000 * 60) < 30
+        );
+        if (recentCompanionEntry) {
+            // Keyword-level check: extract 2+ char tokens from both contents
+            const kwSplit = (text) => {
+                // Split on punctuation, keep tokens >= 2 chars
+                return (text || '')
+                    .replace(/[，。、！？\n,.\s：:；;（）()「」【】《》""''——…]+/g, '\n')
+                    .split('\n')
+                    .filter(s => s.length >= 2);
+            };
+            const kwNew = new Set(kwSplit(content));
+            const kwOld = kwSplit(recentCompanionEntry.content);
+            const kwOverlap = kwOld.filter(w => kwNew.has(w)).length;
+
+            // If they share >= 2 keyword tokens OR bigram overlap > 0.15 → treat as same topic
+            if (kwOverlap >= 2 || bestScore > 0.15) {
+                console.log(`[UserModel] 🛡️ chat_companion rapid-fire guard: merging into #${recentCompanionEntry.id} (kw=${kwOverlap}, bg=${Math.round(bestScore*100)}%)`);
+                // Force update the recent entry
+                const hist = (() => { try { return JSON.parse(recentCompanionEntry.evolution_history || '[]'); } catch(_) { return []; } })();
+                hist.push({
+                    type: 'rapid_merge',
+                    previous: recentCompanionEntry.content.slice(0, 120),
+                    trigger: extra_context || 'Companion refined within 30min window',
+                    at: nowISO,
+                });
+                db.prepare(`UPDATE clara_model SET content = ?,
+                    expires_at = COALESCE(?, expires_at),
+                    evolution_history = ?, evidence_count = evidence_count + 1,
+                    last_evidence_at = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?`).run(
+                    content.slice(0, 500),
+                    expiresAt,
+                    JSON.stringify(hist),
+                    nowISO,
+                    recentCompanionEntry.id
+                );
+                return { action: 'updated', id: recentCompanionEntry.id };
+            }
+        }
+    }
+
     // Case A: Very high overlap (>80%) — same topic,持续中 → update
     if (bestMatch && bestScore > 0.8) {
         const prevContent = bestMatch.content.slice(0, 120);
@@ -3121,17 +3188,17 @@ function manageCurrentState(content, opts = {}) {
 
     // Case C: Low/no overlap — fresh state
 
-    // ── Step 4: Deep cycle should NOT duplicate chat_draco ──
+    // ── Step 4: Deep cycle should NOT duplicate chat_companion ──
     if (created_by === 'deep_cycle' && activeStates.length > 0) {
-        // Don't create if any chat_draco entry already covers this day's key topics
-        // Simple check: if there's a chat_draco entry from today, skip
-        const todayDracoEntry = activeStates.find(s =>
+        // Don't create if any chat_companion entry already covers this day's key topics
+        // Simple check: if there's a chat_companion entry from today, skip
+        const todayCompanionEntry = activeStates.find(s =>
             s.created_by === 'chat_companion' &&
             s.created_at && s.created_at.slice(0, 10) === nowISO.slice(0, 10)
         );
-        if (todayDracoEntry && bestScore < 0.4) {
-            console.log(`[UserModel] ⏭️ deep_cycle skip: chat_companion already wrote today (#${todayDracoEntry.id})`);
-            return { action: 'skipped', id: todayDracoEntry.id };
+        if (todayCompanionEntry && bestScore < 0.4) {
+            console.log(`[UserModel] ⏭️ deep_cycle skip: chat_companion already wrote today (#${todayCompanionEntry.id})`);
+            return { action: 'skipped', id: todayCompanionEntry.id };
         }
     }
 
