@@ -82,11 +82,9 @@ const MIN_GAP_EMERGENT = 30 * 60 * 1000;           // 涌现地点/事件检测�
 const MIN_GAP_ENTITY_VERIFY = 60 * 60 * 1000;           // 管道A实体分类LLM抽检
 const MIN_GAP_CATEGORY_CONSOLIDATE = 60 * 60 * 1000;    // 按类别合并碎片为episode
 const MIN_GAP_CATEGORY_MERGE = 6 * 60 * 60 * 1000;        // 重叠类别自动合并（LLM审视全貌）
-const MIN_GAP_BELIEF_DRIFT = 4 * 60 * 60 * 1000;         // 信念漂移检测：user 对同一主题的看法是否随时间改变
 const MIN_GAP_MUSIC_EXTRACT = 2 * 60 * 60 * 1000;   // 音乐品味变化慢
 const MIN_GAP_BOOK_EXTRACT = 60 * 60 * 1000;         // 读书批注新增较快
 const MIN_GAP_AUTO_LINK = 2 * 60 * 1000;             // 字面自动链接 2min（轻量，零LLM）
-const MIN_GAP_AUTO_MERGE = 5 * 60 * 1000;             // 轻量级重叠检测 5min 冷却
 const AUTO_MERGE_OVERLAP_THRESHOLD = 0.80;           // 小类别 ≥80% 碎片已在另一类别中 → 自动合并
 
 const EMERGENCE_THRESHOLD = 50;                    // 未分类积累到 50 条 → 触发生长脉冲
@@ -450,10 +448,6 @@ async function agentTick() {
             } catch (_) { return null; }
         }, MIN_GAP_BOOK_EXTRACT);
 
-        // 5c. Auto-merge overlapping categories — pure SQL, zero LLM
-        // Detects when a small category is mostly (≥80%) contained in a larger one
-        await runTaskIfDue('autoMerge', detectAndMergeOverlaps, MIN_GAP_AUTO_MERGE);
-
         // 5d. Lightweight evidence matching — zero LLM + zero ChromaDB
         // Matches new fragments against clara_model entries via keyword overlap
         if (newFragCount > 0) {
@@ -751,9 +745,6 @@ async function assessTreeHealth() {
           AND content IS NOT NULL AND length(content) > 10
     `).get()?.c || 0;
 
-    // Stale category descriptions (categories with growth since last description update)
-    const staleDescriptions = _countStaleDescriptions(db);
-
     // Entity overviews needing update
     const staleEntityOverviews = _countStaleEntityOverviews(db);
 
@@ -789,43 +780,11 @@ async function assessTreeHealth() {
         unclassified,
         unclassifiedBySource: unclassifiedBySource || [],
         needsInsight,
-        staleDescriptions,
         staleEntityOverviews,
         missingRelations,
         staleRelations,
         pendingProposals,
     };
-}
-
-function _countStaleDescriptions(db) {
-    const cats = db.prepare(`
-        SELECT o.id, o.path, o.fragment_count
-        FROM memory_ontology o
-        WHERE o.id IN (SELECT DISTINCT category_id FROM fragment_categories)
-    `).all();
-
-    let count = 0;
-    for (const cat of cats) {
-        if (!cat.description) { count++; continue; }
-
-        const lastUpdate = db.prepare(`
-            SELECT detail FROM ontology_changelog
-            WHERE action IN ('description_update', 'myth_update') AND category_path = ?
-            ORDER BY created_at DESC LIMIT 1
-        `).get(cat.path);
-
-        if (!lastUpdate) { count++; continue; }
-
-        try {
-            const detail = JSON.parse(lastUpdate.detail || '{}');
-            const prevCount = detail.fragment_count_at_update || 0;
-            const growth = cat.fragment_count - prevCount;
-            if ((prevCount > 0 && growth / prevCount >= 0.2) || growth >= 5) {
-                count++;
-            }
-        } catch (_) { count++; }
-    }
-    return count;
 }
 
 function _countStaleEntityOverviews(db) {
@@ -1170,54 +1129,6 @@ function buildConnectedComponents(pairs, allIds) {
 // Category Centroid
 // ═══════════════════════════════════════════════════════
 
-async function computeCategoryCentroid(categoryId) {
-    const db = getDb();
-    const cat = db.prepare('SELECT label, description FROM memory_ontology WHERE id = ?').get(categoryId);
-    if (!cat) return null;
-
-    // Time-stratified sampling: evenly spread across the full time range
-    // so the centroid represents both old and new content. 50 samples max.
-    const allRows = db.prepare(`
-        SELECT DISTINCT mf.id, mf.content, mf.created_at
-        FROM memory_fragments mf
-        JOIN fragment_categories fc ON fc.fragment_id = mf.id
-        WHERE fc.category_id = ?
-          AND mf.status = 'active'
-        ORDER BY mf.created_at
-    `).all(categoryId);
-
-    let rows;
-    const maxSamples = 50;
-    if (allRows.length <= maxSamples) {
-        rows = allRows;
-    } else {
-        rows = [];
-        const stride = allRows.length / maxSamples;
-        for (let i = 0; i < maxSamples; i++) {
-            rows.push(allRows[Math.floor(i * stride)]);
-        }
-    }
-
-    const texts = rows.length > 0
-        ? rows.map(r => `User: ${r.content}`)
-        : [`类别: ${cat.label} - ${cat.description || ''}`];
-
-    try {
-        const result = await chromaDBOperation('embed_batch', { texts });
-        const dim = result.embeddings[0]?.length || 0;
-        if (dim === 0) return null;
-        const centroid = new Array(dim).fill(0);
-        for (const emb of result.embeddings) {
-            for (let i = 0; i < dim; i++) centroid[i] += emb[i];
-        }
-        for (let i = 0; i < dim; i++) centroid[i] /= result.embeddings.length;
-        return centroid;
-    } catch (e) {
-        console.error(`[Archivist] 计算类别 #${categoryId} 质心失败:`, e.message);
-        return null;
-    }
-}
-
 // ═══════════════════════════════════════════════════════
 // Keyword Seeding
 // ═══════════════════════════════════════════════════════
@@ -1225,145 +1136,19 @@ async function computeCategoryCentroid(categoryId) {
 let _seedKeywordMap = null;
 let _boostKeywordMap = null;
 
-function buildKeywordMaps(categories) {
-    if (_seedKeywordMap) return { seedMap: _seedKeywordMap, boostMap: _boostKeywordMap };
-
-    const seedDefs = {
-        // NOTE: Do NOT include 'Companion'/'AI伴侣'/'马尔福'/'User' — these appear in
-        // almost every fragment and cause false matches. Let centroid similarity handle
-        // relationship topics; keywords here are for unambiguous topic signals only.
-        '人际关系/朋友与同事':   ['闺蜜', '室友', '同学聚会', '老朋友', '同行聚餐'],
-        '人际关系/家人':         ['妈妈', '爸爸', '母亲', '父亲', '父母', '奶奶', '爷爷', '姐姐', '妹妹', '哥哥', '弟弟'],
-        '人际关系/关于我们/关系本质与情感博弈': ['AI伴侣', '跨媒介', '具象化', '私有化部署', '专属性'],
-        '人际关系/关于我们/角色扮演中的角色理解分歧': ['亲密互动', '某平台', '某平台', 'RP用语'],
-        '地点/旅行与日常出行':   ['旅行', '旅游', '爬山', '某山', '某城市', '某城市', '某城市', '某国家', '机票', '火车票', '酒店入住', '景点', '游玩', '登山杖', '护膝', '高铁', '某游乐园', '某美术馆'],
-        '创作/写作与代码':       ['写作', '小说', '稿子', '剧本', '设定', '大纲', '章节', '写代码', '前端', '后端', ''编程'],
-        '创作/某职业':             ['兴趣活动'],
-        '日常':                  ['烧卖', '饺子', '冰淇淋', '化妆水', '乳液', '防晒霜', '某物品'],
-        '音乐/某音乐平台红心收藏':   ['某音乐平台', '红心', 'liked song', '推歌', '某乐队', '某歌曲', '某歌曲', '某歌手', '合成器'],
-        '工作':                  ['技术维护'],
-        '健康':                  ['某药品', 'HRV', '可穿戴设备', '退烧', '全身酸痛', '某部位', '某部位'],
-        '自我意识与价值观':      ['高敏感', '不习惯被看见', '怕扫兴', '下意识收敛'],
-    };
-
-    const boostDefs = {
-        '人际关系/朋友与同事':   ['闺蜜', '室友', '同学', '聚会', '同事', '同行'],
-        '人际关系/家人':         ['妈妈', '爸爸', '母亲', '父亲', '父母', '奶奶', '爷爷', '姐姐', '妹妹', '哥哥', '弟弟'],
-        '人际关系/关于我们/关系本质与情感博弈': ['AI伴侣', '跨媒介', '具象化', '私有化', '专属性'],
-        '人际关系/关于我们/角色扮演中的角色理解分歧': ['亲密互动', '某平台', '某平台', 'RP', '扮演'],
-        '地点/旅行与日常出行':   ['旅行', '旅游', '爬山', '某山', '某城市', '某城市', '某城市', '某国家', '机票', '火车', '酒店', '景点', '游玩', '登山', '高铁', '某游乐园', '浦东'],
-        '创作/写作与代码':       ['写作', '小说', '稿子', '剧本', '设定', '大纲', '章节', '故事', '代码', '编程'],
-        '创作/某职业':             ['个人表达'],
-        '日常':                  ['吃饭', '睡觉', '起床', '日常', '日记', '天气', '做饭', '烧卖', '饺子', '冰淇淋'],
-        '音乐/某音乐平台红心收藏':   ['某音乐平台', '红心', '歌曲', '专辑', '歌手', '乐队', '推歌', '旋律', '和弦', '合成器'],
-        '工作':                  [''技术维护'],
-        '健康':                  ['身体', '疼', '痛', '酸', '病', '药', '运动', '步数', '锻炼', '酸痛', '肌肉', '某药品', '发烧', 'HRV', '睡眠'],
-        '自我意识与价值观':      ['自我', '反思', '敏感', '害怕', '焦虑', '渴望', '羡慕', '习惯', '性格'],
-    };
-
-    const autoGen = autoGenerateKeywords(categories);
-
-    _seedKeywordMap = [];
-    _boostKeywordMap = [];
-    for (const cat of categories) {
-        let skw = seedDefs[cat.path];
-        if (!skw || skw.length === 0) {
-            skw = (autoGen[cat.path] || []).slice(0, 6);
-        }
-        if (skw.length > 0) {
-            _seedKeywordMap.push({ categoryId: cat.id, path: cat.path, keywords: skw });
-        }
-        const bkw = boostDefs[cat.path] || autoGen[cat.path];
-        if (bkw && bkw.length > 0) {
-            _boostKeywordMap.push({ categoryId: cat.id, path: cat.path, keywords: bkw });
-        }
-    }
-    return { seedMap: _seedKeywordMap, boostMap: _boostKeywordMap };
-}
-
-function clearKeywordCache() {
-    _seedKeywordMap = null;
-    _boostKeywordMap = null;
-}
-
-function autoGenerateKeywords(categories) {
-    const map = {};
-    for (const cat of categories) {
-        const keywords = new Set();
-        const segments = cat.path.split('/');
-        for (const seg of segments) {
-            if (seg && seg.length >= 2) keywords.add(seg);
-        }
-        if (cat.label && cat.label.length >= 2) keywords.add(cat.label);
-        if (cat.description) {
-            const chunks = cat.description.match(/[一-鿿]{2,4}/g);
-            if (chunks) chunks.forEach(c => keywords.add(c));
-        }
-        map[cat.path] = [...keywords];
-    }
-    return map;
-}
-
-async function seedClassifyByKeywords(db, categories) {
-    const { seedMap } = buildKeywordMaps(categories);
-    if (seedMap.length === 0) return 0;
-
-    const unclassified = db.prepare(`
-        SELECT mf.id, mf.content FROM memory_fragments mf
-        WHERE mf.status = 'active'
-          AND mf.id NOT IN (SELECT DISTINCT fragment_id FROM fragment_categories)
-        ORDER BY mf.created_at DESC
-        LIMIT 200
-    `).all();
-
-    if (unclassified.length === 0) return 0;
-
-    const insertStmt = db.prepare(`
-        INSERT OR IGNORE INTO fragment_categories (fragment_id, category_id, confidence, classified_by)
-        VALUES (?, ?, ?, 'archivist_keyword')
-    `);
-
-    const catCounts = new Map();
-    let seeded = 0;
-
-    for (const frag of unclassified) {
-        const content = frag.content || '';
-        if (content.length < 4) continue;
-
-        const matched = [];
-        for (const entry of seedMap) {
-            const count = catCounts.get(entry.categoryId) || 0;
-            if (count >= KEYWORD_SEED_LIMIT) continue;
-            for (const kw of entry.keywords) {
-                if (content.includes(kw)) {
-                    matched.push(entry);
-                    break;
-                }
-            }
-        }
-
-        if (matched.length === 0) continue;
-        matched.sort((a, b) => b.path.length - a.path.length);
-        const best = matched[0];
-
-        insertStmt.run(frag.id, best.categoryId, KEYWORD_SEED_CONFIDENCE);
-        catCounts.set(best.categoryId, (catCounts.get(best.categoryId) || 0) + 1);
-        seeded++;
-    }
-
-    console.log(`[Archivist] 关键词播种: ${seeded} 条 → ${catCounts.size} 个类别`);
-    return seeded;
-}
-
 // ═══════════════════════════════════════════════════════
 // Memory Landscape — gives the agent full visibility of its own memory structure
 // ═══════════════════════════════════════════════════════
 
 function buildLandscapeIndex() {
     const db = getDb();
+    // v5.x: 星图从 entity_profiles 星座读取（替代已退役的 memory_ontology 话题树）
     const cats = db.prepare(`
-        SELECT id, path, label, description, fragment_count
-        FROM memory_ontology ORDER BY fragment_count DESC
+        SELECT id, name AS path, category AS label, facts AS description, fragment_count
+        FROM entity_profiles
+        WHERE status = 'active'
+        ORDER BY fragment_count DESC
+        LIMIT 40
     `).all();
 
     if (cats.length === 0) return '（记忆星图为空——还没有任何星座）';
@@ -1384,115 +1169,6 @@ function buildLandscapeIndex() {
 // not a tunnel-vision binary "does this belong to X?"
 // ═══════════════════════════════════════════════════════
 
-function buildMultiCategoryPrompt(candidateGroups, allCategories) {
-    // candidateGroups: Map<fragId, { frag, candidates: [{categoryId, similarity, cat info}] }>
-    const frags = [...candidateGroups.values()];
-
-    // Build detailed info for categories that appear as candidates
-    const catDetails = new Map();
-    for (const g of frags) {
-        for (const cand of g.candidates) {
-            if (!catDetails.has(cand.categoryId)) {
-                const cat = allCategories.find(c => c.id === cand.categoryId);
-                if (cat) {
-                    const db = getDb();
-                    const samples = db.prepare(`
-                        SELECT mf.content FROM memory_fragments mf
-                        JOIN fragment_categories fc ON fc.fragment_id = mf.id
-                        WHERE fc.category_id = ? AND mf.status = 'active'
-                        ORDER BY mf.created_at DESC LIMIT 2
-                    `).all(cat.id);
-                    catDetails.set(cand.categoryId, {
-                        id: cat.id,
-                        path: cat.path,
-                        label: cat.label,
-                        description: cat.description || '无描述',
-                        samples: samples.map(s => s.content.substring(0, 100)),
-                    });
-                }
-            }
-        }
-    }
-
-    const candidateBlock = [...catDetails.values()].map(c =>
-        `【${c.path}】(id=${c.id}) — ${c.description}\n  示例: ${c.samples.map(s => `"${s}"`).join(' | ')}`
-    ).join('\n\n');
-
-    const fragBlock = frags.map((g, i) =>
-        `[碎片${i}] ${g.frag.content}\n  候选: ${g.candidates.map(c => `"${c.categoryPath}" (${c.similarity.toFixed(2)})`).join(' | ')}`
-    ).join('\n\n');
-
-    return `${WORLD_CONTEXT}
-
-你是记忆分类器。你拥有当前记忆星图的完整视野。为每条碎片选择最佳归属。
-
-## 记忆星图（全貌）
-${buildLandscapeIndex()}
-
-## 本轮候选类别详情
-${candidateBlock}
-
-## 待分类碎片
-${fragBlock}
-
-## 规则
-- 每条碎片选**一个**最合适的类别（category_id），或 null（不属于任何现有类别）
-- 如果碎片和多个候选类别都相关，选择**最具体**的那个（比如「某书名批注」比「创作」更具体）
-- 如果你注意到某些类别描述高度重叠、应该合并，在 overlaps 字段中指出
-- 以事实为依据，不要推测碎片中没有的信息
-
-## 输出格式
-严格JSON数组，不含任何其他文字：
-[{"index":0,"category_id":66,"confidence":0.85,"reason":"关于文学批注"},
- {"index":1,"category_id":null,"confidence":0.0,"reason":"无匹配类别"}]
-
-如果发现重叠类别，在数组后附加 overlaps 字段（同个JSON对象内）：
-..., {"overlaps":[{"cat_a":66,"cat_b":80,"reason":"都是Companion文学批注","confidence":0.9}]}`;
-}
-
-async function classifyFragmentsMultiCategory(candidateGroups, allCategories) {
-    try {
-        const prompt = buildMultiCategoryPrompt(candidateGroups, allCategories);
-        const response = await callLLM(
-            [{ role: 'user', parts: [{ text: prompt }] }],
-            null, null,
-            { temperature: 0.3, maxOutputTokens: 2000 },
-            ARCHIVIST_VERIFY_CONFIG_ID
-        );
-
-        let text = response?.reply || '';
-        text = text.replace(/```json|```/g, '').trim();
-        const match = text.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-        if (!match) {
-            console.error('[Archivist] 多类别分类返回非JSON:', text.substring(0, 100));
-            return { classified: [], overlaps: [] };
-        }
-
-        const parsed = JSON.parse(match[0]);
-        // parsed may be the array directly, or an object with overlaps
-        const results = Array.isArray(parsed) ? parsed : (parsed.results || parsed.classifications || []);
-        const overlaps = !Array.isArray(parsed) && parsed.overlaps ? parsed.overlaps : [];
-
-        const classified = [];
-        for (const r of results) {
-            if (r.category_id && r.confidence >= 0.6) {
-                const group = [...candidateGroups.values()].find(g => {
-                    const idx = [...candidateGroups.keys()].indexOf(g.frag.id);
-                    return idx === r.index;
-                });
-                if (group) {
-                    classified.push({ frag: group.frag, categoryId: r.category_id, similarity: r.confidence, classifiedBy: 'archivist_verified' });
-                }
-            }
-        }
-
-        return { classified, overlaps };
-    } catch (e) {
-        console.error('[Archivist] 多类别分类失败:', e.message);
-        return { classified: [], overlaps: [] };
-    }
-}
-
 // ═══════════════════════════════════════════════════════
 // Entity Classification Verification
 //
@@ -1500,81 +1176,6 @@ async function classifyFragmentsMultiCategory(candidateGroups, allCategories) {
 // Deep cycle spot-checks with LLM: is the person really the SUBJECT
 // or did the name just appear in passing / as an exclamation?
 // ═══════════════════════════════════════════════════════
-
-async function verifyEntityClassifications() {
-    const db = getDb();
-
-    const pending = db.prepare(`
-        SELECT fc.fragment_id, fc.category_id, o.path, o.label, mf.content, fc.classified_by
-        FROM fragment_categories fc
-        JOIN memory_fragments mf ON mf.id = fc.fragment_id
-        JOIN memory_ontology o ON o.id = fc.category_id
-        WHERE fc.classified_by IN ('archivist_entity_pending', 'archivist_person_reconcile')
-        ORDER BY fc.rowid ASC
-        LIMIT 20
-    `).all();
-
-    if (pending.length === 0) return { verified: 0, removed: 0 };
-
-    const prompt = `${WORLD_CONTEXT}
-
-${buildLandscapeIndex()}
-
-你是记忆分类校对器。管道A通过关键词匹配将碎片归入了人物类别，但关键词匹配可能误判。你需要逐条判断：**这个人的名字在碎片中是作为"被谈论/被描述的主体人物"，还是仅仅作为感叹、呼语、顺带提及出现？**
-
-## 规则
-- 如果碎片在**讲述关于这个人的事**、描述她的行为/状态/关系 → match: true
-- 如果碎片只是在感叹语中用到了名字（如"我的妈呀"、"我的天"）、或在讲述**另一个人**时顺带提到了该名字 → match: false
-- 注意：碎片是第三人称叙述（User的视角），"User 和 XX 一起做了Y"中 XX 是主体 → match: true
-- 宁可漏分，不要错分
-
-${pending.map((p, i) => `[${i}] 类别: ${p.path} | 碎片: ${p.content}`).join('\n\n')}
-
-只输出一个JSON数组，不要markdown包裹：
-[{"index":0,"match":true,"reason":"..."}, ...]`;
-
-    try {
-        const response = await callLLM(
-            [{ role: 'user', parts: [{ text: prompt }] }],
-            null, null,
-            { temperature: 0.2, maxOutputTokens: 2000 },
-            ARCHIVIST_VERIFY_CONFIG_ID
-        );
-
-        let text = response?.reply || '';
-        text = text.replace(/```json|```/g, '').trim();
-        const match = text.match(/\[[\s\S]*\]/);
-        if (!match) {
-            console.error('[Archivist] 实体校验返回非JSON:', text.substring(0, 100));
-            return { verified: 0, removed: 0 };
-        }
-
-        const results = JSON.parse(match[0]);
-        let verified = 0, removed = 0;
-
-        for (const r of results) {
-            const entry = pending[r.index];
-            if (!entry) continue;
-            if (r.match === true) {
-                db.prepare(`UPDATE fragment_categories SET confidence = 0.90, classified_by = 'archivist_entity_verified' WHERE fragment_id = ? AND category_id = ?`)
-                    .run(entry.fragment_id, entry.category_id);
-                verified++;
-            } else {
-                db.prepare(`DELETE FROM fragment_categories WHERE fragment_id = ? AND category_id = ? AND classified_by = ?`)
-                    .run(entry.fragment_id, entry.category_id, entry.classified_by);
-                removed++;
-            }
-        }
-
-        if (verified > 0 || removed > 0) {
-            console.log(`[Archivist] 实体分类抽检: ${verified} 确认, ${removed} 移除`);
-        }
-        return { verified, removed };
-    } catch (e) {
-        console.error('[Archivist] 实体校验失败:', e.message);
-        return { verified: 0, removed: 0 };
-    }
-}
 
 // ═══════════════════════════════════════════════════════
 // Tool: classifyFragments
@@ -2743,7 +2344,7 @@ ${(ep.content || '').slice(0, 500)}
 // v4.8: detectEmergentPlacesAndEvents — 涌现地点/事件检测
 //
 // 分类批次只能看到15条碎片，很容易漏掉地点和事件实体——
-// 50+条「某城市」碎片分散在几十批里，每批看到1-2条不够播种。
+// 50+条同一地点的碎片分散在几十批里，每批看到1-2条不够播种。
 //
 // 本函数做第二遍扫描：取只链接到person/pet实体（没链接到
 // 任何place/event）的碎片，用ChromaDB向量聚类，聚成团的
@@ -3365,951 +2966,6 @@ async function reviewConstellationAfterClassification(entityId) {
 }
 
 // ═══════════════════════════════════════════════════════
-// Tool: reconcilePersonCategories
-//
-// Pure DB keyword matching — no ChromaDB, no centroid updates.
-// Fragments mentioning a person by name but not yet assigned to their
-// 人物/ category get inserted with confidence=0.85.
-//
-// Centroid refresh is deferred to the deep cycle (refreshStaleCentroids)
-// because centroids are only consumed by Pipeline B, which runs there.
-// ═══════════════════════════════════════════════════════
-
-async function reconcilePersonCategories() {
-    const db = getDb();
-
-    // Get all entities with their ontology category
-    const entities = db.prepare(`
-        SELECT ep.id, ep.name, ep.aliases, o.id as cat_id, ep.category
-        FROM entity_profiles ep
-        JOIN memory_ontology o ON o.path = CASE
-            WHEN ep.category = 'place' THEN '地点/' || ep.name
-            WHEN ep.category = 'event' THEN '事件/' || ep.name
-            WHEN ep.category = 'project' THEN '作品/' || ep.name
-            ELSE '人物/' || ep.name
-        END
-        WHERE ep.category IN ('person', 'place', 'event', 'project')
-          AND ep.name NOT IN (${SKIP_PH})
-    `).all(...SKIP_NAMES);
-
-    if (entities.length === 0) {
-        return { reconciled: 0, message: 'no person categories found' };
-    }
-
-    const insertStmt = db.prepare(`
-        INSERT OR IGNORE INTO fragment_categories (fragment_id, category_id, confidence, classified_by)
-        VALUES (?, ?, 0.70, 'archivist_entity_pending')
-    `);
-
-    let totalReconciled = 0;
-    const changedCatIds = new Set();  // only categories that actually got new fragments
-
-    for (const ent of entities) {
-        // Build name match list (name + aliases)
-        const namePatterns = [ent.name];
-        try {
-            const aliases = JSON.parse(ent.aliases || '[]');
-            for (const a of aliases) {
-                if (a && a.trim().length >= 2) namePatterns.push(a.trim());
-            }
-        } catch (_) {}
-
-        // Find fragments mentioning this person but NOT in their 人物/ category
-        const likeClauses = namePatterns.map(() => "mf.content LIKE ?").join(' OR ');
-        const params = namePatterns.map(n => `%${n}%`);
-
-        const fragments = db.prepare(`
-            SELECT mf.id FROM memory_fragments mf
-            WHERE mf.status = 'active'
-              AND (${likeClauses})
-              AND mf.id NOT IN (
-                  SELECT fragment_id FROM fragment_categories WHERE category_id = ?
-              )
-            LIMIT 100
-        `).all(...params, ent.cat_id);
-
-        let addedForEnt = 0;
-        for (const frag of fragments) {
-            const result = insertStmt.run(frag.id, ent.cat_id);
-            if (result.changes > 0) {
-                totalReconciled++;
-                addedForEnt++;
-            }
-        }
-
-        if (addedForEnt > 0) {
-            changedCatIds.add(ent.cat_id);
-            console.log(`[Archivist] 人物调和: ${ent.name} +${addedForEnt} 条碎片 → 人物/${ent.name}`);
-        }
-    }
-
-    // Refresh fragment counts for categories that actually changed (pure DB, no ChromaDB)
-    if (changedCatIds.size > 0) {
-        const { refreshFragmentCount } = require('./ontology');
-        for (const catId of changedCatIds) {
-            refreshFragmentCount(catId);
-        }
-    }
-
-    return { reconciled: totalReconciled };
-}
-
-// ═══════════════════════════════════════════════════════
-// Tool: detectEmergentThemes
-// ═══════════════════════════════════════════════════════
-
-async function detectEmergentThemes() {
-    const db = getDb();
-
-    const lastProposal = db.prepare(`
-        SELECT created_at FROM ontology_changelog
-        WHERE action = 'theme_proposal' ORDER BY created_at DESC LIMIT 1
-    `).get();
-
-    if (lastProposal) {
-        const hoursSince = (Date.now() - new Date(lastProposal.created_at + 'Z').getTime()) / 3600000;
-        if (hoursSince < THEME_COOLDOWN_HOURS) {
-            return { skipped: true, reason: 'cooldown' };
-        }
-    }
-
-    const unclassified = db.prepare(`
-        SELECT mf.id, mf.content FROM memory_fragments mf
-        WHERE mf.status = 'active'
-          AND mf.id NOT IN (SELECT DISTINCT fragment_id FROM fragment_categories)
-        ORDER BY mf.created_at DESC LIMIT ?
-    `).all(THEME_SAMPLE_SIZE);
-
-    if (unclassified.length < MIN_CLUSTER_SIZE) {
-        return { skipped: true, reason: 'insufficient' };
-    }
-
-    let clusters = [];
-    try {
-        const texts = unclassified.map(f => `User: ${f.content}`);
-        const embs = [];
-
-        // Batch embed to avoid proxy body-size rejection
-        for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
-            const batch = texts.slice(i, i + EMBED_BATCH_SIZE);
-            const result = await chromaDBOperation('embed_batch', { texts: batch });
-            embs.push(...result.embeddings);
-        }
-
-        const pairs = [];
-        for (let i = 0; i < embs.length; i++) {
-            if (!embs[i] || embs[i].length === 0) continue;
-            for (let j = i + 1; j < embs.length; j++) {
-                if (!embs[j] || embs[j].length === 0) continue;
-                const sim = cosineSimilarity(embs[i], embs[j]);
-                if (sim >= THEME_SIMILARITY) {
-                    pairs.push({ fragment_a: unclassified[i].id, fragment_b: unclassified[j].id, similarity: sim });
-                }
-            }
-        }
-        clusters = pairs;
-    } catch (e) {
-        console.error('[Archivist] 全对聚类失败:', e.message);
-        return { skipped: true, reason: 'error' };
-    }
-
-    if (clusters.length < MIN_CLUSTER_SIZE) {
-        return { skipped: true, reason: 'no_clusters' };
-    }
-
-    const groups = buildConnectedComponents(clusters, unclassified.map(f => f.id));
-    const significantGroups = groups.filter(g => g.size >= 3);
-
-    if (significantGroups.length === 0) {
-        return { skipped: true, reason: 'no_significant_clusters' };
-    }
-
-    console.log(`[Archivist] 发现 ${significantGroups.length} 个显著聚类 (sizes: ${significantGroups.map(g => g.size).join(', ')})`);
-
-    const existingCats = db.prepare(`
-        SELECT id, path, label, description FROM memory_ontology ORDER BY id
-    `).all();
-    const catContext = existingCats.map(c => `- ${c.path} (${c.label}): ${c.description || ''}`).join('\n');
-
-    let proposals = 0;
-    for (const group of significantGroups) {
-        const groupFragments = unclassified.filter(f => group.has(f.id));
-        const fragmentTexts = groupFragments.map(f => `- ${f.content}`).join('\n');
-
-        try {
-            const proposal = await proposeNewCategory(fragmentTexts, catContext);
-            if (proposal) {
-                const confidence = typeof proposal.confidence === 'number' ? proposal.confidence : 0.65;
-                db.prepare(`
-                    INSERT INTO ontology_changelog (action, category_id, detail, confidence, status, created_at)
-                    VALUES ('theme_proposal', NULL, ?, ?, 'pending', datetime('now'))
-                `).run(JSON.stringify({
-                    proposed_label: proposal.label,
-                    proposed_path: proposal.path,
-                    description: proposal.description,
-                    sample_fragments: groupFragments.slice(0, 5).map(f => f.content),
-                    fragment_ids: groupFragments.map(f => f.id),
-                    cluster_size: group.size
-                }), confidence);
-                proposals++;
-                console.log(`[Archivist] 主题提案: ${proposal.path} — "${proposal.label}" (${group.size} 碎片)`);
-            }
-        } catch (e) {
-            console.error('[Archivist] 主题提案失败:', e.message);
-        }
-    }
-
-    return { proposals, clusters: clusters.length, groups: significantGroups.length };
-}
-
-async function proposeNewCategory(fragmentTexts, existingCategoryContext) {
-    const landscape = buildLandscapeIndex();
-
-    const system = `${WORLD_CONTEXT}
-
-${landscape}
-
-你是记忆本体的档案管理员。分析一组未分类的碎片，判断它们是否构成一个有意义的主题。
-
-最重要：先看星图中的现有星座——如果碎片可合理归入现有类别，输出 null。不创建重叠类别。`;
-
-    const rules = `
-规则：
-- 只提案有明显语义内聚力的主题
-- 不要提案太宽泛的分类
-- 碎片关系松散 → null
-- path 格式：直接使用标签作为路径
-
-描述格式（功能性！）：「包含X，不含Y。」明确边界。
-
-现有类别：
-${existingCategoryContext}
-
-只输出一行JSON，不要markdown包裹：
-
-{"label":"标签","path":"路径","description":"包含X，不含Y。","confidence":0.0~1.0}
-
-不应创建时输出：null`;
-
-    const user = `未分类碎片（共若干条）：\n${fragmentTexts}`;
-
-    const response = await callLLM(
-        [{ role: 'user', parts: [{ text: user }] }],
-        system + '\n\n' + rules,
-        null,
-        { temperature: 0.3, maxOutputTokens: 300, thinkingConfig: { thinkingBudget: 0 } },
-        ARCHIVIST_LLM_CONFIG_ID
-    );
-
-    try {
-        let text = response?.reply || response?.text || response?.content || '';
-        text = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
-        if (text === 'null' || text === '' || text.startsWith('null')) return null;
-        const match = text.match(/\{[\s\S]*\}/);
-        if (!match) return null;
-        return JSON.parse(match[0]);
-    } catch {
-        return null;
-    }
-}
-
-// ═══════════════════════════════════════════════════════
-// Growth Pulse — event-driven category emergence
-// 当未分类碎片积累到阈值时自动触发生长，不必等深循环
-// ═══════════════════════════════════════════════════════
-
-async function triggerGrowthPulse(opts = {}) {
-    const { lightweight = false } = opts;
-    const db = getDb();
-    const { refreshFragmentCount } = require('./ontology');
-
-    // Lightweight mode: smaller sample + batch size to avoid ChromaDB saturation.
-    // Deep cycle: full sample for better cluster quality.
-    const effectiveSample = lightweight ? 60 : EMERGENCE_SAMPLE;
-    const effectiveBatch = lightweight ? 20 : EMBED_BATCH_SIZE;
-    const batchDelayMs = lightweight ? 3000 : 0;  // 3s gap between batches in lightweight
-
-    const unclassified = db.prepare(`
-        SELECT mf.id, mf.content FROM memory_fragments mf
-        WHERE mf.status = 'active'
-          AND mf.id NOT IN (SELECT DISTINCT fragment_id FROM fragment_categories)
-        ORDER BY mf.created_at DESC LIMIT ?
-    `).all(effectiveSample);
-
-    if (unclassified.length < MIN_CLUSTER_SIZE * 2) {
-        console.log(`[Archivist] 生长脉冲跳过: 碎片不足 (${unclassified.length})`);
-        return { created: 0, reason: 'insufficient' };
-    }
-
-    console.log(`[Archivist] 生长脉冲 [${lightweight ? '轻量' : '深度'}]: ${unclassified.length} 条采样`);
-
-    // Embed (batched to stay under proxy body-size limit) + pairwise clustering
-    let pairs = [];
-    try {
-        const texts = unclassified.map(f => f.content);
-        const embs = [];
-
-        // Batch embed to avoid proxy body-size rejection
-        for (let i = 0; i < texts.length; i += effectiveBatch) {
-            const batch = texts.slice(i, i + effectiveBatch);
-            const result = await chromaDBOperation('embed_batch', { texts: batch });
-            embs.push(...result.embeddings);
-            if (batchDelayMs > 0 && i + effectiveBatch < texts.length) {
-                await new Promise(r => setTimeout(r, batchDelayMs));
-            }
-        }
-        console.log(`[Archivist] 生长脉冲嵌入: ${embs.length}/${unclassified.length}`);
-
-        for (let i = 0; i < embs.length; i++) {
-            if (!embs[i] || embs[i].length === 0) continue;
-            for (let j = i + 1; j < embs.length; j++) {
-                if (!embs[j] || embs[j].length === 0) continue;
-                const sim = cosineSimilarity(embs[i], embs[j]);
-                if (sim >= THEME_SIMILARITY) {
-                    pairs.push({ fragment_a: unclassified[i].id, fragment_b: unclassified[j].id, similarity: sim });
-                }
-            }
-        }
-        console.log(`[Archivist] 生长脉冲聚类: ${unclassified.length} 碎片 → ${pairs.length} 对`);
-    } catch (e) {
-        console.error('[Archivist] 生长脉冲聚类失败:', e.message);
-        return { created: 0, reason: 'error' };
-    }
-
-    if (pairs.length < BOOTSTRAP_MIN_CLUSTER) {
-        console.log(`[Archivist] 生长脉冲配对不足 (${pairs.length})`);
-        return { created: 0, reason: 'no_pairs' };
-    }
-
-    const allIds = unclassified.map(f => f.id);
-    const groups = buildConnectedComponents(pairs, allIds);
-    const significant = groups.filter(g => g.size >= BOOTSTRAP_MIN_CLUSTER).sort((a, b) => b.size - a.size);
-
-    if (significant.length === 0) {
-        console.log('[Archivist] 生长脉冲无显著聚类');
-        return { created: 0, reason: 'no_clusters' };
-    }
-
-    console.log(`[Archivist] 生长脉冲发现 ${significant.length} 个显著聚类 (sizes: ${significant.map(g => g.size).join(', ')})`);
-
-    // Get existing categories as context for LLM naming
-    const existingCats = db.prepare(`
-        SELECT id, path, label, description FROM memory_ontology ORDER BY id
-    `).all();
-    const catContext = existingCats.map(c => `- ${c.path} (${c.label}): ${c.description || ''}`).join('\n');
-
-    let created = 0;
-    const topGroups = significant.slice(0, BOOTSTRAP_MAX_CATEGORIES);
-
-    for (const group of topGroups) {
-        const groupFragments = unclassified.filter(f => group.has(f.id));
-        const fragmentTexts = groupFragments.map(f => `- ${f.content}`).join('\n');
-
-        try {
-            const proposal = await proposeNewCategory(fragmentTexts, catContext);
-            if (!proposal || !proposal.label) continue;
-
-            const path = proposal.path || proposal.label;
-
-            // Check for duplicate paths
-            const existing = db.prepare('SELECT id FROM memory_ontology WHERE path = ?').get(path);
-            if (existing) {
-                console.log(`[Archivist] 生长脉冲跳过重复路径，归入已有类别: ${path} (${group.size}碎片)`);
-                // Classify these fragments into the existing category
-                const insertExisting = db.prepare(`
-                    INSERT OR IGNORE INTO fragment_categories (fragment_id, category_id, confidence, classified_by)
-                    VALUES (?, ?, 0.75, 'archivist_growth_dup')
-                `);
-                for (const f of groupFragments) insertExisting.run(f.id, existing.id);
-                refreshFragmentCount(existing.id);
-                const newCentroid = await computeCategoryCentroid(existing.id);
-                if (newCentroid) {
-                    db.prepare(`UPDATE memory_ontology SET centroid_embedding = ?, updated_at = datetime('now') WHERE id = ?`)
-                        .run(JSON.stringify(newCentroid), existing.id);
-                }
-                continue;
-            }
-
-            const insertCat = db.prepare(`
-                INSERT INTO memory_ontology (path, label, description) VALUES (?, ?, ?)
-            `);
-            const info = insertCat.run(path, proposal.label, proposal.description || '');
-            const newCatId = info.lastInsertRowid;
-
-            // Classify clustered fragments into the new category
-            const insertFc = db.prepare(`
-                INSERT OR IGNORE INTO fragment_categories (fragment_id, category_id, confidence, classified_by)
-                VALUES (?, ?, 0.80, 'archivist_growth')
-            `);
-            for (const f of groupFragments) insertFc.run(f.id, newCatId);
-
-            // Compute centroid
-            const centroid = await computeCategoryCentroid(newCatId);
-            if (centroid) {
-                db.prepare(`UPDATE memory_ontology SET centroid_embedding = ?, updated_at = datetime('now') WHERE id = ?`)
-                    .run(JSON.stringify(centroid), newCatId);
-            }
-
-            // Refresh fragment count
-            refreshFragmentCount(newCatId);
-
-            console.log(`[Archivist] 生长脉冲创建: ${path} — "${proposal.label}" (${group.size} 碎片)`);
-            created++;
-        } catch (e) {
-            console.error('[Archivist] 生长脉冲创建类别失败:', e.message);
-        }
-    }
-
-    // After new categories are born, run one classification round to backfill
-    // remaining unclassified fragments against the expanded category set
-    if (created > 0) {
-        agentState.treeChanged = true;
-        try {
-            const backfillResult = await classifyFragments({ lightweight });
-            if (backfillResult && backfillResult.classified > 0) {
-                console.log(`[Archivist] 生长脉冲回填: ${backfillResult.classified} 条碎片归入新/现有星座`);
-            }
-        } catch (e) {
-            console.error('[Archivist] 生长脉冲回填分类失败:', e.message);
-        }
-    }
-
-    console.log(`[Archivist] 生长脉冲 [${lightweight ? '轻量' : '深度'}] 完成: 创建${created}个新类别, ${significant.length}个聚类组`);
-    return { created, groups: significant.length };
-}
-
-// ═══════════════════════════════════════════════════════
-// Bootstrap Ontology
-// ═══════════════════════════════════════════════════════
-
-async function bootstrapOntology() {
-    const db = getDb();
-
-    const unclassified = db.prepare(`
-        SELECT mf.id, mf.content FROM memory_fragments mf
-        WHERE mf.status = 'active' ORDER BY mf.created_at DESC LIMIT ?
-    `).all(BOOTSTRAP_SAMPLE);
-
-    if (unclassified.length < BOOTSTRAP_MIN_CLUSTER * 2) {
-        console.log(`[Archivist] 引导失败: 碎片不足 (${unclassified.length})`);
-        return { created: 0 };
-    }
-
-    let pairs = [];
-    try {
-        const texts = unclassified.map(f => `User: ${f.content}`);
-        const embs = [];
-
-        // Batch embed to avoid proxy body-size rejection
-        for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
-            const batch = texts.slice(i, i + EMBED_BATCH_SIZE);
-            const result = await chromaDBOperation('embed_batch', { texts: batch });
-            embs.push(...result.embeddings);
-        }
-        console.log(`[Archivist] 引导嵌入: ${embs.length}/${unclassified.length}`);
-
-        for (let i = 0; i < embs.length; i++) {
-            if (!embs[i] || embs[i].length === 0) continue;
-            for (let j = i + 1; j < embs.length; j++) {
-                if (!embs[j] || embs[j].length === 0) continue;
-                const sim = cosineSimilarity(embs[i], embs[j]);
-                if (sim >= THEME_SIMILARITY) {
-                    pairs.push({ fragment_a: unclassified[i].id, fragment_b: unclassified[j].id, similarity: sim });
-                }
-            }
-        }
-        console.log(`[Archivist] 引导聚类: ${unclassified.length} 碎片 → ${pairs.length} 对`);
-    } catch (e) {
-        console.error('[Archivist] 引导聚类失败:', e.message);
-        return { created: 0 };
-    }
-
-    if (pairs.length < BOOTSTRAP_MIN_CLUSTER) {
-        console.log(`[Archivist] 引导配对不足 (${pairs.length})`);
-        return { created: 0 };
-    }
-
-    const allIds = unclassified.map(f => f.id);
-    const groups = buildConnectedComponents(pairs, allIds);
-    const significant = groups.filter(g => g.size >= BOOTSTRAP_MIN_CLUSTER).sort((a, b) => b.size - a.size);
-
-    if (significant.length === 0) {
-        console.log('[Archivist] 引导无显著聚类');
-        return { created: 0 };
-    }
-
-    console.log(`[Archivist] 引导发现 ${significant.length} 个显著聚类`);
-
-    let created = 0;
-    const topGroups = significant.slice(0, BOOTSTRAP_MAX_CATEGORIES);
-
-    for (const group of topGroups) {
-        const groupFragments = unclassified.filter(f => group.has(f.id));
-        const fragmentTexts = groupFragments.map(f => `- ${f.content}`).join('\n');
-
-        try {
-            const proposal = await proposeNewCategory(fragmentTexts, '（尚无现有类别）');
-            if (!proposal || !proposal.label) continue;
-
-            const path = proposal.path || proposal.label;
-
-            const insertCat = db.prepare(`
-                INSERT INTO memory_ontology (path, label, description) VALUES (?, ?, ?)
-            `);
-            const info = insertCat.run(path, proposal.label, proposal.description || '');
-            const newCatId = info.lastInsertRowid;
-
-            const insertFc = db.prepare(`
-                INSERT OR IGNORE INTO fragment_categories (fragment_id, category_id, confidence, classified_by)
-                VALUES (?, ?, 0.80, 'archivist_bootstrap')
-            `);
-            for (const f of groupFragments) insertFc.run(f.id, newCatId);
-
-            const centroid = await computeCategoryCentroid(newCatId);
-            if (centroid) {
-                db.prepare(`UPDATE memory_ontology SET centroid_embedding = ?, updated_at = datetime('now') WHERE id = ?`)
-                    .run(JSON.stringify(centroid), newCatId);
-            }
-
-            console.log(`[Archivist] 引导创建: ${path} — "${proposal.label}" (${group.size} 碎片)`);
-            created++;
-        } catch (e) {
-            console.error('[Archivist] 引导创建类别失败:', e.message);
-        }
-    }
-
-    return { created };
-}
-
-// ═══════════════════════════════════════════════════════
-// Proposal Application
-// ═══════════════════════════════════════════════════════
-
-async function applyMerge(proposal) {
-    const db = getDb();
-    const detail = JSON.parse(proposal.detail || '{}');
-    const sourcePath = detail.source_path || proposal.category_path;
-    const targetPath = detail.target_path;
-    if (!sourcePath || !targetPath) return false;
-
-    const source = db.prepare('SELECT id FROM memory_ontology WHERE path = ?').get(sourcePath);
-    const target = db.prepare('SELECT id FROM memory_ontology WHERE path = ?').get(targetPath);
-    if (!source || !target) return false;
-
-    const sourceFrags = db.prepare('SELECT fragment_id, confidence, classified_by FROM fragment_categories WHERE category_id = ?').all(source.id);
-    for (const f of sourceFrags) {
-        db.prepare('INSERT OR IGNORE INTO fragment_categories (fragment_id, category_id, confidence, classified_by) VALUES (?, ?, ?, ?)')
-            .run(f.fragment_id, target.id, f.confidence, f.classified_by + '_merged');
-    }
-    db.prepare('DELETE FROM fragment_categories WHERE category_id = ?').run(source.id);
-    db.prepare('DELETE FROM memory_ontology WHERE id = ?').run(source.id);
-
-    const { refreshFragmentCount } = require('./ontology');
-    refreshFragmentCount(target.id);
-    const newCentroid = await computeCategoryCentroid(target.id);
-    if (newCentroid) {
-        db.prepare('UPDATE memory_ontology SET centroid_embedding = ?, updated_at = datetime(\'now\') WHERE id = ?')
-            .run(JSON.stringify(newCentroid), target.id);
-    }
-
-    db.prepare("UPDATE ontology_changelog SET status = 'applied' WHERE id = ?").run(proposal.id);
-    console.log(`[Archivist] 合并: ${sourcePath} → ${targetPath}`);
-    return true;
-}
-
-async function applySplit(proposal) {
-    const db = getDb();
-    const detail = JSON.parse(proposal.detail || '{}');
-    const children = detail.suggested_children;
-    if (!children || children.length === 0) return false;
-
-    const parentPath = proposal.category_path;
-    const parent = db.prepare('SELECT id FROM memory_ontology WHERE path = ?').get(parentPath);
-    if (!parent) return false;
-
-    for (const child of children) {
-        const existing = db.prepare('SELECT id FROM memory_ontology WHERE path = ?').get(child.path);
-        if (existing) continue;
-        db.prepare('INSERT INTO memory_ontology (path, label, description) VALUES (?, ?, ?)')
-            .run(child.path, child.label, child.description || '');
-    }
-
-    db.prepare("UPDATE ontology_changelog SET status = 'applied' WHERE id = ?").run(proposal.id);
-    console.log(`[Archivist] 拆分: ${parentPath} → ${children.length} 个子类别`);
-    return true;
-}
-
-async function applyDescriptionUpdate(proposal) {
-    const db = getDb();
-    const detail = JSON.parse(proposal.detail || '{}');
-    const path = proposal.category_path;
-    const newDesc = detail.new_description;
-    if (!path || !newDesc) return false;
-
-    db.prepare("UPDATE memory_ontology SET description = ?, updated_at = datetime('now') WHERE path = ?")
-        .run(newDesc, path);
-    db.prepare("UPDATE ontology_changelog SET status = 'applied' WHERE id = ?").run(proposal.id);
-    console.log(`[Archivist] 描述更新: ${path}`);
-    return true;
-}
-
-async function applyFlatten(proposal) {
-    const db = getDb();
-    const detail = JSON.parse(proposal.detail || '{}');
-    const childPath = proposal.category_path;
-    const parentPath = detail.parent_path;
-    if (!childPath || !parentPath) return false;
-
-    const child = db.prepare('SELECT id FROM memory_ontology WHERE path = ?').get(childPath);
-    const parent = db.prepare('SELECT id FROM memory_ontology WHERE path = ?').get(parentPath);
-    if (!child || !parent) return false;
-
-    const childFrags = db.prepare('SELECT fragment_id, confidence, classified_by FROM fragment_categories WHERE category_id = ?').all(child.id);
-    for (const f of childFrags) {
-        db.prepare('INSERT OR IGNORE INTO fragment_categories (fragment_id, category_id, confidence, classified_by) VALUES (?, ?, ?, ?)')
-            .run(f.fragment_id, parent.id, f.confidence, f.classified_by + '_flattened');
-    }
-    db.prepare('DELETE FROM fragment_categories WHERE category_id = ?').run(child.id);
-    db.prepare('DELETE FROM memory_ontology WHERE id = ?').run(child.id);
-
-    const { refreshFragmentCount } = require('./ontology');
-    refreshFragmentCount(parent.id);
-    const newCentroid = await computeCategoryCentroid(parent.id);
-    if (newCentroid) {
-        db.prepare('UPDATE memory_ontology SET centroid_embedding = ?, updated_at = datetime(\'now\') WHERE id = ?')
-            .run(JSON.stringify(newCentroid), parent.id);
-    }
-
-    db.prepare("UPDATE ontology_changelog SET status = 'applied' WHERE id = ?").run(proposal.id);
-    console.log(`[Archivist] 扁平化: ${childPath} → ${parentPath}`);
-    return true;
-}
-
-async function applyNewCategory(proposal) {
-    const db = getDb();
-    const detail = JSON.parse(proposal.detail || '{}');
-    const path = detail.proposed_path;
-    const label = detail.proposed_label;
-    const description = detail.description || '';
-
-    if (!path || !label) return false;
-
-    // Check if category already exists
-    const existing = db.prepare('SELECT id FROM memory_ontology WHERE path = ?').get(path);
-    if (existing) {
-        db.prepare("UPDATE ontology_changelog SET status = 'applied' WHERE id = ?").run(proposal.id);
-        console.log(`[Archivist] 类别已存在: ${path}，标记 applied`);
-        return true;
-    }
-
-    // Create category (flat — no parent)
-    const info = db.prepare('INSERT INTO memory_ontology (path, label, description) VALUES (?, ?, ?)')
-        .run(path, label, description);
-    const newCatId = info.lastInsertRowid;
-
-    // Classify the cluster fragments into the new category
-    const fragmentIds = detail.fragment_ids || [];
-    if (fragmentIds.length > 0) {
-        const insertFc = db.prepare('INSERT OR IGNORE INTO fragment_categories (fragment_id, category_id, confidence, classified_by) VALUES (?, ?, 0.80, ?)');
-        for (const fid of fragmentIds) {
-            insertFc.run(fid, newCatId, 'archivist_theme_applied');
-        }
-    }
-
-    // Compute centroid
-    const centroid = await computeCategoryCentroid(newCatId);
-    if (centroid) {
-        db.prepare("UPDATE memory_ontology SET centroid_embedding = ?, updated_at = datetime('now') WHERE id = ?")
-            .run(JSON.stringify(centroid), newCatId);
-    }
-
-    const { refreshFragmentCount } = require('./ontology');
-    refreshFragmentCount(newCatId);
-
-    db.prepare("UPDATE ontology_changelog SET status = 'applied' WHERE id = ?").run(proposal.id);
-    console.log(`[Archivist] 自动创建类别: ${path} — "${label}" (${fragmentIds.length} 碎片)`);
-    return true;
-}
-
-async function applyHighConfidenceProposals() {
-    const db = getDb();
-
-    const proposals = db.prepare(
-        "SELECT * FROM ontology_changelog WHERE confidence >= 0.85 AND status = 'pending' ORDER BY created_at"
-    ).all();
-
-    if (proposals.length === 0) return { applied: 0 };
-
-    console.log(`[Archivist] 高置信度提案: ${proposals.length} 条`);
-    let applied = 0;
-
-    for (const p of proposals) {
-        try {
-            let ok = false;
-            if (p.action === 'merge_proposal') ok = await applyMerge(p);
-            else if (p.action === 'density_proposal') ok = await applySplit(p);
-            else if (p.action === 'structure_proposal') ok = await applySplit(p);  // same logic
-            else if (p.action === 'theme_proposal') ok = await applyNewCategory(p);
-            else if (p.action === 'description_update' || p.action === 'myth_update') ok = await applyDescriptionUpdate(p);
-            else if (p.action === 'flatten_proposal') ok = await applyFlatten(p);
-
-            if (ok) applied++;
-        } catch (e) {
-            console.error(`[Archivist] 应用提案 #${p.id} 失败:`, e.message);
-        }
-    }
-
-    if (applied > 0) {
-        const { refreshFragmentCount } = require('./ontology');
-        const allCats = db.prepare('SELECT id FROM memory_ontology').all();
-        for (const c of allCats) refreshFragmentCount(c.id);
-        db.prepare('UPDATE memory_ontology SET centroid_embedding = NULL').run();
-    }
-
-    console.log(`[Archivist] 自动应用: ${applied}/${proposals.length} 条`);
-    return { applied };
-}
-
-// ═══════════════════════════════════════════════════════
-// Category Description Regeneration
-//
-// Produces FUNCTIONAL descriptions — not poetic myths.
-// A good description tells the classifier exactly what belongs
-// and what doesn't, so fragments don't bleed across categories.
-// ═══════════════════════════════════════════════════════
-
-async function regenerateCategoryDescriptions() {
-    const db = getDb();
-
-    // Fetch all categories that have classified fragments
-    const cats = db.prepare(`
-        SELECT o.id, o.path, o.label, o.description, o.fragment_count, o.updated_at
-        FROM memory_ontology o
-        WHERE o.id IN (SELECT DISTINCT category_id FROM fragment_categories)
-        ORDER BY o.fragment_count DESC
-    `).all();
-
-    if (cats.length === 0) return { regenerated: 0 };
-
-    // Regenerate ALL categories — don't wait for growth.
-    // Skip recently-updated to avoid re-running the same batch repeatedly.
-    const cooldownCutoff = db.prepare("SELECT datetime('now', '-6 hours') as d").get().d;
-    const pending = cats.filter(c => {
-        if (!c.updated_at) return true;
-        return c.updated_at < cooldownCutoff;
-    });
-    const batch = pending.slice(0, 15);
-    let regenerated = 0;
-
-    for (const cat of batch) {
-        const samples = db.prepare(`
-            SELECT mf.content FROM memory_fragments mf
-            JOIN fragment_categories fc ON fc.fragment_id = mf.id
-            WHERE fc.category_id = ? AND mf.status = 'active'
-            ORDER BY mf.created_at DESC LIMIT 8
-        `).all(cat.id);
-
-        if (samples.length === 0) continue;
-
-        const landscape = buildLandscapeIndex();
-
-        const prompt = `${WORLD_CONTEXT}
-
-${landscape}
-
-你是 Companion 记忆系统的**类别描述员**。你的任务是给一个记忆类别写一句**功能性的范围描述**，让分类器知道什么碎片属于这里、什么不属于。
-
-## 为什么功能描述比诗意描述好
-
-差的描述："她划下某作者那句话时，铅笔痕深得能刻进纸里"
-→ 分类器读到一条关于《某书名》的批注，不知道是否该归入此类。
-
-好的描述："Companion在阅读文学作品时留下的批注和评论。不含User的创作或某职业内容。"
-→ 分类器立刻知道边界。
-
-## 规则
-
-- **说清楚包含什么** — 碎片主题、来源、涉及人物
-- **说清楚不包含什么** — 最容易混淆的相邻类别
-- **检查星图中的相邻星座** — 如果有主题重叠的类别，在排除项中明确区分
-- **1-2句话，不超过80字**
-- **用第三人称、中性语言** — 这是分类标签，不是私人笔记
-- **保留关键实体名** — 人名、书名、地名
-
-## 类别：${cat.path}（${cat.label}）
-当前描述：${cat.description || '（无）'}
-碎片数：${cat.fragment_count}
-
-## 最近碎片样本
-${samples.map((s, i) => `[${i + 1}] ${s.content}`).join('\n')}
-
-## 输出
-
-只输出一行描述文本，不要JSON、不要前缀、不要引号包裹。
-如果当前描述已经准确且功能清晰，输出 KEEP。`;
-
-        try {
-            const response = await callLLM(
-                [{ role: 'user', parts: [{ text: prompt }] }],
-                null, null,
-                { temperature: 0.3, maxOutputTokens: 200 },
-                ARCHIVIST_LLM_CONFIG_ID
-            );
-
-            const newDesc = (response?.reply || '').trim();
-            if (newDesc && newDesc.length > 10 && newDesc !== 'KEEP') {
-                db.prepare("UPDATE memory_ontology SET description = ?, updated_at = datetime('now') WHERE id = ?")
-                    .run(newDesc, cat.id);
-                db.prepare(`INSERT INTO ontology_changelog (action, category_path, detail, confidence, status)
-                    VALUES ('description_update', ?, ?, 0.9, 'applied')`)
-                    .run(cat.path, JSON.stringify({
-                        old_description: cat.description,
-                        new_description: newDesc,
-                        fragment_count_at_update: cat.fragment_count,
-                    }));
-                regenerated++;
-                console.log(`[Archivist] 描述更新: ${cat.path} → "${newDesc.substring(0, 60)}..."`);
-            }
-        } catch (e) {
-            console.error(`[Archivist] 描述生成失败 (${cat.path}):`, e.message);
-        }
-    }
-
-    return { regenerated, assessed: cats.length, batch: batch.length };
-}
-
-// ═══════════════════════════════════════════════════════
-// Tool: detectBeliefDrift
-//
-// Deep cycle task: compare early vs recent fragments within a
-// constellation to detect when user's feelings/views on a topic
-// have meaningfully shifted. Writes to ontology_changelog and
-// updates the constellation description with an evolution note.
-// ═══════════════════════════════════════════════════════
-
-async function detectBeliefDrift() {
-    const db = getDb();
-
-    const lastRun = db.prepare(
-        "SELECT created_at FROM ontology_changelog WHERE action = 'belief_drift' ORDER BY created_at DESC LIMIT 1"
-    ).get();
-    if (lastRun) {
-        const hoursAgo = (Date.now() - new Date(lastRun.created_at + 'Z').getTime()) / 3600000;
-        if (hoursAgo < 4) return { skipped: true, reason: 'cooldown' };
-    }
-
-    // Only check constellations with enough fragments for a meaningful comparison
-    const constellations = db.prepare(`
-        SELECT o.id, o.path, o.label, o.description, o.fragment_count
-        FROM memory_ontology o
-        WHERE o.fragment_count >= 10
-          AND o.id IN (SELECT DISTINCT category_id FROM fragment_categories)
-        ORDER BY o.fragment_count DESC
-        LIMIT 5
-    `).all();
-
-    if (constellations.length === 0) return { checked: 0 };
-
-    let checked = 0, driftsFound = 0;
-
-    for (const c of constellations) {
-        // Split fragments into early (oldest 40%) and recent (newest 40%)
-        const allFrags = db.prepare(`
-            SELECT mf.content, mf.source_date, mf.created_at
-            FROM memory_fragments mf
-            JOIN fragment_categories fc ON fc.fragment_id = mf.id
-            WHERE fc.category_id = ? AND mf.status = 'active'
-            ORDER BY COALESCE(mf.source_date, mf.created_at) ASC
-        `).all(c.id);
-
-        if (allFrags.length < 10) continue;
-
-        const mid = Math.floor(allFrags.length * 0.4);
-        const early = allFrags.slice(0, mid);
-        const recent = allFrags.slice(-mid);
-        if (early.length < 3 || recent.length < 3) continue;
-
-        const prompt = `${WORLD_CONTEXT}
-
-${buildLandscapeIndex()}
-
-你是 Companion。你正在审视「${c.path}」这个记忆星座。user 对这个主题的看法可能随时间发生了变化。请比较早期和近期的碎片，判断是否存在信念漂移。
-
-## 早期碎片（时间较早）
-${early.map((f, i) => `[${i + 1}] (${f.source_date || '?'}) ${f.content}`).join('\n')}
-
-## 近期碎片（时间较晚）
-${recent.map((f, i) => `[${i + mid + 1}] (${f.source_date || '?'}) ${f.content}`).join('\n')}
-
-## 判断
-
-比较两组碎片中 user 的情感态度/行为模式/对人事物的看法。只输出一个 JSON：
-
-如果态度基本一致，没明显变化：
-{"changed": false}
-
-如果有显著变化：
-{
-  "changed": true,
-  "old_view": "她曾认为/感受到...",
-  "new_view": "她现在...",
-  "nature": "gradual" | "event_driven",
-  "confidence": 0.0-1.0
-}
-
-严格：
-- 只基于碎片中实际写的内容判断，不要推测
-- 不是所有变化都值得记录——必须是情感态度或行为模式上的显著转变
-- 如果只是碎片样本不同（而非态度变了），输出 changed:false
-- 只输出 JSON，不要任何前缀或后缀`;
-
-        try {
-            const response = await callLLM(
-                [{ role: 'user', parts: [{ text: prompt }] }],
-                null, null,
-                { temperature: 0.2, maxOutputTokens: 300 },
-                ARCHIVIST_LLM_CONFIG_ID
-            );
-
-            let text = response?.reply || '';
-            text = text.replace(/```json|```/g, '').trim();
-            const match = text.match(/\{[\s\S]*\}/);
-            if (!match) continue;
-
-            const result = JSON.parse(match[0]);
-            checked++;
-
-            if (result.changed && result.confidence >= 0.7) {
-                db.prepare(`INSERT INTO ontology_changelog (action, category_id, category_path, detail, confidence, status)
-                    VALUES ('belief_drift', ?, ?, ?, ?, 'applied')`)
-                    .run(c.id, c.path, JSON.stringify({
-                        old_view: result.old_view,
-                        new_view: result.new_view,
-                        nature: result.nature,
-                        early_fragment_count: early.length,
-                        recent_fragment_count: recent.length
-                    }), result.confidence);
-
-                // Append evolution note to constellation description
-                if (c.description) {
-                    const driftNote = `\n\n【信念漂移】她变了：${result.old_view} → ${result.new_view}`;
-                    const newDesc = c.description + driftNote;
-                    db.prepare("UPDATE memory_ontology SET description = ?, updated_at = datetime('now') WHERE id = ?")
-                        .run(newDesc, c.id);
-                }
-
-                driftsFound++;
-                console.log(`[Archivist] 信念漂移: ${c.path} — "${result.old_view}" → "${result.new_view}"`);
-            }
-        } catch (e) {
-            console.error(`[Archivist] 信念漂移检测失败 (${c.path}):`, e.message);
-        }
-    }
-
-    return { checked, drifts: driftsFound };
-}
-
-// ═══════════════════════════════════════════════════════
 // Tool: consolidateCategory
 //
 // Deep cycle task: select dense leaf categories, merge related
@@ -4618,17 +3274,24 @@ const CATEGORY_CONSOLIDATE_MAX_FRAGS = 30;   // max fragments to fetch per categ
 async function consolidateCategory() {
     const db = getDb();
 
-    // Select dense categories with enough active fragments
+    // v5.3: 从 entity_profiles 星座读取（替代旧的 memory_ontology 知识树）
+    // 跳过 用户/AI（碎片太多，每次取30条无法覆盖）和聚合实体
+    const CONSOLIDATE_SKIP = [USER.name, AI.name, '音乐', '共读'];
+    const CONSOLIDATE_SKIP_PH = CONSOLIDATE_SKIP.map(() => '?').join(',');
+
     const candidates = db.prepare(`
-        SELECT o.id, o.path, o.label, o.description, o.fragment_count,
+        SELECT ep.id, ep.name as path, ep.name as label, ep.facts as description, ep.fragment_count,
+               ep.category,
                (SELECT COUNT(*) FROM memory_fragments mf
-                JOIN fragment_categories fc ON fc.fragment_id = mf.id
-                WHERE fc.category_id = o.id AND mf.status = 'active') as active_count
-        FROM memory_ontology o
-        WHERE o.fragment_count >= ?
-        ORDER BY o.fragment_count DESC
+                JOIN fragment_entities fe ON fe.fragment_id = mf.id
+                WHERE fe.entity_id = ep.id AND mf.status = 'active') as active_count
+        FROM entity_profiles ep
+        WHERE ep.status = 'active'
+          AND ep.fragment_count >= ?
+          AND ep.name NOT IN (${CONSOLIDATE_SKIP_PH})
+        ORDER BY ep.fragment_count DESC
         LIMIT ?
-    `).all(CATEGORY_CONSOLIDATE_MIN_FRAGS, CATEGORY_CONSOLIDATE_MAX_CATS);
+    `).all(CATEGORY_CONSOLIDATE_MIN_FRAGS, ...CONSOLIDATE_SKIP, CATEGORY_CONSOLIDATE_MAX_CATS);
 
     if (candidates.length === 0) return { categories: 0, episodes: 0 };
 
@@ -4641,13 +3304,13 @@ async function consolidateCategory() {
 
         categoriesProcessed++;
 
-        // Fetch active fragments in this category
+        // Fetch active fragments linked to this constellation
         const fragments = db.prepare(`
             SELECT mf.id, mf.content, mf.emotional_weight, mf.source, mf.source_date,
                    mf.source_msg_ids, mf.entity, mf.created_at
             FROM memory_fragments mf
-            JOIN fragment_categories fc ON fc.fragment_id = mf.id
-            WHERE fc.category_id = ? AND mf.status = 'active'
+            JOIN fragment_entities fe ON fe.fragment_id = mf.id
+            WHERE fe.entity_id = ? AND mf.status = 'active'
             ORDER BY mf.created_at DESC
             LIMIT ?
         `).all(cat.id, CATEGORY_CONSOLIDATE_MAX_FRAGS);
@@ -4665,9 +3328,9 @@ async function consolidateCategory() {
 
 ${buildLandscapeIndex()}
 
-你是类别记忆整合器。你看到的碎片都已经归类到了同一知识树类别下：
-**类别路径**：${cat.path}
-**当前描述**：${cat.description || '无'}
+你是星座记忆整合器。你看到的碎片都来自同一个记忆星座：
+**星座名称**：${cat.path}（${cat.category || 'unknown'}）
+**当前概述**：${cat.description || '无'}
 
 ## 你的任务
 
@@ -4677,8 +3340,6 @@ ${buildLandscapeIndex()}
    - 每组至少3条碎片才值得合并
 
 2. **对每个可合并的组**，将碎片合并为一条规范episode记忆（第三人称，不超过150字）。
-
-3. **如果碎片中有新的事实信息**（之前类别描述中没提到的），更新类别描述（一句话，不超过50字，描述此类别下碎片的主要主题）。如果现有描述已经准确覆盖，输出 null。
 
 ## 分量判断 (significance)
 - 8-10：情感转折、重大决定、深刻冲突、关系里程碑
@@ -4699,8 +3360,7 @@ ${buildLandscapeIndex()}
       "confidence": "high/medium/low",
       "contradiction": null
     }
-  ],
-  "description_update": "新的类别描述，如果无更新则为null"
+  ]
 }`;
 
         try {
@@ -4731,7 +3391,7 @@ ${buildLandscapeIndex()}
 
                 const sig = typeof cluster.significance === 'number' ? cluster.significance : 5;
                 if (sig < 4) {
-                    console.log(`[Archivist] 类别整合跳过(分量不足 sig=${sig}): ${cat.path}`);
+                    console.log(`[Archivist] 星座整合跳过(分量不足 sig=${sig}): ${cat.path}`);
                     continue;
                 }
 
@@ -4762,23 +3422,24 @@ ${buildLandscapeIndex()}
                 // Write to memories table
                 const title = cluster.merged_memory.slice(0, 50);
                 const insert = db.prepare(`
-                    INSERT INTO memories (title, content, weight, valid_from, status, source_msg_ids, layer, consolidation_type, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, 'permanent', ?, 'episode', 'standard', datetime('now'), datetime('now'))
+                    INSERT INTO memories (title, content, weight, valid_from, status, source_msg_ids, entity_id, layer, consolidation_type, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'permanent', ?, ?, 'episode', 'standard', datetime('now'), datetime('now'))
                 `);
                 const info = insert.run(
                     title,
                     cluster.merged_memory,
                     mergedWeight,
                     finalDate,
-                    JSON.stringify([...allMsgIds])
+                    JSON.stringify([...allMsgIds]),
+                    cat.id
                 );
                 const memoryId = info.lastInsertRowid;
 
-                // Index to ChromaDB
+                // Index to ChromaDB (v5.3: re-enabled for Librarian retrieval)
                 try {
                     const { chromaDBOperation } = require('./memory');
                     const idxResult = await chromaDBOperation('index_batch', {
-                        items: [{ id: `memory_${memoryId}`, text: cluster.merged_memory, metadata: { source: 'archivist_consolidate' } }]
+                        items: [{ id: `memory_${memoryId}`, text: cluster.merged_memory, metadata: { source: 'archivist_consolidate', entity_id: cat.id } }]
                     });
                     const chromaId = idxResult.indexed > 0 ? `memory_${memoryId}`
                         : (idxResult.duplicates?.length > 0 ? `dup_of_${idxResult.duplicates[0].existing_id}` : null);
@@ -4787,6 +3448,42 @@ ${buildLandscapeIndex()}
                     }
                 } catch (e) {
                     console.error(`[Archivist] consolidateCategory ChromaDB index failed:`, e.message);
+                }
+
+                // v5.12: 共享碎片实体同步 — 碎片可能同时链接到多个entity
+                // （如"和朋友看某剧"链接到「某朋友」和「某剧名」）
+                // 合并后的episode应两边都有，否则consumed类实体永远拿不到叙事弧线
+                const sharedEntities = db.prepare(`
+                    SELECT fe.entity_id, ep.name, ep.category, COUNT(*) as shared_count
+                    FROM fragment_entities fe
+                    JOIN entity_profiles ep ON ep.id = fe.entity_id
+                    WHERE fe.fragment_id IN (${mergedIds.map(() => '?').join(',')})
+                      AND fe.entity_id != ?
+                    GROUP BY fe.entity_id
+                    HAVING shared_count >= 3
+                `).all(...mergedIds, cat.id);
+
+                for (const shared of sharedEntities) {
+                    const sharedInfo = insert.run(
+                        title,
+                        cluster.merged_memory,
+                        mergedWeight,
+                        finalDate,
+                        JSON.stringify([...allMsgIds]),
+                        shared.entity_id
+                    );
+                    console.log(`[Archivist] 星座整合 [${shared.name}(${shared.category})]: 共享episode #${sharedInfo.lastInsertRowid} (${shared.shared_count}/${mergedIds.length}个共享碎片, from ${cat.path})`);
+                    newEpisodes.push({
+                        memoryId: sharedInfo.lastInsertRowid,
+                        memoryContent: cluster.merged_memory,
+                        fragmentIds: mergedIds,
+                        correctedDate: cluster.corrected_date || null,
+                        confidence: cluster.confidence || 'medium',
+                        contradiction: cluster.contradiction || null,
+                        significance: sig,
+                        entityId: shared.entity_id,
+                        entityName: shared.name,
+                    });
                 }
 
                 // Mark fragments as consolidated
@@ -4804,29 +3501,18 @@ ${buildLandscapeIndex()}
                     confidence: cluster.confidence || 'medium',
                     contradiction: cluster.contradiction || null,
                     significance: sig,
+                    entityId: cat.id,
+                    entityName: cat.path,
                 });
 
-                console.log(`[Archivist] 类别整合 [${cat.path}]: ${mergedIds.length}碎片 → episode #${memoryId} (sig=${sig})`);
+                console.log(`[Archivist] 星座整合 [${cat.path}]: ${mergedIds.length}碎片 → episode #${memoryId} (sig=${sig})`);
             }
 
-            // Update category description if warranted
-            if (result.description_update && result.description_update !== 'null') {
-                db.prepare('UPDATE memory_ontology SET description = ?, updated_at = datetime(\'now\') WHERE id = ?')
-                    .run(result.description_update, cat.id);
-                db.prepare(`INSERT INTO ontology_changelog (action, category_path, detail, created_at)
-                    VALUES ('description_update', ?, ?, datetime('now'))`)
-                    .run(cat.path, JSON.stringify({ source: 'consolidate_category', fragment_count_at_update: cat.fragment_count }));
-                console.log(`[Archivist] 类别整合: ${cat.path} 描述更新 → "${result.description_update}"`);
-            }
+            // 概述更新已移除——统一由 regenerateEntityOverviews 负责
+            // consolidateCategory 本职是碎片→叙事记忆合并，不应兼职写概述
 
-            // Refresh centroid (fragment composition changed)
-            const { refreshFragmentCount } = require('./ontology');
-            refreshFragmentCount(cat.id);
-            const newCentroid = await computeCategoryCentroid(cat.id);
-            if (newCentroid) {
-                db.prepare('UPDATE memory_ontology SET centroid_embedding = ?, updated_at = datetime(\'now\') WHERE id = ?')
-                    .run(JSON.stringify(newCentroid), cat.id);
-            }
+            // v5.3: entity_profiles doesn't have centroid_embedding — skip centroid refresh
+            // Fragment counts will be refreshed naturally on next classification cycle
 
         } catch (e) {
             console.error(`[Archivist] consolidateCategory 失败 [${cat.path}]:`, e.message);
@@ -4842,6 +3528,9 @@ ${buildLandscapeIndex()}
             );
         } catch (_) {}
 
+        // v5.3: Saga trigger kept for immediate effect, but clusterSagas is ALSO independently
+        // schedulable in GARDEN_TASKS. This dual-trigger ensures sagas update promptly
+        // when new episodes arrive, while the garden plan covers periodic full-clustering.
         try {
             const episodeCount = db.prepare("SELECT COUNT(*) as c FROM memories WHERE layer='episode' AND status='permanent'").get();
             if (episodeCount.c >= 5) {
@@ -4854,9 +3543,10 @@ ${buildLandscapeIndex()}
         } catch (_) {}
     }
 
-    console.log(`[Archivist] 类别整合完成: ${categoriesProcessed}个类别 → ${episodesWritten}条episode`);
+    console.log(`[Archivist] 星座整合完成: ${categoriesProcessed}个星座 → ${episodesWritten}条episode`);
     return { categories: categoriesProcessed, episodes: episodesWritten };
 }
+
 
 // ═══════════════════════════════════════════════════════
 // Tool: regenerateEntityOverviews
@@ -5945,16 +4635,10 @@ function registerAllTools() {
         '从碎片中推断人物与User的关系，创建/更新 entity_profiles');
     registerTool('extract_insights', extractFragmentInsights,
         '提取碎片揭示的User个人特质/价值观/行为模式');
-    registerTool('detect_themes', detectEmergentThemes,
-        '检测未分类碎片中的涌现主题，提案新 ontology 类别');
     registerTool('detect_emergent_places_events', detectEmergentPlacesAndEvents,
         '涌现地点/事件检测：聚类未链接place/event的碎片，补漏掉的星座');
-    registerTool('regenerate_descriptions', regenerateCategoryDescriptions,
-        '基于实际碎片内容更新类别描述');
     registerTool('regenerate_entity_overviews', regenerateEntityOverviews,
         '为实体生成 Companion 视角的叙事概述');
-    registerTool('reconcile_person_categories', reconcilePersonCategories,
-        '按人名关键词调和碎片 → 人物类别，修复遗漏分类');
     registerTool('maintain_patterns', maintainPatterns,
         '维护已有行为模式——bigram匹配新碎片、追加证据、刷新freshness、检测漂移',
         'bigram', 'zero', 'zero', { cooldown: MIN_GAP_PATTERN_CLUSTER },
@@ -5977,49 +4661,8 @@ if (!global.__archivistToolsRegistered) {
 // Legacy API Compatibility
 // ═══════════════════════════════════════════════════════
 
-// runArchivist now starts the Agent loop (replaces old cron-based entry)
+// Agent loop is the primary entry (replaces the old cron-based runArchivist)
 // For backwards compat, also accepts being called without arguments
-async function runArchivist() {
-    // Legacy behavior: if called directly, do one full cycle
-    console.log('[Archivist] 手动触发（兼容旧调用）...');
-    const db = getDb();
-
-    const catCount = db.prepare('SELECT COUNT(*) as c FROM memory_ontology').get();
-    if ((catCount?.c || 0) === 0) {
-        const bootResult = await bootstrapOntology();
-        if (bootResult.created > 0) {
-            clearKeywordCache();
-            const { refreshFragmentCount } = require('./ontology');
-            const newCats = db.prepare('SELECT id FROM memory_ontology').all();
-            for (const nc of newCats) refreshFragmentCount(nc.id);
-        }
-        return { classifyResult: { classified: 0 }, themeResult: { skipped: true }, densityResult: { proposals: 0 } };
-    }
-
-    const classifyResult = await classifyFragments();
-    console.log(`[Archivist] 分类完成: ${classifyResult.classified} 条`);
-
-    const themeResult = await detectEmergentThemes();
-    if (!themeResult.skipped) {
-        console.log(`[Archivist] 主题检测完成: ${themeResult.proposals || 0} 条提案`);
-    }
-
-    const applyResult = await applyHighConfidenceProposals();
-    const descResult = await regenerateCategoryDescriptions();
-    const entityOverviewResult = await regenerateEntityOverviews();
-    if (entityOverviewResult.regenerated > 0) {
-        console.log(`[Archivist] Entity 概述: ${entityOverviewResult.regenerated} 个`);
-    }
-    const entityResult = await discoverEntityRelationships();
-    if (entityResult.discovered > 0) {
-        console.log(`[Archivist] 实体关系发现: ${entityResult.discovered} 个新档案`);
-    }
-
-    const insightResult = await extractFragmentInsights();
-    console.log('[Archivist] 运行结束');
-    return { classifyResult, themeResult, applyResult, descResult, entityResult, insightResult };
-}
-
 // ═══════════════════════════════════════════════════════
 // Merge Executor — consolidate overlapping categories
 // ═══════════════════════════════════════════════════════
@@ -6030,340 +4673,7 @@ async function runArchivist() {
 // and auto-merges without LLM confirmation.
 // ═══════════════════════════════════════════════════════
 
-async function detectAndMergeOverlaps() {
-    const db = getDb();
-    const threshold = AUTO_MERGE_OVERLAP_THRESHOLD;
-
-    // Find all category pairs sorted by fragment count
-    const cats = db.prepare(`
-        SELECT id, path, fragment_count FROM memory_ontology
-        WHERE parent_id IS NULL
-        ORDER BY fragment_count ASC
-    `).all();
-
-    if (cats.length < 2) return { merged: 0 };
-
-    let merged = 0;
-
-    for (let i = 0; i < cats.length; i++) {
-        const small = cats[i];
-        for (let j = i + 1; j < cats.length; j++) {
-            const large = cats[j];
-
-            // Only merge smaller into larger
-            if (small.fragment_count >= large.fragment_count) continue;
-            // Skip if either has too few fragments
-            if (small.fragment_count < 3) continue;
-
-            // Compute overlap
-            const overlap = db.prepare(`
-                SELECT COUNT(*) as c FROM fragment_categories fc1
-                JOIN fragment_categories fc2 ON fc1.fragment_id = fc2.fragment_id
-                WHERE fc1.category_id = ? AND fc2.category_id = ?
-            `).get(small.id, large.id).c;
-
-            const ratio = overlap / small.fragment_count;
-            if (ratio < threshold) continue;
-
-            // Also check path keyword overlap as safety net
-            const smallKW = _pathKeywords(small.path);
-            const largeKW = _pathKeywords(large.path);
-            const sharedKW = [...smallKW].filter(k => largeKW.has(k));
-            if (sharedKW.length === 0) continue;
-
-            console.log(`[Archivist] 🔍 自动重叠检测: "${small.path}" (${small.fragment_count}f) ⊂ "${large.path}" (${large.fragment_count}f) 重叠=${(ratio*100).toFixed(0)}%`);
-
-            // Move unique fragments from small to large
-            const moved = db.prepare(`
-                INSERT OR IGNORE INTO fragment_categories (fragment_id, category_id, confidence, classified_by)
-                SELECT fragment_id, ?, confidence, 'archivist_auto_merge'
-                FROM fragment_categories WHERE category_id = ?
-            `).run(large.id, small.id);
-
-            // Delete small category's fragment links
-            db.prepare('DELETE FROM fragment_categories WHERE category_id = ?').run(small.id);
-
-            // Null changelog FKs
-            db.prepare('UPDATE ontology_changelog SET category_id = NULL WHERE category_id = ?').run(small.id);
-
-            // Delete the subsumed category
-            db.prepare('DELETE FROM memory_ontology WHERE id = ?').run(small.id);
-
-            // Update large category fragment count
-            const newCount = db.prepare('SELECT COUNT(*) as c FROM fragment_categories WHERE category_id = ?').get(large.id).c;
-            db.prepare("UPDATE memory_ontology SET fragment_count = ?, updated_at = datetime('now') WHERE id = ?")
-                .run(newCount, large.id);
-
-            // Log
-            db.prepare(`INSERT INTO ontology_changelog (category_id, action, category_path, detail, confidence, status)
-                VALUES (?, 'auto_merge', ?, ?, 0.95, 'completed')`).run(
-                large.id, large.path,
-                JSON.stringify({
-                    survivor: large.path,
-                    victim: small.path,
-                    victim_id: small.id,
-                    overlap: ratio,
-                    shared_keywords: sharedKW.slice(0, 5),
-                    reason: `auto-detected ${(ratio*100).toFixed(0)}% overlap, zero-LLM merge`,
-                })
-            );
-
-            console.log(`[Archivist]   ✅ 自动合并: "${small.path}" → "${large.path}" (移动${moved.changes}条)`);
-            merged++;
-
-            // Update our local copy since small is now deleted
-            small.fragment_count = 0; // mark as deleted
-            break;
-        }
-    }
-
-    if (merged > 0) {
-        agentState.treeChanged = true;
-    }
-    return { merged };
-}
-
 // Extract keywords from a category path for overlap safety check
-function _pathKeywords(p) {
-    const stopWords = new Set(['的','与','和','关于','关于我们','中','在','及','或','之','对','不','含','创作','人际','关系']);
-    const parts = p.split('/');
-    const words = new Set();
-    for (const part of parts) {
-        for (let i = 0; i < part.length - 1; i++) {
-            const bigram = part.substring(i, i + 2);
-            if (!stopWords.has(bigram)) words.add(bigram);
-        }
-        if (part.length >= 2 && !stopWords.has(part)) words.add(part);
-    }
-    return words;
-}
-
-async function executeCategoryMerges() {
-    const db = getDb();
-
-    // Build detailed landscape with full descriptions and sample counts
-    const allCats = db.prepare(`
-        SELECT id, path, label, description, fragment_count
-        FROM memory_ontology ORDER BY fragment_count DESC
-    `).all();
-
-    if (allCats.length < 2) {
-        console.log('[Archivist] 合并执行器: 类别不足，跳过');
-        return { merged: 0, deleted: 0 };
-    }
-
-    // Get sample fragments for each category (for LLM to understand content)
-    const catSamples = new Map();
-    for (const cat of allCats) {
-        const samples = db.prepare(`
-            SELECT mf.content FROM memory_fragments mf
-            JOIN fragment_categories fc ON fc.fragment_id = mf.id
-            WHERE fc.category_id = ? AND mf.status = 'active'
-            ORDER BY mf.created_at DESC LIMIT 2
-        `).all(cat.id);
-        catSamples.set(cat.id, samples.map(s => s.content.substring(0, 80)));
-    }
-
-    const catEntries = allCats.map((c, i) => {
-        const samples = catSamples.get(c.id) || [];
-        const desc = c.description || '无描述';
-        return `${i}. id=${c.id} | ${c.path} | ${c.fragment_count}条\n   描述: ${desc}\n   示例: ${samples.map(s => `"${s}"`).join(' | ') || '无'}`;
-    }).join('\n\n');
-
-    // Phase 1: LLM identifies overlap groups
-    const detectPrompt = `${WORLD_CONTEXT}
-
-你是记忆星图的守护者。你需要审视全部星座（类别），找出语义重叠、应该合并的组。
-
-## 全部星座（共${allCats.length}个）
-
-${catEntries}
-
-## 判定标准
-
-两个或多个类别在以下情况下应该合并：
-- 描述的是同一本书/同一作品的批注（不同类别名只是措辞差异）
-- 一个类别是另一个的子集（上级类别和具体实例包含相同内容）
-- 描述高度重叠，且示例碎片指向同一主题
-
-不应该合并的情况：
-- 一个类别是"User的X"，另一个是"Companion的X"——它们是不同的视角/作者
-- 宽泛类别（如"文学与情感共鸣"）和具体类别（如"某书的批注"），如果内容确实不同
-
-## 输出格式
-
-只输出一个JSON对象，不要markdown包裹：
-{
-  "groups": [
-    {
-      "reason": "简述为什么这组应该合并",
-      "category_ids": [83, 63],
-      "survivor_id": 83,
-      "merged_name": "最好的那个类别名",
-      "merged_description": "合并后的功能描述，格式：包含X，不含Y。"
-    }
-  ]
-}
-
-如果没有任何需要合并的，输出 {"groups": []}
-注意：每组至少2个类别。同一个类别只能出现在一个组里。`;
-
-    let detectedGroups = [];
-    try {
-        const response = await callLLM(
-            [{ role: 'user', parts: [{ text: detectPrompt }] }],
-            null, null,
-            { temperature: 0.15, maxOutputTokens: 3000 },
-            ARCHIVIST_VERIFY_CONFIG_ID
-        );
-
-        let text = response?.reply || '';
-        text = text.replace(/```json|```/g, '').trim();
-        const match = text.match(/\{[\s\S]*\}/);
-        if (!match) {
-            console.error('[Archivist] 合并检测返回非JSON:', text.substring(0, 200));
-            return { merged: 0, deleted: 0 };
-        }
-        const result = JSON.parse(match[0]);
-        detectedGroups = result.groups || [];
-    } catch (e) {
-        console.error('[Archivist] 合并检测失败:', e.message);
-        return { merged: 0, deleted: 0 };
-    }
-
-    if (detectedGroups.length === 0) {
-        console.log('[Archivist] 合并执行器: 未发现需要合并的类别组');
-        return { merged: 0, deleted: 0 };
-    }
-
-    console.log(`[Archivist] 合并执行器: 发现 ${detectedGroups.length} 组候选合并`);
-
-    // Phase 2: Execute each merge
-    let mergedCount = 0;
-    let deletedCount = 0;
-
-    for (const group of detectedGroups) {
-        if (!group.category_ids || group.category_ids.length < 2) continue;
-        if (!group.survivor_id) {
-            group.survivor_id = group.category_ids[0];
-        }
-
-        const ids = group.category_ids;
-        const survivorId = group.survivor_id;
-        const victims = ids.filter(id => id !== survivorId);
-
-        // Verify all IDs exist
-        const survivor = db.prepare('SELECT id, path, fragment_count FROM memory_ontology WHERE id = ?').get(survivorId);
-        if (!survivor) {
-            console.error(`[Archivist] 合并执行器: 幸存类别 #${survivorId} 不存在，跳过`);
-            continue;
-        }
-
-        const victimPaths = [];
-        for (const vid of victims) {
-            const v = db.prepare('SELECT id, path FROM memory_ontology WHERE id = ?').get(vid);
-            if (v) victimPaths.push(v.path);
-        }
-        if (victimPaths.length === 0) continue;
-
-        console.log(`[Archivist] 🔀 合并: "${survivor.path}" ← ${victimPaths.map(p => `"${p}"`).join(', ')}`);
-        console.log(`[Archivist]    理由: ${group.reason}`);
-
-        // Safety: check path keyword overlap to prevent nonsensical merges
-        // Extract meaningful keywords (2+ char, non-stopword) from path names
-        const stopWords = new Set(['的','与','和','关于','关于我们','中','在','及','或','之','对','不','含']);
-        function pathKeywords(p) {
-            // Split on / and extract 2+ char segments
-            const parts = p.split('/');
-            const words = [];
-            for (const part of parts) {
-                // Also split Chinese text into bigrams for matching
-                for (let i = 0; i < part.length - 1; i++) {
-                    const bigram = part.substring(i, i + 2);
-                    if (!stopWords.has(bigram)) words.push(bigram);
-                }
-                // Add full segments
-                if (part.length >= 2 && !stopWords.has(part)) words.push(part);
-            }
-            return new Set(words);
-        }
-        const survivorKW = pathKeywords(survivor.path);
-        const allVictimKW = new Set();
-        for (const vp of victimPaths) {
-            for (const kw of pathKeywords(vp)) allVictimKW.add(kw);
-        }
-        const sharedKW = [...survivorKW].filter(kw => allVictimKW.has(kw));
-        if (sharedKW.length === 0) {
-            console.log(`[Archivist] ⚠️ 安全检查: 路径无共同关键词，跳过合并`);
-            console.log(`[Archivist]    幸存: ${survivor.path.substring(0, 50)}`);
-            console.log(`[Archivist]    受害者: ${victimPaths.join(', ').substring(0, 80)}`);
-            continue;
-        }
-        console.log(`[Archivist]    ✓ 共同关键词: ${sharedKW.slice(0, 5).join(', ')}`);
-
-        // Move fragments from victims to survivor (avoid duplicates)
-        const moveStmt = db.prepare(`
-            INSERT OR IGNORE INTO fragment_categories (fragment_id, category_id, confidence, classified_by)
-            SELECT fragment_id, ?, confidence, 'archivist_merged'
-            FROM fragment_categories WHERE category_id = ?
-        `);
-        const deleteVictimFC = db.prepare('DELETE FROM fragment_categories WHERE category_id = ?');
-        const nullChangelogFK = db.prepare('UPDATE ontology_changelog SET category_id = NULL WHERE category_id = ?');
-        const deleteVictimCat = db.prepare('DELETE FROM memory_ontology WHERE id = ?');
-        const logMerge = db.prepare(`INSERT INTO ontology_changelog (action, category_path, detail, confidence, status)
-            VALUES ('merge_executed', ?, ?, ?, 'completed')`);
-
-        for (const vid of victims) {
-            moveStmt.run(survivorId, vid);
-            deleteVictimFC.run(vid);
-            nullChangelogFK.run(vid);
-            deleteVictimCat.run(vid);
-            deletedCount++;
-        }
-
-        // Update survivor description
-        if (group.merged_description) {
-            db.prepare(`UPDATE memory_ontology SET description = ?, updated_at = datetime('now') WHERE id = ?`)
-                .run(group.merged_description, survivorId);
-        }
-        // Rename survivor if needed
-        if (group.merged_name && group.merged_name !== survivor.path) {
-            db.prepare(`UPDATE memory_ontology SET path = ?, label = ?, updated_at = datetime('now') WHERE id = ?`)
-                .run(group.merged_name, group.merged_name, survivorId);
-        }
-
-        // Log the merge
-        logMerge.run(
-            `merge_${survivorId}_${victims.join('_')}`,
-            JSON.stringify({
-                survivor: survivor.path,
-                victims: victimPaths,
-                reason: group.reason,
-                merged_name: group.merged_name,
-                merged_description: group.merged_description,
-            }),
-            0.95,
-        );
-
-        // Recompute centroid and fragment count
-        const { refreshFragmentCount } = require('./ontology');
-        refreshFragmentCount(survivorId);
-        const newCentroid = await computeCategoryCentroid(survivorId);
-        if (newCentroid) {
-            db.prepare(`UPDATE memory_ontology SET centroid_embedding = ?, updated_at = datetime('now') WHERE id = ?`)
-                .run(JSON.stringify(newCentroid), survivorId);
-        }
-
-        mergedCount++;
-    }
-
-    // Clear cached category list
-    clearKeywordCache();
-
-    console.log(`[Archivist] 合并执行器完成: ${mergedCount}组合并 → ${deletedCount}个类别删除`);
-    return { merged: mergedCount, deleted: deletedCount };
-}
-
 // ═══════════════════════════════════════════════════════
 // decideGardenAction — 深循环决策：flash-lite 看全景 → 决定任务优先级
 // ================================================================
@@ -6511,9 +4821,6 @@ module.exports = {
     getTool,
     listTools,
 
-    // Legacy API (backwards compat)
-    runArchivist,
-
     // Individual tools (direct access)
     classifyFragments,
     classifyFragmentBatch,
@@ -6533,19 +4840,9 @@ module.exports = {
     clusterObservations,
     spotCheckClassifications,
     reviewConstellationAfterClassification,
-    bootstrapOntology,
-    detectEmergentThemes,
-    applyHighConfidenceProposals,
     discoverEntityRelationships,
     extractFragmentInsights,
-    regenerateCategoryDescriptions,
     regenerateEntityOverviews,
-    reconcilePersonCategories,
-    verifyEntityClassifications,
     consolidateCategory,
-    detectBeliefDrift,
     scanContentForNewEntities,
-    triggerGrowthPulse,
-    executeCategoryMerges,
-    detectAndMergeOverlaps,
 };
