@@ -18,6 +18,8 @@
   </nav>
   <div class="tb-sep"></div>
   <button class="stardust-btn" id="stardust-btn" title="星尘 · 观测日志">✦</button>
+  <button class="tb-action" id="import-btn" title="导入聊天记录（JSONL/TXT）">导入</button>
+  <button class="tb-action" id="export-btn" title="导出记忆库（JSONL）">导出</button>
   <span class="tb-count" id="tb-count">— fragments</span>
 </div>
 
@@ -100,6 +102,161 @@
     <div id="stardust-hint">点击信号展开详情 · 点击星座名跳转星图 · 点击空白处关闭</div>
   </div>
 </div>
+<!-- 导入聊天记录 弹窗 -->
+<div id="import-overlay" style="display:none">
+  <div id="import-lens">
+    <div id="import-header">
+      <span class="imp-title">导入聊天记录</span>
+      <button id="import-close">✕</button>
+    </div>
+    <div id="import-drop" class="imp-drop">
+      <input type="file" id="import-file" accept=".txt,.jsonl,.json">
+      <div class="imp-drop-hint">点击选择文件，或拖拽到这里</div>
+      <div class="imp-drop-sub">支持 JSON 数组 / JSONL / TXT（名字: 内容）</div>
+    </div>
+    <div id="import-preview" style="display:none"></div>
+    <div id="import-actions" style="display:none">
+      <button id="import-confirm" class="imp-confirm">确认导入</button>
+      <span class="imp-count" id="import-count"></span>
+    </div>
+    <div id="import-result"></div>
+  </div>
+</div>
+
+<style>
+  .tb-action {
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(100,120,255,0.12);
+    color: rgba(150,170,240,0.55); font-size: 11px; padding: 4px 11px; border-radius: 10px;
+    cursor: pointer; transition: all .2s; font-family: inherit; white-space: nowrap;
+  }
+  .tb-action:hover { background: rgba(255,255,255,0.07); color: rgba(200,215,255,0.85); border-color: rgba(120,140,255,0.3); }
+
+  #import-overlay {
+    position: fixed; inset: 0; z-index: 1000;
+    background: rgba(2,4,16,0.6); backdrop-filter: blur(6px);
+    display: flex; align-items: center; justify-content: center;
+  }
+  #import-lens {
+    background: rgba(3,6,22,0.88); backdrop-filter: blur(28px);
+    border: 1px solid rgba(100,120,255,0.16); border-radius: 16px;
+    padding: 22px; width: 480px; max-width: 92vw; max-height: 84vh; overflow: auto;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  #import-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .imp-title { font-size: 14px; font-weight: 500; color: #e4e8ff; letter-spacing: .03em; }
+  #import-close { background: none; border: none; color: rgba(130,150,210,0.35); cursor: pointer; font-size: 14px; padding: 4px; }
+  #import-close:hover { color: rgba(190,210,255,0.7); }
+
+  .imp-drop {
+    position: relative; border: 1px dashed rgba(100,120,255,0.25); border-radius: 12px;
+    padding: 28px 16px; text-align: center; cursor: pointer; transition: border-color .2s, background .2s;
+  }
+  .imp-drop:hover, .imp-drop.dragover { border-color: rgba(130,160,255,0.5); background: rgba(100,120,255,0.05); }
+  .imp-drop input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .imp-drop-hint { font-size: 13px; color: rgba(200,215,255,0.85); }
+  .imp-drop-sub { font-size: 10.5px; color: rgba(120,140,185,0.45); margin-top: 6px; }
+
+  #import-preview {
+    margin-top: 14px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px; padding: 10px 12px; font-size: 11px; line-height: 1.6;
+    color: rgba(180,200,240,0.62); max-height: 200px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+  }
+  #import-actions { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+  .imp-confirm {
+    background: rgba(100,120,255,0.14); border: 1px solid rgba(120,140,255,0.4);
+    color: rgba(220,230,255,0.92); font-size: 12px; padding: 7px 18px; border-radius: 10px;
+    cursor: pointer; transition: all .2s; font-family: inherit;
+  }
+  .imp-confirm:hover { background: rgba(110,130,255,0.22); box-shadow: 0 0 8px rgba(100,120,255,0.25); }
+  .imp-confirm:disabled { opacity: 0.4; cursor: not-allowed; }
+  .imp-count { font-size: 10.5px; color: rgba(140,160,210,0.5); }
+  #import-result { margin-top: 12px; font-size: 11.5px; line-height: 1.6; color: rgba(140,165,240,0.75); }
+  #import-result.err { color: rgba(255,130,140,0.8); }
+  #import-result.ok { color: rgba(110,220,190,0.85); }
+</style>
+
+<script>
+(function () {
+  var overlay = document.getElementById('import-overlay');
+  var fileInput = document.getElementById('import-file');
+  var drop = document.getElementById('import-drop');
+  var preview = document.getElementById('import-preview');
+  var actions = document.getElementById('import-actions');
+  var confirmBtn = document.getElementById('import-confirm');
+  var countEl = document.getElementById('import-count');
+  var resultEl = document.getElementById('import-result');
+  var fileText = '';
+
+  function reset() {
+    fileText = ''; preview.style.display = 'none'; actions.style.display = 'none';
+    resultEl.textContent = ''; resultEl.className = ''; confirmBtn.disabled = false;
+    fileInput.value = '';
+  }
+  function open() { reset(); overlay.style.display = 'flex'; }
+  function close() { overlay.style.display = 'none'; }
+
+  document.getElementById('import-btn').addEventListener('click', open);
+  document.getElementById('import-close').addEventListener('click', close);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+
+  ['dragover', 'dragenter'].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('dragover'); });
+  });
+  ['dragleave', 'drop'].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('dragover'); });
+  });
+  drop.addEventListener('drop', function (e) {
+    var f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) handleFile(f);
+  });
+  fileInput.addEventListener('change', function () {
+    if (fileInput.files && fileInput.files[0]) handleFile(fileInput.files[0]);
+  });
+
+  function handleFile(file) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      fileText = String(reader.result || '');
+      var lines = fileText.split('\n').filter(function (l) { return l.trim(); });
+      preview.textContent = lines.slice(0, 8).join('\n') + (lines.length > 8 ? '\n…' : '');
+      preview.style.display = 'block';
+      actions.style.display = 'flex';
+      countEl.textContent = '约 ' + lines.length + ' 行';
+    };
+    reader.readAsText(file);
+  }
+
+  confirmBtn.addEventListener('click', function () {
+    if (!fileText.trim()) return;
+    confirmBtn.disabled = true;
+    resultEl.textContent = '导入中…'; resultEl.className = '';
+    fetch('/api/import/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: fileText })
+    }).then(function (r) { return r.json(); }).then(function (data) {
+      if (data.success) {
+        resultEl.textContent = '✓ 已导入 ' + data.count + ' 条消息（用户 ' + data.userCount + ' / AI ' + data.aiCount + '）。后台会在大约 2 分钟内开始提取记忆。';
+        resultEl.className = 'ok';
+        preview.style.display = 'none'; actions.style.display = 'none';
+      } else {
+        resultEl.textContent = '导入失败：' + (data.error || '未知错误');
+        resultEl.className = 'err';
+        confirmBtn.disabled = false;
+      }
+    }).catch(function (e) {
+      resultEl.textContent = '导入失败：' + e.message;
+      resultEl.className = 'err';
+      confirmBtn.disabled = false;
+    });
+  });
+
+  document.getElementById('export-btn').addEventListener('click', function () {
+    window.location.href = '/api/export/memory';
+  });
+})();
+</script>
+
 <script type="module" src="/js/memory/main.js"></script>
 </body>
 </html>
