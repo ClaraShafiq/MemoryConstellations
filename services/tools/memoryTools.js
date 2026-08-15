@@ -235,7 +235,7 @@ const browseMemories = {
           // 多个模糊匹配 → 列出候选项给 Companion 选择
           let output = `【模糊匹配 · "${path}"】\n\n找到 ${fuzzyMatches.length} 个可能相关的星座：\n\n`;
           for (const m of fuzzyMatches) {
-            const ov = (m.overview || '').slice(0, 60);
+            const ov = (m.facts || '').slice(0, 60);
             output += `- **${m.name}** (${m.category}, ${m.fragment_count}碎片)`;
             if (ov) output += ` — ${ov}`;
             output += '\n';
@@ -260,8 +260,8 @@ const browseMemories = {
         const catLabel = catLabels[entityProfile.category] || entityProfile.category || '实体';
         let output = `【${catLabel} · ${entityProfile.name}】\n\n`;
 
-        if (entityProfile.overview) {
-          output += `${entityProfile.overview}\n`;
+        if (entityProfile.facts) {
+          output += `${entityProfile.facts}\n`;
         } else {
           if (entityProfile.relationship_to_clara) {
             output += `${entityProfile.name}是User的${entityProfile.relationship_to_clara}`;
