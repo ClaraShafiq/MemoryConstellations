@@ -6,7 +6,7 @@
 //   update          — 修改已有 current_state 的 content / expires_at
 //   resolve         — 标记 current_state 为 resolved + 写结束原因
 //   update_overview — 更新星座描述（entity_profiles.overview），
-//                      当 Draco 在聊天中了解到某个人/事的新情况时直接修正
+//                      当 Companion 在聊天中了解到某个人/事的新情况时直接修正
 //
 // 与 recall_memory / browse_memories 共享同一个设置开关
 
@@ -45,7 +45,7 @@ const manageUserState = {
     getFunctionDeclaration() {
         return {
             name: 'update_current_state',
-            description: `维护你对User的认知。不是数据库日志——是你对她的关心和观察。
+            description: `维护你对User的认知。不是数据库日志——是你对User的关心和观察。
 
 四种用法：
 1. action="set" — User的状态变了（生理期、搬家、情绪波动…），记下内容和预计持续时间
@@ -82,7 +82,7 @@ const manageUserState = {
                     },
                     overview: {
                         type: 'STRING',
-                        description: '新的完整星座描述，Draco第一人称，≤500字。update_overview 时必填。',
+                        description: '新的完整星座描述，Companion第一人称，≤500字。update_overview 时必填。',
                     },
                 },
                 required: ['action'],
@@ -163,13 +163,13 @@ const manageUserState = {
                 const id = createEntry('current_state', content, {
                     confidence: 0.85,
                     source_quality: 'direct_statement',
-                    created_by: 'chat_draco',
+                    created_by: 'chat_companion',
                     expires_at: expiresAt,
-                    tags: ['current_state', 'draco_observation'],
+                    tags: ['current_state', 'companion_observation'],
                     decay_params: {},  // v5.0: TTL is now in expires_at, decay_params kept for compat
                 });
 
-                console.log(`[manageUserState] set #${id} by chat Draco: "${content.slice(0, 60)}" expires=${expiresAt}`);
+                console.log(`[manageUserState] set #${id} by chat Companion: "${content.slice(0, 60)}" expires=${expiresAt}`);
                 return {
                     success: true,
                     formatted: `已记录。#${id}：${content}（预计 ${expiresDate.toLocaleDateString('zh-CN')} 前有效）。`,
@@ -192,11 +192,11 @@ const manageUserState = {
                     return { success: false, formatted: `未找到活跃状态 #${args.state_id}。它可能已经过期或被删除了。` };
                 }
 
-                // Rate limit for chat Draco: same state_id, 30min cooldown
+                // Rate limit for chat Companion: same state_id, 30min cooldown
                 if (existing.updated_at) {
                     const lastUpdate = new Date(existing.updated_at);
                     const minutesSince = (now - lastUpdate) / (1000 * 60);
-                    if (minutesSince < 30 && existing.created_by === 'chat_draco') {
+                    if (minutesSince < 30 && existing.created_by === 'chat_companion') {
                         return {
                             success: false,
                             formatted: `状态 #${args.state_id} 刚刚在 ${Math.round(minutesSince)} 分钟前更新过。除非User明确要求，请至少等30分钟再更新同一条状态。`,
@@ -245,7 +245,7 @@ const manageUserState = {
                 const reason = args.resolve_reason.slice(0, 200);
                 db.prepare(`UPDATE clara_model SET status = 'resolved', resolved_at = ?,
                     resolve_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-                    .run(nowISO, `chat_draco: ${reason}`, args.state_id);
+                    .run(nowISO, `chat_companion: ${reason}`, args.state_id);
 
                 console.log(`[manageUserState] resolve #${args.state_id}: "${reason.slice(0, 60)}"`);
                 return {
@@ -286,7 +286,7 @@ const manageUserState = {
                     updated_at = datetime('now') WHERE id = ?`).run(newOverview, entity.id);
                 db.prepare(`INSERT INTO ontology_changelog (action, category_path, detail, confidence, status)
                     VALUES ('overview_updated', ?, ?, 0.90, 'completed')`)
-                    .run(entity.name, JSON.stringify({name: entity.name, updated_by: 'chat_draco', reason: 'Draco在聊天中了解到新情况'}));
+                    .run(entity.name, JSON.stringify({name: entity.name, updated_by: 'chat_companion', reason: 'Companion在聊天中了解到新情况'}));
 
                 console.log(`[manageUserState] update_overview "${entityName}": ${newOverview.slice(0, 60)}...`);
                 return { success: true, formatted: `已更新「${entity.name}」的星座描述。` };

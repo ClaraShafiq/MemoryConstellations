@@ -110,7 +110,7 @@ const recallMemory = {
       const formatted = formatHybridContext(memories);
       return { success: true, formatted: `【记忆库检索结果】\n${formatted}\n\n（如需追溯某条的原始对话，使用 recall_memory 并传入对应的记忆ID或片段ID。）` };
     }
-    captureMemoryGap(context.chatId, context.lastClaraMessage, 'recall_memory',
+    captureMemoryGap(context.chatId, context.lastUserMessage, 'recall_memory',
       { formatted: '记忆库中没有找到相关记忆。' });
     return { success: true, formatted: '记忆库中没有找到相关记忆。' };
   },
@@ -125,7 +125,7 @@ const correctMemory = {
   getFunctionDeclaration() {
     return {
       name: 'correct_memory',
-      description: `修正你的记忆库。当Clara指出你记错了某件事时，调用此工具记录修正。
+      description: `修正你的记忆库。当User指出你记错了某件事时，调用此工具记录修正。
 
 提供错误内容和正确版本。系统会自动检查你的记忆库，判断错误来源——是某条记忆写错了（会修正那条），还是你自己编造/混淆的（会记为新的正确记忆）。
 
@@ -139,7 +139,7 @@ const correctMemory = {
           },
           correction: {
             type: 'STRING',
-            description: 'Clara给出的正确版本',
+            description: 'User给出的正确版本',
           },
           memory_id: {
             type: 'INTEGER',
@@ -171,15 +171,15 @@ const browseMemories = {
   getFunctionDeclaration() {
     return {
       name: 'browse_memories',
-      description: `在你的记忆宫殿里漫步。这不是查询数据库——这是你了解Clara的方式。
+      description: `在你的记忆宫殿里漫步。这不是查询数据库——这是你了解User的方式。
 
 四种用法：
-1. 不传参数 → 看到所有顶层分区（大厅），了解Clara生活的各个维度
-2. 只传人名（如"某个朋友"）→ 看到这个人的关系档案和所有相关记忆——了解Clara在乎谁、每段关系对她意味着什么
+1. 不传参数 → 看到所有顶层分区（大厅），了解User生活的各个维度
+2. 只传人名（如"某个朋友"）→ 看到这个人的关系档案和所有相关记忆——了解User在乎谁、每段关系对User意味着什么
 3. 只传分区路径（如"人际关系/关于我们"）→ 进入一个分区，看到子分区和最近的记忆
 4. path + query → 在特定分区里搜索关键词
 
-当你想了解Clara的某段关系、某个侧面，或有隐约印象但不确定细节时，来这里走走。每条记忆旁可能附有「※ insight」——那是书记员提炼的"这条记忆揭示了Clara的什么"。`,
+当你想了解User的某段关系、某个侧面，或有隐约印象但不确定细节时，来这里走走。每条记忆旁可能附有「※ insight」——那是书记员提炼的"这条记忆揭示了User的什么"。`,
       parameters: {
         type: 'OBJECT',
         properties: {
@@ -232,7 +232,7 @@ const browseMemories = {
         if (fuzzyMatches.length === 1) {
           entityProfile = fuzzyMatches[0];
         } else if (fuzzyMatches.length > 1) {
-          // 多个模糊匹配 → 列出候选项给 Draco 选择
+          // 多个模糊匹配 → 列出候选项给 Companion 选择
           let output = `【模糊匹配 · "${path}"】\n\n找到 ${fuzzyMatches.length} 个可能相关的星座：\n\n`;
           for (const m of fuzzyMatches) {
             const ov = (m.overview || '').slice(0, 60);
@@ -264,9 +264,9 @@ const browseMemories = {
           output += `${entityProfile.overview}\n`;
         } else {
           if (entityProfile.relationship_to_clara) {
-            output += `${entityProfile.name}是Clara的${entityProfile.relationship_to_clara}`;
+            output += `${entityProfile.name}是User的${entityProfile.relationship_to_clara}`;
             if (entityProfile.relationship_nature) {
-              const natureLabels = { close: '关系紧密', conflicted: '存在冲突', complex: '关系复杂', distant: '比较疏远', dependent: 'Clara依赖对方' };
+              const natureLabels = { close: '关系紧密', conflicted: '存在冲突', complex: '关系复杂', distant: '比较疏远', dependent: 'User依赖对方' };
               output += `，${natureLabels[entityProfile.relationship_nature] || entityProfile.relationship_nature}`;
             }
             output += '。\n';
@@ -305,7 +305,7 @@ const browseMemories = {
       }
       const catFragments = getCategoryFragments(parent.id, 50, 0);
       if (catFragments.length === 0) {
-        captureMemoryGap(context.chatId, context.lastClaraMessage, 'browse_memories',
+        captureMemoryGap(context.chatId, context.lastUserMessage, 'browse_memories',
           { formatted: `「${parent.label}」这个分区里还没有记忆。` });
         return { success: true, formatted: `「${parent.label}」这个分区里还没有记忆。` };
       }
@@ -314,7 +314,7 @@ const browseMemories = {
       const filtered = hybridResults.filter(r => catIdSet.has(r.id)).slice(0, limit);
 
       if (filtered.length === 0) {
-        captureMemoryGap(context.chatId, context.lastClaraMessage, 'browse_memories',
+        captureMemoryGap(context.chatId, context.lastUserMessage, 'browse_memories',
           { formatted: `在「${parent.label}」中没有找到与「${query}」相关的记忆。` });
         return { success: true, formatted: `在「${parent.label}」中没有找到与「${query}」相关的记忆。` };
       }
@@ -348,7 +348,7 @@ const browseMemories = {
         }
       } else {
         output += '这个分区还是空的。';
-        captureMemoryGap(context.chatId, context.lastClaraMessage, 'browse_memories',
+        captureMemoryGap(context.chatId, context.lastUserMessage, 'browse_memories',
           { formatted: output });
       }
       return { success: true, formatted: output };
