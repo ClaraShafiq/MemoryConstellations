@@ -1,22 +1,40 @@
-# 记忆库服务 — 把这段加到你的 docker-compose.yml 的 services: 下面
+# 记忆库 + ChromaDB 服务 — 把这两段加到你的 docker-compose.yml 的 services: 下面
 # （和 astrbot、snowluma 平级）
 #
-# 注意：先把 deploy/ 里的 Dockerfile 和这个文件放到一起，或把 build 路径指到记忆库目录。
+# 注意：build 的 context 要指到记忆库代码目录（含 deploy/ 里的 Dockerfile）。
 
+  # ── 记忆库主服务（Node.js）──
   memory-constellations:
-    build: ./MemoryConstellations        # 记忆库代码目录（含 Dockerfile）
+    build:
+      context: ./MemoryConstellations
+      dockerfile: deploy/Dockerfile
     container_name: memory-constellations
     restart: always
     ports:
       - "3000:3000"                      # 记忆库 HTTP（桥接插件通过它访问）
     environment:
       - TZ=Asia/Shanghai
-      # ── 必填：下面三个用 `openssl rand -hex 32` 生成 ──
+      # ── 必填：下面两个用 `openssl rand -hex 32` 生成 ──
       - SANCTUARY_ENCRYPTION_KEY=改成64位hex
       - SESSION_SECRET=改成64位hex
       - LOGIN_PASSWORD=改成你的登录密码
       # ── 必填：至少配一个 LLM API key（记忆管线用）──
       - API_KEY=改成你的LLMkey
       # - GEMINI_API_KEY=或填Gemini的key
+      # ⚠️ 待办：memory.js 的 CHROMA_URL 还是写死的 127.0.0.1:7707，
+      #    等改成读环境变量后，这里加 - CHROMA_URL=http://chroma:7707
     volumes:
       - ./memory-data:/app/data          # 持久化数据库 + 配置
+
+  # ── ChromaDB + Embedding 服务（向量/语义检索，可选）──
+  chroma:
+    build:
+      context: ./MemoryConstellations
+      dockerfile: deploy/Dockerfile.chroma
+    container_name: chroma-service
+    restart: always
+    ports:
+      - "7707:7707"                      # ChromaDB HTTP（记忆库通过它做向量检索）
+    volumes:
+      - ./chroma-data:/app/chroma_data   # 持久化向量数据
+      - ./chroma-cache:/app/hf_cache     # 持久化 embedding 模型（避免每次重启重新下载）
