@@ -78,38 +78,66 @@ function daysAgo(dateLabel) {
 }
 
 // ── 实体聚合辅助：从用户消息中识别已知实体 → 按 entity_id 全量捞碎片 ──
-// 实体名缓存：30秒TTL，避免每次检索都全表扫描 entity_profiles
-let _entityCache = null;
-let _entityCacheAt = 0;
-const ENTITY_CACHE_TTL = 30 * 1000;
+// 活动词 → 聚合实体（活动桶）映射。
+// 聚合实体（观影/音乐/共读）不是真人/地点/作品，而是按「活动类型」归堆的桶。
+// 它们的日常说法（看电影/听歌/看书）是闭集，放代码里做版本控制——
+// 不放 DB 别名，否则别名漏配或被迁移冲掉就会静默失效。
+const ACTIVITY_ENTITY_KEYWORDS = [
+    { entityName: '观影', keywords: ['看电影', '电影', '影片', '看片', '观影'] },
+    { entityName: '音乐', keywords: ['听歌', '歌曲', '歌单', '听音乐', '音乐'] },
+    { entityName: '共读', keywords: ['看书', '读书', '阅读', '一起读', '共读'] },
+];
 
-function lookupEntityIds(userMessage) {
-    const now = Date.now();
-    if (!_entityCache || now - _entityCacheAt > ENTITY_CACHE_TTL) {
-        const db = getDb();
-        _entityCache = db.prepare(`
-            SELECT id, name, aliases FROM entity_profiles
-            WHERE name IS NOT NULL AND status IN ('active','seed')
-        `).all();
-        _entityCacheAt = now;
-    }
+async function lookupEntityIds(userMessage) {
+    const db = getDb();
+    const entities = db.prepare(`
+        SELECT id, name, aliases FROM entity_profiles
+        WHERE name IS NOT NULL AND status IN ('active','seed')
+    `).all();
 
     const ids = [];
     const msgLower = userMessage.toLowerCase();
-    for (const e of _entityCache) {
-        // 标准名匹配
+
+    // 1. 活动词 → 聚合实体（代码级词表，先于名称/别名匹配）
+    for (const act of ACTIVITY_ENTITY_KEYWORDS) {
+        if (act.keywords.some(k => k.length >= 2 && msgLower.includes(k.toLowerCase()))) {
+            const entity = entities.find(e => e.name === act.entityName);
+            if (entity) ids.push(entity.id);
+        }
+    }
+
+    // 2. 标准名匹配 + 别名匹配（真实人/地点/作品）
+    for (const e of entities) {
         if (msgLower.includes(e.name.toLowerCase())) {
             ids.push(e.id);
             continue;
         }
-        // 别名匹配
         let aliasList = [];
         try { aliasList = JSON.parse(e.aliases || '[]'); } catch (_) {}
         if (aliasList.some(a => a && a.length >= 2 && msgLower.includes(a.toLowerCase()))) {
             ids.push(e.id);
         }
     }
-    return ids;
+
+    // 3. 语义降级：关键词零命中时，用向量匹配实体名称（处理变体/别称）
+    if (ids.length === 0 && userMessage.trim().length >= 2) {
+        try {
+            const { queryEntityByText } = require('./entityEmbedding');
+            const semMatches = await queryEntityByText(userMessage, 3);
+            for (const m of semMatches) {
+                ids.push(m.entity_id);
+                console.log(`Librarian: 语义实体匹配 "${m.entity_name}" sim=${m.similarity} ← "${userMessage.slice(0, 40)}"`);
+            }
+        } catch (e) {
+            // entityEmbedding 尚未随本仓库提供时（MODULE_NOT_FOUND）静默降级，其他错误才打印
+            if (e.code !== 'MODULE_NOT_FOUND') {
+                console.error('Librarian: 语义实体匹配失败:', e.message);
+            }
+        }
+    }
+
+    // 去重（活动词可能同时命中名称匹配）
+    return [...new Set(ids)];
 }
 
 function getEntityFragments(entityIds, limit = 10) {
@@ -175,6 +203,8 @@ function tokenize(userMessage) {
 }
 
 // CJK单字分割（给memory_fragments_fts用，它的索引是单字粒度）
+// 过滤高频停用字，避免「上/了/的」等字匹配几乎所有碎片
+const CJK_STOP_CHARS = new Set(['的','了','在','是','我','你','他','她','它','们','和','与','或','但','而','也','都','就','把','被','让','给','从','到','对','为','以','及','等','这','那','有','没','不','很','太','更','最','会','能','要','想','说','去','来','看','做','用','中','上','下','里','外','吗','呢','吧','啊','哦','嗯','啦','嘛','哈','呀','哇','呵','嗨','哟','嘿','噢']);
 function tokenizeCJK(userMessage) {
   const wordTokens = tokenize(userMessage);
   const cjkRe = /[一-鿿㐀-䶿]/g;
@@ -182,7 +212,9 @@ function tokenizeCJK(userMessage) {
   for (const t of wordTokens) {
     const chars = t.match(cjkRe);
     if (chars) {
-      for (const ch of chars) tokens.push(ch);
+      for (const ch of chars) {
+        if (!CJK_STOP_CHARS.has(ch)) tokens.push(ch);
+      }
     } else {
       tokens.push(t);
     }
@@ -318,7 +350,7 @@ async function searchHybrid(userMessage, limit = 6) {
   const ftsResults = searchFragments(userMessage, limit);
 
   // 1.5 实体聚合：识别消息中的已知实体 → 按 entity_id 全量捞碎片（实体时间线）
-  const entityIds = lookupEntityIds(userMessage);
+  const entityIds = await lookupEntityIds(userMessage);
   const entityResults = entityIds.length > 0 ? getEntityFragments(entityIds, limit) : [];
   if (entityResults.length > 0) {
     console.log(`Hybrid: 实体聚合命中 ${entityResults.length} 条 (entity_ids=${entityIds.join(',')}) → "${userMessage.slice(0, 40)}"`);
@@ -451,9 +483,8 @@ async function searchHybrid(userMessage, limit = 6) {
         : isEntity && vecRank >= 0 ? 'ENTITY+VEC'
         : isEntity ? 'ENTITY'
         : ftsRank >= 0 ? 'FTS5' : 'VEC';
-      // FTS5单字索引太松散，无向量交叉验证 → 降权
-      // CJK单字匹配噪音大（"猫"命中所有提到猫的碎片），fact意图同样需要控制
-      if (source === 'FTS5') {
+      // FTS5单字索引太松散，无向量交叉验证 → 降权（fact意图不需要交叉验证）
+      if (source === 'FTS5' && intent !== 'fact') {
         rrf *= FTS5_ONLY_PENALTY;
         source = 'FTS5*';
       }
@@ -565,7 +596,9 @@ function formatHybridContext(fragments) {
   const incRead = db.prepare("UPDATE memory_fragments SET read_count = COALESCE(read_count, 0) + 1, last_accessed_at = datetime('now') WHERE id = ?");
   const touchMemory = db.prepare("UPDATE memories SET last_accessed_at = datetime('now') WHERE id = ?");
 
-  const lines = fragments.map(f => {
+  // v5.5: 先处理全部碎片（日志+解密+read_count），同时收集 entity 归属
+  const processed = [];
+  for (const f of fragments) {
     const permission = computePermission(f);
     const days = f._daysAgo ?? f._daysOld;
     const daysStr = days != null ? `${days}天前` : '?';
@@ -589,11 +622,88 @@ function formatHybridContext(fragments) {
       try { f.content = encryption.decrypt(f.content); } catch (_) {}
     }
 
-    // 权限标签前置，让 AI 第一时间看到他能怎么用这条记忆
-    return `※ ${permission} · #${f.id} · ${daysStr}\n${f.content}`.trim();
-  });
+    processed.push({
+      line: `※ ${permission} · #${f.id} · ${daysStr}\n${f.content}`.trim(),
+      id: f.id,
+      sourceTable: f.source_table,
+    });
+  }
 
-  return lines.join('\n');
+  // v5.5: 按实体分组碎片，防止不同人的记忆平铺在一起导致 LLM 交叉污染
+  if (processed.length <= 1) return processed.map(p => p.line).join('\n');
+
+  // 查每条碎片的 entity 归属
+  const fragIds = processed.filter(p => p.sourceTable === 'fragment').map(p => p.id);
+  const memIds = processed.filter(p => p.sourceTable === 'memory').map(p => p.id);
+
+  const fragEntityMap = new Map(); // fragment_id → entity name
+  if (fragIds.length > 0) {
+    const rows = db.prepare(`
+      SELECT fe.fragment_id, ep.name
+      FROM fragment_entities fe
+      JOIN entity_profiles ep ON ep.id = fe.entity_id
+      WHERE fe.fragment_id IN (${fragIds.map(() => '?').join(',')})
+    `).all(...fragIds);
+    for (const r of rows) {
+      const existing = fragEntityMap.get(r.fragment_id);
+      fragEntityMap.set(r.fragment_id, existing ? existing + '、' + r.name : r.name);
+    }
+  }
+  if (memIds.length > 0) {
+    const rows = db.prepare(`
+      SELECT m.id, ep.name
+      FROM memories m
+      JOIN entity_profiles ep ON ep.id = m.entity_id
+      WHERE m.id IN (${memIds.map(() => '?').join(',')})
+    `).all(...memIds);
+    for (const r of rows) {
+      const key = `mem_${r.id}`;
+      fragEntityMap.set(key, r.name);
+    }
+  }
+
+  // 按 entity 分组
+  const groups = new Map(); // entity name → [lines]
+  const ungrouped = [];
+  for (const p of processed) {
+    const key = p.sourceTable === 'memory' ? `mem_${p.id}` : p.id;
+    const entityName = fragEntityMap.get(key);
+    if (entityName) {
+      if (!groups.has(entityName)) groups.set(entityName, []);
+      groups.get(entityName).push(p.line);
+    } else {
+      ungrouped.push(p.line);
+    }
+  }
+
+  // 组装输出：分组头 + 碎片，ungrouped 放最后
+  const output = [];
+  const personEntities = [];
+
+  for (const [entityName, entityLines] of groups) {
+    // 判定该 entity 的 category（用于跨人物告警）
+    const cat = db.prepare('SELECT category FROM entity_profiles WHERE name = ?').get(entityName);
+    if (cat && cat.category === 'person') personEntities.push(entityName);
+
+    if (groups.size === 1 && ungrouped.length === 0) {
+      // 单一实体，不加分组头（避免无意义的噪音）
+      output.push(...entityLines);
+    } else {
+      output.push(`【关于 ${entityName}】`);
+      output.push(...entityLines);
+    }
+  }
+  if (ungrouped.length > 0) {
+    if (groups.size > 0) output.push('【其他】');
+    output.push(...ungrouped);
+  }
+
+  // v5.5: 跨人物告警——同一轮注入涉及 >=2 个 person 实体时提醒模型不要混为一谈
+  if (personEntities.length >= 2) {
+    output.push(`\n⚠️ 以上记忆涉及不同的人（${personEntities.join('、')}），不要混为一谈。`);
+  }
+
+  return output.join('\n');
 }
 
 module.exports = { searchFragments, formatForContext, searchHybrid, formatHybridContext, classifyIntent, lookupEntityIds, getEntityFragments };
