@@ -12,10 +12,10 @@
 //      { "post_type":"message", "message_type":"private"|"group", "user_id":123,
 //        "self_id":456, "raw_message":"...", "time":1755234600, "group_id":789 }
 //
-// sender 判定（映射到 messages.sender 的 'user'/'draco'）：
+// sender 判定（映射到 messages.sender 的 'user'/'ai'）：
 //   'user'/'human'/'我' → 'user'
-//   'assistant'/'ai'/'bot'/'draco'/'它' → 'draco'
-//   OneBot：user_id === self_id → draco（机器人自己），否则 user
+//   'assistant'/'ai'/'bot'/'它' → 'ai'
+//   OneBot：user_id === self_id → ai（机器人自己），否则 user
 //
 // ⚠️ 本接口无鉴权，仅供内网/localhost 使用，不要暴露到公网。
 
@@ -39,11 +39,11 @@ function normalizeTime(ts) {
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-// 简单格式的 sender → 'user'/'draco'
+// 简单格式的 sender → 'user'/'ai'
 function mapSender(raw) {
     const s = String(raw || '').trim().toLowerCase();
     if (s === 'user' || s === 'human' || s === '我' || s === 'me') return 'user';
-    return 'draco'; // assistant/ai/bot/draco/它 及其它默认当 AI
+    return 'ai'; // assistant/ai/bot/draco/它 及其它默认当 AI
 }
 
 // 把一条消息（简单格式 或 OneBot 事件）规整成 {sender, content, timestamp}
@@ -54,7 +54,7 @@ function normalizeMessage(obj) {
     if (obj.post_type === 'message') {
         const content = obj.raw_message || obj.message || '';
         if (!content) return null;
-        const sender = String(obj.user_id) === String(obj.self_id) ? 'draco' : 'user';
+        const sender = String(obj.user_id) === String(obj.self_id) ? 'ai' : 'user';
         return { sender, content: String(content), timestamp: normalizeTime(obj.time) };
     }
 
