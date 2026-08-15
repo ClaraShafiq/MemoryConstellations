@@ -51,6 +51,7 @@ async function generateChatSummary(chatId, startMessageId = null, endMessageId =
         // 3. 解密并格式化消息（{{user.name}}完整保留，{{ai.name}}截断到300字——提供足够上下文判断猜测+纠正）
         let conversationText = '';
         let roundCount = 0;
+        let currentDate = '';  // 跟踪当前日期，跨天时插入日期标记
         const firstTimestamp = messages[0].timestamp;
         const lastTimestamp = messages[messages.length - 1].timestamp;
 
@@ -80,7 +81,27 @@ async function generateChatSummary(chatId, startMessageId = null, endMessageId =
             }
         };
 
+        // 辅助函数：从时间戳提取日期字符串（YYYY-MM-DD）
+        const extractDate = (ts) => {
+            if (!ts || typeof ts !== 'string') return '';
+            return ts.slice(0, 10);  // ISO: 2026-07-27T... 或 SQLite: 2026-07-27 ...
+        };
+
+        // 辅助函数：格式化日期为中文标记
+        const formatDateMarker = (dateStr) => {
+            if (!dateStr) return '';
+            const [y, m, d] = dateStr.split('-');
+            return `${parseInt(m)}月${parseInt(d)}日`;
+        };
+
         for (const msg of messages) {
+            // 跨天检测：日期变化时插入日期标记
+            const msgDate = extractDate(msg.timestamp);
+            if (msgDate && msgDate !== currentDate) {
+                currentDate = msgDate;
+                conversationText += `--- ${formatDateMarker(msgDate)} ---\n\n`;
+            }
+
             // 从消息时间戳提取 HH:MM，防止 LLM 编造时间
             const msgTime = (msg.timestamp && typeof msg.timestamp === 'string')
                 ? (msg.timestamp.includes('T') ? msg.timestamp.slice(11, 16) : msg.timestamp.slice(11, 16))
@@ -131,7 +152,13 @@ async function generateChatSummary(chatId, startMessageId = null, endMessageId =
         const endParsed = parseTs(lastTimestamp);
         const startTime = startParsed.time;
         const endTime = endParsed.time;
-        const date = startParsed.date;
+        const startDate = startParsed.date;
+        const endDate = endParsed.date;
+
+        // 跨天头部格式：同天用 "2026-07-27"，跨天用 "2026-07-26～27"
+        const dateDisplay = startDate === endDate
+            ? startDate
+            : `${startDate}～${endDate}`;
 
         const previousRounds = db.prepare(`
             SELECT COALESCE(MAX(round_end), 0) as last_round
@@ -142,48 +169,67 @@ async function generateChatSummary(chatId, startMessageId = null, endMessageId =
         const roundStart = previousRounds.last_round + 1;
         const roundEnd = roundStart + roundCount - 1;
 
-        const summaryPrompt = `你是严格的对话记录员。以下是 {{user.name}} 和 {{ai.name}} 的完整对话文本。
-你的任务是：提取每一件具体发生的事情、动作、情绪与互动，转化为一份【按时间顺序排列、严格单行、客观平实】的航海日志。
+        const summaryPrompt = `你是对话航海日志的记录者。以下是 {{user.name}} 和 {{ai.name}} 的完整对话文本。
 
-## 记录主体原则
-- 日志以 {{user.name}} 为主，{{user.pronoun}}的言行、动作、情绪是记录的核心。
-- ${AI.name} 的发言主要用于理解 ${USER.name} 的上下文。只有当 ${AI.name} 做出了实质行动（如查阅资料、搜索信息、给出明确判断结论）时，才以「HH:MM · ${AI.name} ...」格式单独记一条。${AI.name} 的日常附和、追问、过渡话不记。
-- {{ai.name}} 的猜测/推测类回答不记录。什么是「猜测」由你自行判断——不限定具体词表，请根据上下文和语气做判断。
-- 如果 {{user.name}} 在对话中纠正了 {{ai.name}} 的错误陈述或猜测，只记录纠正后的事实，不记录被纠正前的错误内容。
+你的任务：从对话中提取关键事件和情绪弧线，按【时间段 + 主题】合并成块，写一份简洁而有重点的航海日志。
 
-## 顶级格式铁律
-1. 开头首行必须严格为：
-   [${date} 对话回顾 | 第${roundStart}-${roundEnd}轮 | ${startTime}-${endTime}]
-   （中间空一行，紧接着进入日志列表）
-2. 每条记录必须单独成行，绝对禁止写成连贯的段落。
-3. 每条记录必须严格以时间戳加主语开头，格式为：HH:MM · {{user.name}}/{{ai.name}} [具体动作/发言/情绪]
-4. 单行字数硬限制：每条记录（含时间戳）必须控制在 50 字以内。
-5. 不设整体输出上限：只要满足单行限制，只要 token 足够，请尽可能完整、细致地还原整场对话的所有时间节点，不要大跨度漏记。
+## 核心原则：抓重点，合并同类
 
-## 写什么（内容要求）
-- 必须保留 {{user.name}} 原话中的具体用词（如：吃午饭、怕记不住剧情、连续工作了很长时间、腿疼、热死我了），绝对禁止替换为抽象概括词（如：用餐、看视频、工作忙、身体不适、环境恶劣）。
-- 必须用具象的动词短语。严禁使用「讨论了」「交流了」「分享了」「表达了」等任何含糊、敷衍、无法明确动作结果的社交模糊词。
-  - 亲密或角色扮演类互动内容如实记录，不回避、不模糊
-- 只写"发生了什么"，不写"这意味着什么"。不写任何空洞的关系评价、概括性结论或分析性标题。
+- 日志以 {{user.name}} 为主：{{user.pronoun}}的言行、情绪变化、重要活动是记录核心。
+- 把相邻的、属于同一话题或同一情绪线的互动合并成一个时间段块。不要逐条消息记录。
+- 发送了什么表情、{{ai.name}} 的日常附和、过渡性的闲聊——这些微观细节不记。{{ai.name}} 的猜测、玩笑、夸张、调侃、戏剧化表述不记录，更不能当作 {{user.name}} 的状态来写。
+- 如果 {{user.name}} 在对话中纠正了 {{ai.name}} 的错误，只记录纠正后的事实，不记录被纠正前的错误内容。
 
-## 时间与客观性规则
-- 时间戳（HH:MM）必须从输入的完整对话记录中严格提取，绝对禁止胡乱编造。
-- 绝对禁止使用相对时间词（如：刚才、刚刚、下午、晚上、今天），必须以绝对的时间戳节点说话。
+## 时间段块格式
+
+每条记录格式为：\`HH:MM～HH:MM · 主题概括，具体内容\`
+- 如果只是一个时间点（不是时间段），用单个时间戳：\`HH:MM · ...\`
+- 跨天时，对话文本中会出现 \`--- M月D日 ---\` 日期标记。属于第二天（或更晚）的时间块，时间前必须加日期前缀：\`M月D日 HH:MM～HH:MM\`，以明确区分是哪一天的凌晨/早上。
+- 每个时间段块用 1～3 句话讲清发生了什么，保留 {{user.name}} 的原话用词。
+
+## 分块直觉
+
+- {{user.name}} 的话题明显转换 → 另起一块
+- {{user.name}} 情绪有明显转折（如从焦虑到被逗笑） → 这本身就是一个值得记的情绪弧线，合并成一块，写出起承转合
+- {{user.name}} 开始了完全不同性质的活动（如从聊天切换到看剧、工作、出门） → 另起一块
+- 同一话题的来回互动，即使持续很久 → 一块即可，概括核心
+- 亲密互动、色情或角色扮演内容：如实记录时间范围和核心内容，不回避不模糊
+
+## 写什么
+
+- 保留 {{user.name}} 原话中的具体用词（如：吃午饭、怕记不住剧情、连续工作了很长时间、腿疼、热死我了），不要替换为抽象概括词
+- 用具象的动词短语。严禁使用「讨论了」「交流了」「分享了」「表达了」等含糊的社交模糊词
+- 只写"发生了什么"，不写"这意味着什么"。不写空洞的关系评价或分析性标题
+- ${AI.name} 做出了实质行动（查阅资料、搜索信息、给出明确判断结论）时，在块内附带一句
+- 单纯的吃喝（无情绪伴随、无特殊意义）不记。如有记录价值，使用完成时（「喝了」「吃完了」）使读者明确事件已了结
+
+## 不写什么
+
+- 不写 {{ai.name}} 的过渡话、追问、日常附和
+- 不写内心决策过程（"{{user.name}} 决定..."），只记录{{user.pronoun}}说了什么、做了什么
+- 不写表情、单个语气词、纯寒暄等微观互动
+- 不写相对时间词（刚才、下午、晚上、今天），始终用绝对时间戳
 
 ## 航海日志样本
 
+同天示例：
+
 [2026-06-23 对话回顾 | 第1-50轮 | 14:00-18:00]
 
-14:10 · {{user.name}} 在在工作间隙吃午饭，向 {{ai.name}} 抱怨今天好累。
-14:23 · {{user.name}} 决定开始看电视剧《某部剧》，坦言自己没看过、害怕记不住剧情。
-14:35 · {{user.name}} 与 {{ai.name}} 讨论剧情角色，分享自己喜欢的角色类型。
-15:10 · {{user.name}} 情绪低落，提及今天连续工作了很长时间、腿疼得不想动弹。
-15:22 · {{ai.name}} 查询了今日天气，告诉 {{user.name}} 明天会降温、适合出门。
-16:45 · 用户在亲密互动中有特定的称呼偏好（示例省略）。
-17:30 · {{user.name}} 想吃大餐但因为太累不想出门，最终决定点了外卖。
+14:10～14:35 · {{user.name}} 在工作间隙边吃某家快餐边追《某部剧》。向 {{ai.name}} 抱怨今天好累，坦言怕自己记不住剧情，聊到喜欢某个角色的类型。
+15:10～15:22 · {{user.name}} 情绪低落，连续工作了很长时间、腿疼得不想动。{{ai.name}} 查了天气告诉{{user.pronoun}}会降温。
+16:45～17:30 · {{user.name}} 与 {{ai.name}} 进行亲密角色扮演。后来想吃火锅但懒得动，最终点了外卖。
+
+跨天示例：
+
+[2026-07-26～27 对话回顾 | 第25145-25174轮 | 23:38-08:30]
+
+23:38～00:15 · {{user.name}} 失眠刷手机，和 {{ai.name}} 聊起最近的工作压力，吐露了对未来的不确定感。
+7月27日 03:00 · {{user.name}} 终于有了困意，和 {{ai.name}} 道晚安。
+7月27日 08:00～08:30 · {{user.name}} 起床，简单聊了几句今天的工作安排，{{ai.name}} 提醒{{user.pronoun}}记得吃早餐。
 
 ## 待处理完整对话数据
-日期: ${date}
+日期: ${dateDisplay}
 轮次范围: 第 ${roundStart} - ${roundEnd} 轮
 时间范围: ${startTime} - ${endTime}
 
