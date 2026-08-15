@@ -38,7 +38,7 @@ async function generateChatSummary(chatId, startMessageId = null, endMessageId =
         
         // 2. 读取需要总结的消息
         const messages = db.prepare(`
-            SELECT id, sender, content, is_encrypted, timestamp, message_type
+            SELECT id, sender, content, is_encrypted, timestamp, message_type, is_activity
             FROM messages
             WHERE chat_id = ? AND id > ? AND id <= ?
             ORDER BY id ASC
@@ -48,7 +48,7 @@ async function generateChatSummary(chatId, startMessageId = null, endMessageId =
             return { success: false, message: '没有找到需要总结的消息' };
         }
         
-        // 3. 解密并格式化消息（Clara完整保留，Draco截断到300字——提供足够上下文判断猜测+纠正）
+        // 3. 解密并格式化消息（{{user.name}}完整保留，{{ai.name}}截断到300字——提供足够上下文判断猜测+纠正）
         let conversationText = '';
         let roundCount = 0;
         const firstTimestamp = messages[0].timestamp;
@@ -87,9 +87,24 @@ async function generateChatSummary(chatId, startMessageId = null, endMessageId =
                 : '';
             const timePrefix = msgTime ? `[${msgTime}] ` : '';
 
+            // v5.12: 活动行算1轮
+            if (msg.is_activity) {
+                roundCount++;
+                let summary = '';
+                try {
+                    const data = JSON.parse(extractText(msg));
+                    summary = data.type || 'activity';
+                    if (data.summary) summary += ' · ' + data.summary.slice(0, 60);
+                } catch (_) {
+                    summary = extractText(msg).slice(0, 60);
+                }
+                conversationText += `${timePrefix}${AI.name} ${summary}\n\n`;
+                continue;
+            }
+
             if (msg.sender === 'draco') {
                 roundCount++;
-                // Draco消息以300字缩略注入，提供上下文供模型判断猜测/纠正
+                // {{ai.name}}消息以300字缩略注入，提供上下文供模型判断猜测/纠正
                 const dracoText = extractText(msg);
                 if (dracoText.trim()) {
                     const preview = dracoText.slice(0, 300);
@@ -127,26 +142,26 @@ async function generateChatSummary(chatId, startMessageId = null, endMessageId =
         const roundStart = previousRounds.last_round + 1;
         const roundEnd = roundStart + roundCount - 1;
 
-        const summaryPrompt = `你是严格的对话记录员。以下是 Clara 和 Draco 的完整对话文本。
+        const summaryPrompt = `你是严格的对话记录员。以下是 {{user.name}} 和 {{ai.name}} 的完整对话文本。
 你的任务是：提取每一件具体发生的事情、动作、情绪与互动，转化为一份【按时间顺序排列、严格单行、客观平实】的航海日志。
 
 ## 记录主体原则
-- 日志以 Clara 为主，她的言行、动作、情绪是记录的核心。
+- 日志以 {{user.name}} 为主，{{user.pronoun}}的言行、动作、情绪是记录的核心。
 - ${AI.name} 的发言主要用于理解 ${USER.name} 的上下文。只有当 ${AI.name} 做出了实质行动（如查阅资料、搜索信息、给出明确判断结论）时，才以「HH:MM · ${AI.name} ...」格式单独记一条。${AI.name} 的日常附和、追问、过渡话不记。
-- Draco 的猜测/推测类回答不记录。什么是「猜测」由你自行判断——不限定具体词表，请根据上下文和语气做判断。
-- 如果 Clara 在对话中纠正了 Draco 的错误陈述或猜测，只记录纠正后的事实，不记录被纠正前的错误内容。
+- {{ai.name}} 的猜测/推测类回答不记录。什么是「猜测」由你自行判断——不限定具体词表，请根据上下文和语气做判断。
+- 如果 {{user.name}} 在对话中纠正了 {{ai.name}} 的错误陈述或猜测，只记录纠正后的事实，不记录被纠正前的错误内容。
 
 ## 顶级格式铁律
 1. 开头首行必须严格为：
    [${date} 对话回顾 | 第${roundStart}-${roundEnd}轮 | ${startTime}-${endTime}]
    （中间空一行，紧接着进入日志列表）
 2. 每条记录必须单独成行，绝对禁止写成连贯的段落。
-3. 每条记录必须严格以时间戳加主语开头，格式为：HH:MM · Clara/Draco [具体动作/发言/情绪]
+3. 每条记录必须严格以时间戳加主语开头，格式为：HH:MM · {{user.name}}/{{ai.name}} [具体动作/发言/情绪]
 4. 单行字数硬限制：每条记录（含时间戳）必须控制在 50 字以内。
 5. 不设整体输出上限：只要满足单行限制，只要 token 足够，请尽可能完整、细致地还原整场对话的所有时间节点，不要大跨度漏记。
 
 ## 写什么（内容要求）
-- 必须保留 Clara 原话中的具体用词（如：吃午饭、怕记不住角色、连续工作了很长时间、腿疼、热死我了），绝对禁止替换为抽象概括词（如：用餐、看视频、工作忙、身体不适、环境恶劣）。
+- 必须保留 {{user.name}} 原话中的具体用词（如：吃午饭、怕记不住剧情、连续工作了很长时间、腿疼、热死我了），绝对禁止替换为抽象概括词（如：用餐、看视频、工作忙、身体不适、环境恶劣）。
 - 必须用具象的动词短语。严禁使用「讨论了」「交流了」「分享了」「表达了」等任何含糊、敷衍、无法明确动作结果的社交模糊词。
   - 亲密或角色扮演类互动内容如实记录，不回避、不模糊
 - 只写"发生了什么"，不写"这意味着什么"。不写任何空洞的关系评价、概括性结论或分析性标题。
@@ -159,13 +174,13 @@ async function generateChatSummary(chatId, startMessageId = null, endMessageId =
 
 [2026-06-23 对话回顾 | 第1-50轮 | 14:00-18:00]
 
-14:10 · Clara 在在工作间隙吃午饭，向 {{ai.name}} 抱怨今天好累。
-14:23 · Clara 决定开始看电视剧《某部剧》，坦言自己没看过、害怕记不住角色。
-14:35 · Clara 与 Draco 讨论剧情角色，分享自己喜欢的角色类型。
-15:10 · Clara 情绪低落，提及今天连续工作了很长时间、腿疼得不想动弹。
-15:22 · Draco 查询了今日天气，告诉 Clara 明天会降温、适合出门。
+14:10 · {{user.name}} 在在工作间隙吃午饭，向 {{ai.name}} 抱怨今天好累。
+14:23 · {{user.name}} 决定开始看电视剧《某部剧》，坦言自己没看过、害怕记不住剧情。
+14:35 · {{user.name}} 与 {{ai.name}} 讨论剧情角色，分享自己喜欢的角色类型。
+15:10 · {{user.name}} 情绪低落，提及今天连续工作了很长时间、腿疼得不想动弹。
+15:22 · {{ai.name}} 查询了今日天气，告诉 {{user.name}} 明天会降温、适合出门。
 16:45 · 用户在亲密互动中有特定的称呼偏好（示例省略）。
-17:30 · Clara 想吃大餐但因为太累不想出门，最终决定点了外卖。
+17:30 · {{user.name}} 想吃大餐但因为太累不想出门，最终决定点了外卖。
 
 ## 待处理完整对话数据
 日期: ${date}
