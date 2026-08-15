@@ -5,7 +5,7 @@
 // 生命周期：hypothesis → 追踪观察 → 自评估 → 升级 (monitor) 或变性 (lesson)
 //
 // 两种方向：
-//   - 对 Clara 的认知：行为模式、情绪规律
+//   - 对用户的认知：行为模式、情绪规律
 //   - 对记忆系统质量：分类纠错、图谱健康
 //
 // 创建门槛：机械筛选（≥3 独立数据点）+ LLM 判断（是否是模式）
@@ -27,7 +27,7 @@ const SKILL_INITIAL_CONFIDENCE = 0.25;      // 初始置信度
 
 /**
  * @param {Object} params
- * @param {'clara'|'system'} params.domain — 对 Clara 的认知 or 对记忆系统质量
+ * @param {'user'|'system'} params.domain — 对用户的认知 or 对记忆系统质量
  * @param {string} params.sourcePattern — 触发创建的模式描述
  * @param {string[]} params.entityIds — 涉及的 entity IDs
  * @param {Object} params.triggerConfig — { type: 'keyword'|'entity'|'schedule'|'threshold', config: {...} }
