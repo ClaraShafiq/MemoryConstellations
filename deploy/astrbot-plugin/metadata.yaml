@@ -1,0 +1,10 @@
+name: memory-constellations-bridge
+author: ClaraShafiq
+desc: 把 AstrBot 聊天消息转发到 Memory Constellations 记忆库，自动攒记忆
+version: 0.1.0
+repo: https://github.com/ClaraShafiq/MemoryConstellations
+display_name: 记忆库桥接
+short_desc: 聊天记录喂给记忆库攒记忆
+support_platforms:
+  - aiocqhttp
+astrbot_version: ">=4.16,<5"
