@@ -315,3 +315,19 @@ AstrBot 收到 QQ 消息（经 SnowLuma 的 OneBot v11）后，把消息 POST �
 - 或者用 SnowLuma 的 OneBot HTTP 上报，直接指向记忆库（用上面的 OneBot 事件格式）。
 
 消息进来后，Scribe 会在沉默期自动提取碎片，星图随之生长。回复的事完全由 AstrBot 自己的 LLM 负责，记忆库不碰。
+
+### 7.3 查询记忆（用记忆让回复更懂你）
+
+攒了记忆之后，机器人回复前可以先查一下「关于这个话题我记得什么」，把结果拼进 LLM 的 prompt：
+
+```bash
+curl -X POST http://localhost:3000/api/recall \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"今天好累","limit":8}'
+```
+
+返回 `formatted` 字段就是拼好的、可直接塞进 prompt 的文本（相关记忆碎片 + 叙事 + 实体档案）。完整闭环：
+
+1. 收到消息 → `POST /api/messages`（攒记忆）
+2. 回复前 → `POST /api/recall` 拿 `formatted` → 拼进 prompt → LLM 生成回复
+3. 把回复也 `POST /api/messages`（攒机器人自己的回复）
