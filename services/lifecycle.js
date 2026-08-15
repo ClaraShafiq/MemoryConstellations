@@ -8,6 +8,7 @@
 const { getDb } = require('../database');
 const { chromaDBOperation } = require('./memory');
 const { callLLM } = require('./llm');
+const { USER, AI } = require('./nameResolver');
 
 const CONFIG = {
     FRAGMENT_COOLING_DAYS: 14,     // 14天无人访问 → 冷却
@@ -256,6 +257,12 @@ async function runEntityExtraction() {
             }
 
             if (result.current_status) {
+                // v5.13: 主角的 current_status 由每日 cron (generateDailyEntityStatus) 独占维护。
+                // Lifecycle 的实体状态提取不覆盖主角的日式日志。
+                if (entity === USER.name) {
+                    stats.unchanged++;
+                    continue;
+                }
                 const now = new Date().toISOString();
                 const sourceFragIds = JSON.stringify(fragList.map(f => f.id));
 
