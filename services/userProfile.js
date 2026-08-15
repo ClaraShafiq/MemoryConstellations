@@ -1,8 +1,8 @@
 // services/userProfile.js
 // v5.4 Phase 2b: User 画像组装
 //
-// 从 Clara Model 中读取活跃条目，按分类组装为可注入 system prompt 的文本块。
-// 替代 core-prompt.txt 中手动维护的 <Clara核心信息>。
+// 从认知模型中读取活跃条目，按分类组装为可注入 system prompt 的文本块。
+// 替代 core-prompt.txt 中手动维护的 <用户核心信息>。
 
 const { getDb } = require('../database');
 const { fillPrompt, USER, AI } = require('./nameResolver');
@@ -25,9 +25,9 @@ const CATEGORY_ORDER = [
 
 const SUB_TAGS = new Set([
     'identity','birth','appearance','education','mbti','core',
-    'persistence','romantic','voice_actor','living','pets',
+    'persistence','romantic','living','pets',
     'aesthetic','fandom','food','recent','hobbies','sleep','creative',
-    'health_tech','home','fanfiction','bond','devotion','trauma','current',
+    'health_tech','home','bond','devotion','trauma','current',
 ]);
 
 // ── Public API ──
@@ -67,8 +67,10 @@ function assembleProfile(maxTokens = 500) {
     for (const e of entries) {
         let tags = [];
         try { tags = typeof e.tags === 'string' ? JSON.parse(e.tags) : (e.tags || []); } catch(_) {}
-        // Skip companion profile entries — they belong in persona_model, not Clara's portrait
+        // Skip companion profile entries — they belong in persona_model, not the user's portrait
         if (tags.includes('companion_profile')) continue;
+        // Skip companion's intuitive observations — personal intuitions, not objective user facts
+        if (tags.includes('companion_intuition')) continue;
         const cat = _primaryCategory(tags);
         if (!groups[cat]) groups[cat] = [];
         groups[cat].push(e);
@@ -78,7 +80,7 @@ function assembleProfile(maxTokens = 500) {
     const lines = [];
     lines.push(`<User_profile>`);
 
-    // Core traits first (铁证级 — 始终在 Draco 视野中)
+    // Core traits first (铁证级 — 始终在伴侣视野中)
     const coreTraits = entries.filter(e => e.injection_tier === 'core');
     if (coreTraits.length > 0) {
         lines.push('\n[核心认知 — 以下条目经反复验证，置信度极高]');
@@ -140,8 +142,10 @@ function assembleProfileJSON() {
     for (const e of entries) {
         let tags = [];
         try { tags = typeof e.tags === 'string' ? JSON.parse(e.tags) : (e.tags || []); } catch(_) {}
-        // Skip companion profile entries — they belong in persona_model, not Clara's portrait
+        // Skip companion profile entries — they belong in persona_model, not the user's portrait
         if (tags.includes('companion_profile')) continue;
+        // Skip companion's intuitive observations — personal intuitions, not objective user facts
+        if (tags.includes('companion_intuition')) continue;
         const cat = _primaryCategory(tags);
         if (!groups[cat]) groups[cat] = { category: cat, label: _categoryLabel(cat), entries: [] };
         groups[cat].entries.push({
