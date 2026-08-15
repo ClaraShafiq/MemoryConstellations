@@ -69,20 +69,62 @@ function normalizeTime(ts) {
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-// ── 解析 JSONL ──
+// ── 从 content 提取纯文本 ──
+// 兼容：字符串 或 OpenAI 式 [{type:"text",text:"..."}] 数组
+// 跳过 type:"think"（AI 内心推理）、剥掉 <system_reminder> 系统注入
+function extractText(content) {
+    if (typeof content === 'string') return content.trim();
+    if (Array.isArray(content)) {
+        const parts = [];
+        for (const item of content) {
+            if (typeof item === 'string') { parts.push(item); continue; }
+            if (item && typeof item === 'object' && item.type === 'text' && item.text) {
+                parts.push(item.text);
+            }
+            // 跳过 think / 其它类型
+        }
+        return parts.join('\n')
+            .replace(/<system_reminder>[\s\S]*?<\/system_reminder>/g, '')
+            .trim();
+    }
+    return '';
+}
+
+// 把一个消息对象转成 {sender, content, timestamp}
+function msgFromObject(o) {
+    if (!o || typeof o !== 'object') return null;
+    const content = extractText(o.content ?? o.text ?? o.message ?? o.msg ?? '');
+    if (!content) return null;
+    const sender = mapSender(o.sender ?? o.role ?? o.name ?? o.from);
+    const ts = o.timestamp ?? o.time ?? o.date ?? o.created_at ?? o.ts ?? null;
+    return { sender, content, timestamp: normalizeTime(ts) };
+}
+
+// ── 解析整文件 JSON 数组 [{role, content}, ...] ──
+function parseJsonArray(text) {
+    try {
+        const arr = JSON.parse(text);
+        if (!Array.isArray(arr)) return [];
+        const msgs = [];
+        for (const o of arr) {
+            const m = msgFromObject(o);
+            if (m) msgs.push(m);
+        }
+        return msgs;
+    } catch (e) {
+        return [];
+    }
+}
+
+// ── 解析 JSONL（每行一个 JSON 对象）──
 function parseJsonl(text) {
     const msgs = [];
     for (const line of text.split('\n')) {
         const t = line.trim();
         if (!t) continue;
         try {
-            const o = JSON.parse(t);
-            if (!o || typeof o !== 'object') continue;
-            const content = o.content ?? o.text ?? o.message ?? o.msg ?? '';
-            if (!content) continue;
-            const sender = mapSender(o.sender ?? o.role ?? o.name ?? o.from);
-            const ts = o.timestamp ?? o.time ?? o.date ?? o.created_at ?? o.ts ?? null;
-            msgs.push({ sender, content: String(content), timestamp: normalizeTime(ts) });
+            const m = msgFromObject(JSON.parse(t));
+            if (m) msgs.push(m);
         } catch (e) {
             console.warn(`[跳过] 非 JSON 行: ${t.slice(0, 60)}`);
         }
@@ -137,12 +179,18 @@ async function main() {
 
     const raw = fs.readFileSync(args.file, 'utf8');
     const ext = path.extname(args.file).toLowerCase();
-    let msgs = ext === '.txt' ? parseTxt(raw) : parseJsonl(raw);
 
-    // 兜底：如果 JSONL 解析出 0 条，尝试 TXT
-    if (msgs.length === 0 && ext !== '.txt') msgs = parseTxt(raw);
+    // 依次尝试：整文件 JSON 数组 → JSONL（每行一个 JSON）→ TXT（名字: 内容）
+    let msgs = [];
+    if (ext === '.txt') {
+        msgs = parseTxt(raw);
+    } else {
+        msgs = parseJsonArray(raw);
+        if (msgs.length === 0) msgs = parseJsonl(raw);
+    }
+    if (msgs.length === 0) msgs = parseTxt(raw);
     if (msgs.length === 0) {
-        console.error('❌ 没有解析出任何消息。请检查格式（JSONL 每行一个 JSON，或 TXT 每行「名字: 内容」）。');
+        console.error('❌ 没有解析出任何消息。请检查格式（JSON 数组 / JSONL 每行一个 JSON / TXT 每行「名字: 内容」）。');
         process.exit(1);
     }
 
