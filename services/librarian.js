@@ -544,30 +544,6 @@ async function searchHybrid(userMessage, limit = 6) {
   return finalResults;
 }
 
-// 分类过滤的混合检索：在指定本体论类别内做语义搜索
-async function searchHybridWithCategory(userMessage, categoryId, limit = 8) {
-  const results = await searchHybrid(userMessage, limit * 2);
-  const db = getDb();
-
-  const catFragments = db.prepare(`
-    WITH RECURSIVE subcats AS (
-      SELECT id FROM memory_ontology WHERE id = ?
-      UNION ALL
-      SELECT o.id FROM memory_ontology o
-      JOIN subcats s ON o.parent_id = s.id
-    )
-    SELECT fragment_id FROM fragment_categories
-    WHERE category_id IN (SELECT id FROM subcats)
-  `).all(categoryId);
-
-  const catIdSet = new Set(catFragments.map(r => r.fragment_id));
-  // 过滤：fragment需要在类别内，memory(episode)无法按fragment_id匹配，全部放行
-  // 注意：放行的episode未经过分类过滤。如果memories表以后加了entity_id列，这里可以收紧。
-  return results.filter(r =>
-    r.source_table === 'memory' || (r.source_table === 'fragment' && catIdSet.has(r.id))
-  ).slice(0, limit);
-}
-
 // 计算引用权限（确定性规则，不依赖 LLM）
 function computePermission(f) {
   const days = f._daysAgo ?? f._daysOld ?? 999;
@@ -620,4 +596,4 @@ function formatHybridContext(fragments) {
   return lines.join('\n');
 }
 
-module.exports = { searchFragments, formatForContext, searchHybrid, searchHybridWithCategory, formatHybridContext, classifyIntent, lookupEntityIds, getEntityFragments };
+module.exports = { searchFragments, formatForContext, searchHybrid, formatHybridContext, classifyIntent, lookupEntityIds, getEntityFragments };
