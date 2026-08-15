@@ -181,9 +181,9 @@ function lookupEntitiesInMessage(userMessage) {
   const db = getDb();
   if (!userMessage || !userMessage.trim()) return [];
   const entities = db.prepare(`
-    SELECT id, name, aliases, overview, overview_updated_at FROM entity_profiles
+    SELECT id, name, aliases, facts, overview_updated_at FROM entity_profiles
     WHERE name IS NOT NULL AND status IN ('active', 'seed')
-      AND overview IS NOT NULL AND overview != ''
+      AND facts IS NOT NULL AND facts != ''
     ORDER BY fragment_count DESC
   `).all();
 
