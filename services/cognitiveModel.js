@@ -911,7 +911,7 @@ async function detectNewTraits() {
 
     // Collect high-confidence entity relationships
     const entities = db.prepare(`
-        SELECT id, name, relationship_to_user, relationship_nature, emotional_significance, relationship_confidence
+        SELECT id, name, relationship_to_clara, relationship_nature, emotional_significance, relationship_confidence
         FROM entity_profiles
         WHERE relationship_confidence IS NOT NULL AND relationship_confidence != ''
         ORDER BY last_mentioned_date DESC LIMIT 15
@@ -938,7 +938,7 @@ async function detectNewTraits() {
 
     // Get entity overviews for rich context
     const entityOverviews = db.prepare(`
-        SELECT name, overview, relationship_to_user FROM entity_profiles
+        SELECT name, overview, relationship_to_clara FROM entity_profiles
         WHERE overview IS NOT NULL AND overview != ''
         ORDER BY last_mentioned_date DESC LIMIT 8
     `).all();
@@ -1040,7 +1040,7 @@ ${entityOverviews.map(e => `- ${e.name}: ${e.facts?.slice(0, 200)}`).join('\n') 
 ${monitors.length > 0 ? monitors.map(m => `- trigger: ${m.trigger_config} | analysis: ${m.analysis_config} | 置信度: ${m.confidence}`).join('\n') : '(空)'}
 
 ### 信号5 — 高置信度实体关系
-${entities.map(e => `- ${e.name}: ${e.relationship_to_user || '?'} (性质: ${e.relationship_nature || '?'})`).join('\n') || '(空)'}
+${entities.map(e => `- ${e.name}: ${e.relationship_to_clara || '?'} (性质: ${e.relationship_nature || '?'})`).join('\n') || '(空)'}
 
 ---
 
@@ -2012,12 +2012,12 @@ function seedFromExisting() {
     // From entity_profiles: high-confidence relationships → immutable_fact or stable_trait
     const entities = db.prepare(`
         SELECT * FROM entity_profiles
-        WHERE relationship_to_user IS NOT NULL AND relationship_to_user != ''
+        WHERE relationship_to_clara IS NOT NULL AND relationship_to_clara != ''
         ORDER BY last_mentioned_date DESC
     `).all();
 
     for (const ent of entities) {
-        if (!ent.relationship_to_user) continue;
+        if (!ent.relationship_to_clara) continue;
 
         // Parse confidence from string or number
         let relConf = 0.5;
@@ -2029,7 +2029,7 @@ function seedFromExisting() {
         }
 
         // Skip fictional characters, public figures without real interaction
-        const relText = ent.relationship_to_user;
+        const relText = ent.relationship_to_clara;
         if (/虚构|文学角色|作品中的人物|并无实际人际|而非现实人物|欣赏其.*作品/.test(relText)) continue;
         if (ent.entity_type === 'fictional' || ent.entity_type === 'public_figure') continue;
 
