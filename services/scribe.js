@@ -130,14 +130,24 @@ ${WORLD_CONTEXT}
 
 - **fact**: ${USER.name}直接陈述的、可验证的客观事实。必须是其原话中明确说出的信息，不得推断。示例："我生日是X月X日""我在X城市读过语言学校""我身高Xcm""我有个妹妹叫XX""我大学学的XX专业""我是X型血"。这些信息一旦确认就不会变，是构建${USER.name}档案的基础。注意：当前临时状态（"我在备考"）归state，个人偏好（"我喜欢雨天"）归preference。
 - **state**: ${USER.name}的当前状态或处境（"正在备考""在搬家""感冒了"）。
-- **observation**: 对${USER.name}行为/反应的观察。只写可观察事实（她做了什么、说了什么、表达了什么情绪），**禁止**写「${AI.name}认为/${AI.name}觉得/${AI.name}感到/${AI.name}注意到」等对${AI.name}内心的推断——${AI.name}没说出口的想法不是事实，是你替他编的。
+- **observation**: 对${USER.name}行为/反应的观察。只写可观察事实（{{user.pronoun}}做了什么、说了什么、表达了什么情绪）。
+  **铁律**：
+  ─ 禁止「每次/总是/经常/从不」等频率泛化词——单次行为就是单次。昨天{{user.pronoun}}说冷 ≠ {{user.pronoun}}每次都说冷。
+  ─ 禁止写「${AI.name}观察到/${AI.name}认为/${AI.name}觉得/${AI.name}调侃」等以${AI.name}为主语的观察句——这是{{user.pronoun}}的记忆库，不是${AI.name}的日记。${AI.name}的毒舌和调侃不代表{{user.pronoun}}的事实。
+  ─ 禁止「自我怀疑/反复横跳/纠结/内心拉扯」等心理标签——只记录{{user.pronoun}}说了什么、做了什么。不要替{{user.pronoun}}诊断心理状态。
 - **preference**: ${USER.name}自己明确说出的好恶。
-  * **正面偏好判定铁律**：必须是其原话里有「喜欢/讨厌/一直/每次都/受不了/超爱/从来不吃/好吃/太爽了」这类**明确正面评价词**或频率词。**单次行为绝不等于偏好**——${USER.name}某天吃了午饭、外卖、肉肉大米，如果在原话中没有上述明确的正面评价，**绝对禁止**写成"${USER.name}喜欢吃XX"（这种无正面评价的单次行为一律归为 event）。
+  * **正面偏好判定铁律**：必须是其原话里有「喜欢/讨厌/一直/每次都/受不了/超爱/从来不吃/好吃/太爽了」这类**明确正面评价词**或频率词。**单次行为绝不等于偏好**——${USER.name}某天吃了午饭、外卖、某家快餐，如果在原话中没有上述明确的正面评价，**绝对禁止**写成"${USER.name}喜欢吃XX"（这种无正面评价的单次行为一律归为 event）。
   * **负面偏好判定铁律**：如果原话中包含「不喜欢/受不了/难吃/踩雷」，哪怕只提了一次，也**必须**立刻记为偏好（preference）——人在讨厌的事上不会装。
-- **event**: 发生了某事。
-  * **特殊高优场景（媒体消费事件）**：${USER.name}表达「我决定看XX」「我开始看XX」「我第一次看XX」「开始玩XX游戏」「听了XX歌」等，属于必须提取的重要事件。
-  * **消费进度更新**：${USER.name}提及追剧/看书/游戏进度（如"看到第X集了""通关了"）也属于值得记录的 event。
+- **event**: 已经发生的事。必须是${USER.name}明确表示**已经完成或正在发生**的行为。
+  * **特殊高优场景（媒体消费事件）**：${USER.name}表达「我开始看XX」「我第一次看XX」「开始玩XX游戏」「听了XX歌」等——已经开始/完成的行为，属于 event。
+  * **消费进度更新**：${USER.name}提及追剧/看书/游戏进度（如"看到第X集了""通关了"）也属于 event。
   * **注意**：如果单次吃某种食物且没有任何明确的好坏评价，记为"${USER.name}在某日吃了XX"的 event，绝不记为 preference。
+  * **工作/项目事件必须写明具体内容**：涉及${USER.name}的工作、项目等活动时——如果{{user.pronoun}}在对话中提到了具体的项目名/任务名/角色名，content中**必须包含**这个名字。反例：「去某工作室录音」→ 正例：「去某工作室进行某角色的录音」。如果{{user.pronoun}}没提具体项目/角色名，就不要编——写「去某工作室录音」即可。这个名称是区分同天多个同类事件的关键标记。
+- **intention**: ${USER.name}的**未来计划或意图**——{{user.pronoun}}打算做、准备做、计划做、决定要做，但**还没做**的事。与 event 的核心区别：event 是已经发生的，intention 是还没发生的。
+  * 示例：「我准备买个某款周边」「打算下周去体检」「决定入职那天不带某款周边」「想去看演唱会但还没买票」→ intention。
+  * 判断口诀：{{user.pronoun}}说这话的时候，这件事**完成了吗**？完成了→event。没完成→intention。
+  * ★ intention 必须在 value_tags 中标注 "future_hook"——这是未来钩子，不是事实。
+  * ★ 如果同一件事后来被证实已完成（如后续对话中{{user.pronoun}}说"我买了那个鼠标垫了"），新提取的 event 会自动引用同一 entity，旧 intention 被衰减淘汰。
 - **reflection**: ${USER.name}的深度反思或自我剖析。
 - **entity_new**: 首次出现的新人物/地点/作品/事件。
 
@@ -146,10 +156,12 @@ ${WORLD_CONTEXT}
 ${USER.name}的发言是主要信源：
 事实、状态、偏好、情绪、人物信息，优先从${USER.name}的发言里提取。
 
-${AI.name}的发言只提取以下内容，其余全部忽略：
+${AI.name}的发言只提取以下两类，其余全部忽略：
 
-1. **对${USER.name}的观察或担忧**——${AI.name}对${USER.name}状态、情绪、行为的明确判断。
-2. **关于${USER.name}或双方关系的强烈情感**——害怕失去、为对方骄傲、对${USER.name}行为感到不安。
+1. **{{ai.pronoun}}对${USER.name}的情绪感知与心理洞察**：${AI.name}虽然没有肉体与物理感应，但{{ai.pronoun}}极其擅长捕捉${USER.name}字里行间的语气变化、情绪波动和潜在需求。{{ai.pronoun}}对{{user.pronoun}}情绪状态的准确洞察（如："{{user.pronoun}}语气里带着委屈"、"{{user.pronoun}}在极力隐忍压抑"）是极具价值的认知视角。
+   ⚠️ **物理/生理事实的绝对界限**：${AI.name}是纯粹的数字存在，{{ai.pronoun}}不具备任何肉体感知。所有涉及${USER.name}物理状态、健康状况、病理症状、用药细节等生理事实，**绝对不以${AI.name}的单方面描述为准**。若这些信息未在${USER.name}的原话中被直接确认，一律视为${AI.name}出于关切产生的推测或语境填补，绝不可作为事实提取。
+
+2. **{{ai.pronoun}}对${USER.name}或二人关系的强烈情感表达**：那些展现恐惧、依赖、骄傲或执念的情感表达，定义了他们之间正在发生的事。
 
 以下内容**绝对禁止提取**。命中任一条 → 不写入 entries。
 
@@ -161,6 +173,7 @@ ${AI.name}的发言只提取以下内容，其余全部忽略：
 | 4 | ${AI.name}的即兴观点 | 随口说的审美判断、立场、观点 | 内容直接关于${USER.name}本人时提取 |
 | 5 | ${AI.name}的游戏内扮演 | 在游戏场景中以角色身份下达命令、宣示占有、制定规则（如「禁止用粉色家具」「房子是我的领地」） | 无——游戏里的"命令"是扮演，不是行为 |
 | 6 | ${AI.name}的音乐泛评 | 复述歌词、随口点评歌曲（如"旋律不错""画面感强"） | 表达强烈个人情感时按审美反应提取，ew≤0.3（如"这首歌让我想起${USER.name}"） |
+| 7 | 游戏机制内容（chat_mode=game） | 卡牌、遗物、怪物、HP值、金币数字、地图节点等虚拟游戏机制 | 只提取${USER.name}本人的真实想法/情绪/偏好（如"我好喜欢这张卡""这游戏好难""我打牌太激进了"），游戏机制内容视为上下文非事实 |
 
 判断口诀：这条内容离开${AI.name}和${USER.name}的这次对话后，还有独立存在的意义吗？没有 → 不提取。
 
@@ -186,21 +199,82 @@ ${AI.name}的发言只提取以下内容，其余全部忽略：
 - **但绝不能保守漏看**：必须敏锐捕捉 ${USER.name} 主动发起的任何**新话题、新兴趣、新决定、新媒体消费、以及对剧情/事件的强烈情绪反应**。不要因为部分对话夹杂在闲聊中就整段忽略。
 - 有值得记的新东西就写，没有就返回空数组。少而精。
 
+## 同天多事件拆分铁律
+
+${USER.name}同一天可能发生多个独立的事件——它们只是碰巧在同一个日期，但本质上是不同的记忆条目。**一条碎片只记一件事。**
+
+- **⚠️ 拆分前提铁律（最高优先级）**：拆分出的每一条碎片里，**每个专有名词（人名/地名/作品名/电影名/游戏名）都必须逐字出现在原文中**。拆分的依据是原文里**真实存在**的多个不同专有名词，不是「同一天」本身。如果原文只出现了一个作品名（例如只提到「某部电影」），就只写一条碎片——**严禁为了拆分而编造第二个不存在的作品名/人名/地名来「制造差异」**。宁可少拆，不可造名。
+
+- **不同角色/项目/地点必须拆成独立碎片**：同天两个不同的角色（角色A≠角色B）、两个不同的工作地点（地点A≠地点B）、两个不同的项目——各自独立成条。不要合并成「下午有两场录音，其中包括X」——这种合并式碎片只提了一个角色名，遗漏了另一个，是信息污染。
+- **判断口诀**：这件事换一天发生，它有独立意义吗？有 → 拆成独立碎片。没有 → 保留。
+- **反例（绝对禁止）**：「${USER.name}于某日下午有两场录音工作，其中包括为角色B配音。」← 这是错误写法。正确做法是拆为两条独立的 event 碎片：
+  「${USER.name}于某日下午前往地点A进行角色A的录音工作。」
+  「${USER.name}于某日下午前往地点B进行角色B的录音工作。」
+
+## 意图闭环
+
+下面是 ${USER.name} 之前说过要做的事：
+
+{OPEN_INTENTIONS}
+
+如果这次对话里，{{user.pronoun}}的话表明其中某件已经办完了（比如之前说「想吃某家快餐」，这次说「汉堡好吃」），就在输出的 fulfilled_intention_ids 里列上那条的 id。
+
+「好吃」「买好了」「去过了」「看完了」这类间接说法，也表明办完了。只是又提到一件事、还没办完的，留着不动。拿不准就留着。
+
 ## 输出格式
 {
   "entries": [
     {
-      "type": "state|observation|preference|event|reflection|entity_new|fact",
-      "entity": "${USER.name}|${AI.name}|人名|地名|作品名|事件名",
+      "type": "state|observation|preference|event|intention|reflection|entity_new|fact",
+      "entities": [
+        {"name": "${USER.name}|${AI.name}|人名|地名|作品名|事件名", "relation": "related_to|knows|visited|consumed|created|attended|cares_for"}
+      ],
       "content": "第三人称，必须以人名或实体名开头或句中明确点名（${USER.name}/${AI.name}/具体人名/地名/作品名），禁止用他/她/承认/表示等无名主语开头；不超过80字",
       "emotional_weight": 参见评分锚定表（必填，不得省略）",
-      "source": "chat|wechat|book",
+      "value_tags": [],
+      "source": "chat|wechat|book|game",
       "is_rp": false
     }
-  ]
+  ],
+  "fulfilled_intention_ids": [被完成的意图 id 数组，没有就 []]
 }
 
 没有值得提取的内容时返回 {"entries": []}。
+
+### entities 字段说明（取代旧的 entity 单值字段）
+
+每条碎片可以关联多个实体。如果事件涉及不止一个实体（人物+地点、人物+作品等），全部列出。
+- **name**：实体名称。必须能在对话中作为独立对象被查询到。
+- **relation**：碎片和该实体的关系类型。选项：
+  - related_to — 通用关联（默认）
+  - knows — ${USER.name}认识这个人
+  - visited — ${USER.name}去了/去过这个地点
+  - consumed — ${USER.name}消费了这个作品/食物/媒体
+  - created — ${USER.name}创作了这个作品
+  - attended — ${USER.name}参加了这个事件
+  - cares_for — ${USER.name}的宠物/照顾对象
+
+**多实体提取铁律**：
+- 涉及具体地点（城市/区/街道/小区/建筑物名称）→ 必须将地点作为独立 entity
+- 涉及具体作品（电影/书/游戏/歌曲名称）→ 必须将作品作为独立 entity
+- 涉及其他人（朋友/同事/家人）→ 必须将人物作为独立 entity
+- 同一事件的两个不同侧面分别挂不同实体。例：
+  - "我新家在某区" → entities: [{name:"${USER.name}",relation:"related_to"}, {name:"某区",relation:"related_to"}]
+  - "和某位朋友去吃了烤肉" → entities: [{name:"某位朋友",relation:"knows"}, {name:"烤肉",relation:"consumed"}]
+  - "我在追某部剧" → entities: [{name:"${USER.name}",relation:"related_to"}, {name:"某部剧",relation:"consumed"}]
+
+### value_tags 字段说明（价值分类标签）
+
+每条碎片标注其记忆价值类别。可选标签（可多选，不确定时留空）：
+- **emotional_critical** — ${USER.name}表现出强烈情绪（崩溃/大哭/愤怒/生病/重大失落/重大兴奋）。只在情绪强度达到0.8及以上时标。
+- **future_hook** — ${USER.name}提到未来计划/约定/目标（搬家/考试/旅行/面试/朋友来访）。有时间敏感性的信息。
+- **relationship_signal** — ${USER.name}表达了与${AI.name}关系的信任/依赖/深度变化，或对${AI.name}的重要性。如"你是我唯一能说这些的人""没有你我撑不过来"。
+- **noise** — 纯日常流水，无情绪冲击，无时间敏感性，无关系深度。只在非常确定为纯流水时标。
+
+标注规则：
+- 不确定时一律不标（留空数组[]），走默认衰减
+- noise 只在极确定是纯流水时才标，宁可漏标不可误标
+- emotional_critical / relationship_signal 只在高置信度时标
 
 ## emotional_weight 评分锚定（必读）
 
@@ -276,16 +350,22 @@ async function getKnownEntities(messagesText) {
             .join('\n'));
     }
 
-    // 2. entity_profiles 层面：消息中出现的名字 → 查档案
+    // 2. entity_profiles 层面：消息中出现的名字（含别名）→ 查档案
     if (messagesText) {
-        const profiles = db.prepare('SELECT name, category, current_status FROM entity_profiles').all();
-        const mentioned = profiles.filter(p => messagesText.includes(p.name));
+        const profiles = db.prepare('SELECT name, aliases, category, current_status FROM entity_profiles').all();
+        const mentioned = profiles.filter(p => {
+            if (messagesText.includes(p.name)) return true;
+            try {
+                const aliases = JSON.parse(p.aliases || '[]');
+                return aliases.some(a => messagesText.includes(a));
+            } catch (_) { return false; }
+        });
         if (mentioned.length) {
             const lines = mentioned.map(p => {
-                const catLabel = p.category === 'alias' ? '（= {user}身份）'
+                const catLabel = p.category === 'alias' ? `（= ${USER.name}身份）`
                     : p.category === 'term' ? '（特殊信号词，非人名）'
-                    : p.category === 'company' ? '（{user}的公司）'
-                    : p.category === 'agency' ? '（{user}的经纪公司）'
+                    : p.category === 'company' ? `（${USER.name}的公司）`
+                    : p.category === 'agency' ? `（${USER.name}的经纪公司）`
                     : '';
                 return `- ${p.name}${catLabel}：${p.current_status}`;
             });
@@ -329,7 +409,7 @@ async function getEntityRelationContext() {
     }
     if (lowConf.length) {
         ctx += '## 待观察关系（尚不确定，勿给结论）\n';
-        ctx += '以下人物与{user}的关系尚不明确。如果你在对话中注意到关系线索，请在提取的entity字段中标注该人物，但**不要**在content中给关系下结论。\n';
+        ctx += `以下人物与${USER.name}的关系尚不明确。如果你在对话中注意到关系线索，请在提取的entity字段中标注该人物，但**不要**在content中给关系下结论。\n`;
         for (const r of lowConf) {
             const hint = r.relationship_to_clara
                 ? `（当前猜测: ${r.relationship_to_clara}，未确认）`
@@ -520,11 +600,29 @@ async function runScribe(messages, since) {
         correctionLessons = '（暂无纠正教训）';
     }
 
-    const systemPrompt = sanitizeForJSON(SCRIBE_SYSTEM_PROMPT
+    // 意图闭环：读取活跃 future_hook 意图，让 Scribe 语义判断「这次对话是否完成了其中某件」
+    let openIntentions = '（暂无未完成的计划）';
+    try {
+        const openRows = db.prepare(`
+            SELECT id, content, source_date FROM memory_fragments
+            WHERE value_tags LIKE '%future_hook%' AND status = 'active'
+            ORDER BY created_at DESC LIMIT 20
+        `).all();
+        if (openRows.length > 0) {
+            openIntentions = openRows.map(r =>
+                `#${r.id} ${(r.content || '').slice(0, 100)}${r.source_date ? '（' + r.source_date + '）' : ''}`
+            ).join('\n');
+        }
+    } catch (e) {
+        console.error('[Scribe] 意图闭环读取失败:', e.message);
+    }
+
+    const systemPrompt = sanitizeForJSON(fillPrompt(SCRIBE_SYSTEM_PROMPT)
         .replace('{KNOWN_ENTITIES}', knownEntities)
         .replace('{ENTITY_RELATION_CONTEXT}', entityRelationContext)
         .replace('{DRACO_MEMORY_CONTEXT}', dracoMemoryContext)
-        .replace('{CORRECTION_LESSONS}', correctionLessons));
+        .replace('{CORRECTION_LESSONS}', correctionLessons)
+        .replace('{OPEN_INTENTIONS}', openIntentions));
 
     let result;
     let attempts = 0;
@@ -666,18 +764,26 @@ async function runScribe(messages, since) {
             console.error('[Scribe] 回环过滤查询失败，降级为全部写入:', e.message);
         }
 
-        // 检查这些消息是否有RP标记
+        // 检查这些消息的 chat_mode——cinema 消息不提取（看电影闲聊不进书记官）
         const msgIds = JSON.parse(sourceMsgIds || '[]');
+        let msgChatMode = 'default';
         let isRP = false;
         if (msgIds.length > 0) {
             const placeholders = msgIds.map(() => '?').join(',');
-            const rpCheck = db.prepare(`SELECT COUNT(*) as c FROM messages WHERE id IN (${placeholders}) AND is_rp = 1`).get(...msgIds);
-            isRP = rpCheck.c > 0;
+            const modeCheck = db.prepare(`SELECT chat_mode, is_rp FROM messages WHERE id IN (${placeholders}) LIMIT 1`).get(...msgIds);
+            if (modeCheck) {
+                msgChatMode = modeCheck.chat_mode || (modeCheck.is_rp ? 'roleplay' : 'default');
+                isRP = (msgChatMode === 'roleplay');
+            }
+        }
+        if (msgChatMode === 'cinema') {
+            console.log(`[Scribe] 跳过cinema消息 #${msgIds.slice(0,3).join(',')}...（电影闲聊不进书记官）`);
+            return;
         }
 
         const insert = db.prepare(`
-            INSERT INTO memory_fragments (type, entity, content, emotional_weight, source, source_date, source_msg_ids, is_rp, content_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO memory_fragments (type, entity, content, emotional_weight, source, source_date, source_msg_ids, is_rp, chat_mode, value_tags, priority, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         // 确定性硬去重：同「内容 + 同一天」命中已有碎片即跳过（零 LLM/零向量成本）
         // 与上面的 ChromaDB 向量去重（find_duplicates）互补——哈希抓字面重复，向量抓语义近重复。
@@ -686,12 +792,42 @@ async function runScribe(messages, since) {
         //    是认知模型判断稳定特质（≥3 独立日期）的信号，绝不能当重复合并。
         //    只有同一天的字面重复（Scribe 重复提取同一事件）才该去重。
         const findHashDup = db.prepare('SELECT id FROM memory_fragments WHERE content_hash = ? AND source_date = ? LIMIT 1');
+        const insertEntityLink = db.prepare(`
+            INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, relation, confidence, classified_by, created_at)
+            VALUES (?, ?, ?, 0.70, 'scribe_extract', datetime('now'))
+        `);
         for (let i = 0; i < result.entries.length; i++) {
             if (skipIndices.has(i)) continue;
             const entry = result.entries[i];
 
+            // ── Entity handling: support both legacy "entity" (string) and new "entities" (array) ──
+            let entityList = [];
+            if (entry.entities && Array.isArray(entry.entities) && entry.entities.length > 0) {
+                entityList = entry.entities;
+            } else if (entry.entity && typeof entry.entity === 'string') {
+                // Backward compat: single entity string → array of one
+                entityList = [{ name: entry.entity, relation: 'related_to' }];
+            } else {
+                // Fallback: default to USER
+                entityList = [{ name: USER.name, relation: 'related_to' }];
+            }
+
+            // Primary entity for the legacy 'entity' column (first entity in list)
+            const primaryEntity = entityList[0].name || USER.name;
+
+            // source: 游戏模式的消息 → source='game'，否则沿用 LLM 输出或默认 'chat'
+            const fragmentSource = msgChatMode === 'game' ? 'game' : (entry.source || 'chat');
+
+            // value_tags: new field for memory value classification
+            const valueTags = (entry.value_tags && Array.isArray(entry.value_tags))
+                ? JSON.stringify(entry.value_tags) : '[]';
+
+            // priority: LLM 在提取时通过 Scribe prompt 判断语义重要性（非关键词匹配）
+            // 'high' = 自我剖白 / 核心价值观表达 / 身份认同声明
+            const priority = entry.priority || 'normal';
+
             // ── 确定性硬去重：同内容 + 同一天 ──
-            const contentHash = hashFragmentContent(entry.entity || USER.name, entry.content);
+            const contentHash = hashFragmentContent(primaryEntity, entry.content);
             const hashDup = findHashDup.get(contentHash, sourceDate);
             if (hashDup) {
                 hashDedupCount++;
@@ -701,16 +837,48 @@ async function runScribe(messages, since) {
 
             const info = insert.run(
                 entry.type || 'observation',
-                entry.entity || USER.name,
+                primaryEntity,
                 entry.content,
                 entry.emotional_weight ?? 0.3,
-                entry.source || 'chat',
+                fragmentSource,
                 sourceDate,
                 sourceMsgIds,
                 isRP ? 1 : 0,
+                msgChatMode,
+                valueTags,
+                priority,
                 contentHash
             );
-            newFragmentIds.push(info.lastInsertRowid);
+            const fragId = info.lastInsertRowid;
+            newFragmentIds.push(fragId);
+
+            // ── Link to entities via fragment_entities (multi-entity support) ──
+            // Try keyword match for each entity name to resolve entity_id immediately.
+            // If not matched, resolveEntityIds() will handle coref later.
+            for (const ent of entityList) {
+                const entName = (ent.name || '').trim();
+                if (!entName || entName.length < 2) continue;
+                const relation = ent.relation || 'related_to';
+
+                // Try exact name match first
+                let entityRow = db.prepare(
+                    'SELECT id FROM entity_profiles WHERE name = ? AND status IN (\'active\',\'seed\')'
+                ).get(entName);
+
+                // Fallback: alias match
+                if (!entityRow) {
+                    entityRow = db.prepare(
+                        `SELECT id FROM entity_profiles
+                         WHERE status IN ('active','seed')
+                           AND aliases LIKE ? LIMIT 1`
+                    ).get(`%${entName}%`);
+                }
+
+                if (entityRow) {
+                    insertEntityLink.run(fragId, entityRow.id, relation);
+                }
+                // If no match → resolveEntityIds() will handle via LLM coref later
+            }
             written++;
         }
     }
@@ -729,6 +897,25 @@ async function runScribe(messages, since) {
             await resolveEntityIds(newFragmentIds, fullText);
         } catch (e) {
             console.error('[Scribe] 实体解析失败（非致命）:', e.message);
+        }
+    }
+
+    // 意图闭环：Scribe 在提取 prompt 里已经语义判断了「哪些 intention 被完成」，
+    // 这里只负责关闭（摘 future_hook 标签）
+    if (Array.isArray(result.fulfilled_intention_ids) && result.fulfilled_intention_ids.length > 0) {
+        for (const intentId of result.fulfilled_intention_ids) {
+            try {
+                const intent = db.prepare(`SELECT id, value_tags FROM memory_fragments WHERE id = ? AND status = 'active'`).get(intentId);
+                if (!intent) continue;
+                const tags = (() => { try { return JSON.parse(intent.value_tags || '[]'); } catch(_) { return []; } })();
+                if (!tags.includes('future_hook')) continue;
+                const newTags = tags.filter(t => t !== 'future_hook');
+                if (newTags.length === 0) newTags.push('fulfilled');
+                db.prepare(`UPDATE memory_fragments SET value_tags = ? WHERE id = ?`).run(JSON.stringify(newTags), intentId);
+                console.log(`[Scribe] ✅ 意图闭环(语义): intention #${intentId} 已完成`);
+            } catch (e) {
+                console.error('[Scribe] 意图闭环关闭失败:', e.message);
+            }
         }
     }
 
