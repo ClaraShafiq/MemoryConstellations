@@ -74,7 +74,7 @@ function generateHealthSummary(fullHealthStatus) {
         const isPoorEff     = !isNaN(parseFloat(efficiency))  && parseFloat(efficiency) < 85;
         const isPoorSleep   = isShortSleep || isPoorEff;
 
-        let summary = fillPrompt(`【用户健康数据（可穿戴设备日均，非实时）】`);
+        let summary = fillPrompt(`【{user}健康数据（可穿戴设备日均，非实时）】`);
         if (isLowHRV || isPoorSleep) {
             const issues = [];
             if (isShortSleep) issues.push(`睡眠不足（${sleepHours}h）`);
@@ -85,7 +85,7 @@ function generateHealthSummary(fullHealthStatus) {
             summary += `状态正常。`;
         }
 
-        // 注意：静息心率是 可穿戴设备 当天的昨日均值，不是当下实时心率
+        // 注意：静息心率是可穿戴设备当天的昨日均值，不是当下实时心率
         summary += `\n昨晚${sleepTime}，共${sleepHours}h（效率${efficiency}%）；` +
                    `静息心率${restingHRDisplay}bpm（昨日均值，非当下实时）；` +
                    `HRV ${hrv}ms；${stepsInfo}（前日）。`;
