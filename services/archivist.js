@@ -3054,7 +3054,7 @@ function _bigramOverlap(textA, textB) {
 // ── Freshness-based状态刷新（每2min）──
 function refreshPatternStates() {
     const db = getDb();
-    const allPatterns = db.prepare("SELECT * FROM user_patterns WHERE status IN ('active','dormant','superseded')").all();
+    const allPatterns = db.prepare("SELECT * FROM clara_patterns WHERE status IN ('active','dormant','superseded')").all();
     let changed = 0, dormantCount = 0, archivedCount = 0;
 
     for (const p of allPatterns) {
@@ -3078,7 +3078,7 @@ function refreshPatternStates() {
             }
 
             if (newStatus !== p.status) {
-                db.prepare("UPDATE user_patterns SET status=?, updated_at=datetime('now') WHERE id=?")
+                db.prepare("UPDATE clara_patterns SET status=?, updated_at=datetime('now') WHERE id=?")
                     .run(newStatus, p.id);
                 changed++;
             }
@@ -3113,14 +3113,14 @@ async function maintainPatterns() {
 
     // 收集已有pattern的碎片ID（含dormant和superseded，含archived）
     const existingFragIds = new Set();
-    db.prepare("SELECT source_fragment_ids FROM user_patterns WHERE status IN ('active','dormant','superseded')").all()
+    db.prepare("SELECT source_fragment_ids FROM clara_patterns WHERE status IN ('active','dormant','superseded')").all()
         .forEach(p => { try { JSON.parse(p.source_fragment_ids || '[]').forEach(id => existingFragIds.add(id)); } catch(_) {} });
 
     const newFrags = recentFrags.filter(f => !existingFragIds.has(f.id));
     if (newFrags.length < MIN_PATTERN_FRAGS) return { matched: 0, reason: `only ${newFrags.length} unmatched` };
 
     // 2. 匹配到所有非archived pattern（含 dormant + superseded）
-    const existingPatterns = db.prepare("SELECT * FROM user_patterns WHERE status != 'archived' ORDER BY evidence_count DESC").all();
+    const existingPatterns = db.prepare("SELECT * FROM clara_patterns WHERE status != 'archived' ORDER BY evidence_count DESC").all();
     let matchedCount = 0, revivedCount = 0, supersededCount = 0;
     const mergeCandidates = []; // {patternA_id, patternB_id, overlap}
 
@@ -3142,7 +3142,7 @@ async function maintainPatterns() {
             if (hasNegation) {
                 const contrCount = (bestMatch.contradiction_count || 0) + 1;
                 const newStatus = contrCount >= PATTERN_CONTRADICT_THRESHOLD ? bestMatch.status : bestMatch.status;
-                db.prepare(`UPDATE user_patterns SET contradiction_count=?, status=?,
+                db.prepare(`UPDATE clara_patterns SET contradiction_count=?, status=?,
                     last_seen=?, updated_at=datetime('now') WHERE id=?`)
                     .run(contrCount, newStatus, frag.source_date, bestMatch.id);
                 matchedCount++;
@@ -3152,7 +3152,7 @@ async function maintainPatterns() {
             // 漂移检测：碎片有时态信号 → 旧pattern标记superseded
             const isDrift = _detectDrift(frag.content);
             if (isDrift && bestMatch.status !== 'superseded') {
-                db.prepare(`UPDATE user_patterns SET status='superseded', last_seen=?,
+                db.prepare(`UPDATE clara_patterns SET status='superseded', last_seen=?,
                     updated_at=datetime('now') WHERE id=?`).run(frag.source_date, bestMatch.id);
                 supersededCount++;
                 // 碎片不进旧pattern的证据链——它将是新pattern的种子
@@ -3168,7 +3168,7 @@ async function maintainPatterns() {
                 const newLast = frag.source_date > (bestMatch.last_seen || frag.source_date) ? frag.source_date : bestMatch.last_seen;
                 const newConf = _calcPatternConfidence(newCount, newFirst, newLast);
                 const wasDormantOrSuperseded = bestMatch.status === 'dormant' || bestMatch.status === 'superseded';
-                db.prepare(`UPDATE user_patterns SET evidence_count=?, first_seen=?, last_seen=?,
+                db.prepare(`UPDATE clara_patterns SET evidence_count=?, first_seen=?, last_seen=?,
                     confidence=?, source_fragment_ids=?, status='active', updated_at=datetime('now') WHERE id=?`)
                     .run(newCount, newFirst, newLast, newConf, JSON.stringify(fragIds), bestMatch.id);
                 matchedCount++;
@@ -3210,7 +3210,7 @@ async function _mergePatterns(db, candidates) {
     // 加载pattern内容
     const allIds = [...new Set(unique.flatMap(c => [c.patternA_id, c.patternB_id]))];
     const patternMap = new Map();
-    db.prepare(`SELECT id, content, evidence_count, first_seen, last_seen, source_fragment_ids FROM user_patterns WHERE id IN (${allIds.map(()=>'?').join(',')})`).all(...allIds)
+    db.prepare(`SELECT id, content, evidence_count, first_seen, last_seen, source_fragment_ids FROM clara_patterns WHERE id IN (${allIds.map(()=>'?').join(',')})`).all(...allIds)
         .forEach(p => patternMap.set(p.id, p));
 
     const prompt = `判断每对行为模式是否在描述同一个底层特质。是 → merge=true。不是 → merge=false。
@@ -3251,11 +3251,11 @@ ${unique.map((c, i) => {
             const newFirst = dates.reduce((a,b) => a<b?a:b, dates[0]);
             const newLast = dates.reduce((a,b) => a>b?a:b, dates[0]);
             const newConf = _calcPatternConfidence(mergedIds.length, newFirst, newLast);
-            db.prepare(`UPDATE user_patterns SET evidence_count=?, first_seen=?, last_seen=?, confidence=?,
+            db.prepare(`UPDATE clara_patterns SET evidence_count=?, first_seen=?, last_seen=?, confidence=?,
                 source_fragment_ids=?, content=CASE WHEN evidence_count<? THEN ? ELSE content END, updated_at=datetime('now') WHERE id=?`)
                 .run(mergedIds.length, newFirst, newLast, newConf, JSON.stringify(mergedIds),
                      sub.evidence_count, main.content, main.id);
-            db.prepare(`UPDATE user_patterns SET status='merged', updated_at=datetime('now') WHERE id=?`).run(sub.id);
+            db.prepare(`UPDATE clara_patterns SET status='merged', updated_at=datetime('now') WHERE id=?`).run(sub.id);
             console.log(`[Archivist] 🔗 模式合并: #${main.id}←#${sub.id} "${main.content.slice(0,40)}"`);
         }
     } catch (e) {
