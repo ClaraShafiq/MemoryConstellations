@@ -117,7 +117,19 @@ nano core-prompt.txt
 - **保持 400 行以内** — 太长会稀释重点，且会吃掉 thinking token 预算
 - `{{变量}}` 会被 `memory_config.json` 的值自动替换（`{{user.name}}`、`{{ai.name}}` 等）
 
-### 2.6 启动
+### 2.6 配置轻量模型（记忆管线）
+
+记忆管线（Scribe 提取碎片 / Archivist 分类整合 / Consolidator 编叙事）需要调用 LLM，但都是后台批量任务，用**轻量模型**（flash / flash-lite 级别）即可，便宜够用。
+
+```bash
+node scripts/setup_llm.js
+```
+
+按提示选提供商（OpenRouter / DeepSeek / Gemini）、填 API Key、选模型即可。脚本会在 `api_configs` 表里建一条**默认配置**（`is_default=1`），后台管线自动使用它。
+
+> 聊天用的主力模型不在这里配——那由你自己的聊天前端决定。这里只配「记忆管线」的后台模型。
+
+### 2.7 启动
 
 ```bash
 npm start
@@ -127,7 +139,7 @@ pm2 start ecosystem.config.js
 
 打开 `http://localhost:3000/memory.html` 看星图。
 
-### 2.7 数据库和集成
+### 2.8 数据库和集成
 
 Memory Constellations 使用独立的 SQLite 数据库（`memory_constellations.db`），不依赖你的主应用数据库。它是一个旁路管线——你的 AI 伴侣继续用你自己选的后端（PostgreSQL、MySQL、MongoDB、文件存储都可以），记忆星图自己维护自己的表。
 
@@ -226,3 +238,47 @@ sqlite3 memory_constellations.db "SELECT COUNT(*) FROM entity_profiles WHERE sta
 ```
 
 **记住：** `core-prompt.txt` 的人格提示词必须用户自己写。你可以给结构和示例，但不能代笔——那是他们 AI 的灵魂。
+
+---
+
+## 6. 导入、导出与迁移
+
+### 6.1 导入聊天记录（冷启动记忆）
+
+如果你有现成的聊天记录（JSONL 或 TXT），可以先导入，让 Scribe 从历史对话里提取记忆，不必从零开始积累。
+
+```bash
+node scripts/import_chat.js 你的聊天.jsonl --name "旧手机聊天记录"
+```
+
+**JSONL 格式**（每行一个 JSON 对象）：
+```json
+{"role":"user","content":"今天好累","timestamp":"2026-08-15 14:30:00"}
+{"role":"assistant","content":"辛苦了，早点休息","timestamp":"2026-08-15 14:31:00"}
+```
+也支持 `sender` 字段，以及 `time`/`date` 等时间字段别名。
+
+**TXT 格式**（每行「名字: 内容」，可带时间戳前缀）：
+```
+[2026-08-15 14:30:00] 小夜: 今天好累
+小夜: 辛苦了
+```
+TXT 里的「名字」请和 `memory_config.json` 的 `user.name` / `ai.name` 一致（或用 `user`/`assistant`/`ai` 这类关键词），才能正确区分说话人。
+
+导入后，后台 agent loop 会在下个 tick（约 2 分钟）自动运行 Scribe 提取记忆碎片。
+
+### 6.2 导出 / 迁移记忆库
+
+把整份记忆（碎片 + 星座 + 叙事）导出成单个 JSONL 文件，迁移到新机器或做备份：
+
+```bash
+node scripts/export_memory.js backup.jsonl
+```
+
+在新机器上导入：
+
+```bash
+node scripts/import_memory.js backup.jsonl
+```
+
+默认跳过已存在的记录，可安全重复导入。导出文件是纯文本 JSONL，可直接 diff / 查看 / 归档。
