@@ -1249,29 +1249,46 @@ async function classifyFragments(opts = {}) {
 
     if (lightweight) {
         // Lightweight: keyword match against entity names + aliases only, no LLM.
-        // Capped confidence — deep cycle will do proper Companion-directed classification.
-        const entityIndex = buildEntityNameIndex(constellations);
+        // Two-tier confidence: exact alias match → 0.55, bigram substring match → 0.35
+        const { exactIndex, bigramIndex } = buildEntityNameIndex(constellations);
+        const bigramInsert = db.prepare(`INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, relation, confidence, classified_by) VALUES (?, ?, NULL, 0.35, 'archivist_bigram_light')`);
 
         for (const frag of unclassified) {
             const content = frag.content || '';
             const contentLower = content.toLowerCase();
-            const matched = new Set();
+            const matchedExact = new Set();
+            const matchedBigram = new Set();
 
-            for (const [key, entities] of entityIndex) {
+            for (const [key, entities] of exactIndex) {
                 if (contentLower.includes(key)) {
-                    for (const e of entities) matched.add(e.id);
+                    for (const e of entities) matchedExact.add(e.id);
+                }
+            }
+            for (const [key, entities] of bigramIndex) {
+                if (contentLower.includes(key)) {
+                    for (const e of entities) matchedBigram.add(e.id);
                 }
             }
 
-            if (matched.size > 0) {
-                for (const eid of matched) {
+            // Bigram matches that were already matched exactly → skip (already higher confidence)
+            for (const eid of matchedExact) matchedBigram.delete(eid);
+
+            if (matchedExact.size > 0) {
+                for (const eid of matchedExact) {
                     insertFe.run(frag.id, eid, null, 0.55, 'archivist_keyword_light');
                 }
+            }
+            if (matchedBigram.size > 0) {
+                for (const eid of matchedBigram) {
+                    bigramInsert.run(frag.id, eid);
+                }
+            }
+            if (matchedExact.size > 0 || matchedBigram.size > 0) {
                 classified++;
             }
         }
 
-        console.log(`[Archivist] 轻量分类: ${classified}/${unclassified.length} 条 (关键词匹配)`);
+        console.log(`[Archivist] 轻量分类: ${classified}/${unclassified.length} 条 (关键词+bigram)`);
     } else {
         // Deep cycle: Companion-directed per-batch classification with flash-lite
         const BATCH_SIZE = 15;
@@ -1393,31 +1410,55 @@ async function classifyFragments(opts = {}) {
 }
 
 // ═══════════════════════════════════════════════════════
-// v4.7 Helper: Build entity name → entity index for keyword matching
+// v5.13: Also indexes CJK bigrams/trigrams from names so fragments can
+// match entities by partial name. Without this, descriptive entity names
+// are invisible to keyword matching.
 // ═══════════════════════════════════════════════════════
 
 function buildEntityNameIndex(entities) {
-    const index = new Map(); // lowercaseKey → [entity]
+    const exactIndex = new Map();  // full names + aliases → [entity]
+    const bigramIndex = new Map(); // CJK substrings → [entity] (lower confidence)
 
     for (const e of entities) {
-        const addName = (name) => {
+        const addExact = (name) => {
             const key = name.toLowerCase().trim();
             if (key.length < 2) return;
-            if (!index.has(key)) index.set(key, []);
-            const list = index.get(key);
+            if (!exactIndex.has(key)) exactIndex.set(key, []);
+            const list = exactIndex.get(key);
+            if (!list.find(x => x.id === e.id)) list.push(e);
+        };
+        const addBigram = (sub) => {
+            if (!bigramIndex.has(sub)) bigramIndex.set(sub, []);
+            const list = bigramIndex.get(sub);
             if (!list.find(x => x.id === e.id)) list.push(e);
         };
 
-        addName(e.name);
+        addExact(e.name);
         try {
             const aliases = JSON.parse(e.aliases || '[]');
             for (const a of aliases) {
-                if (a && a.trim().length >= 2) addName(a.trim());
+                if (a && a.trim().length >= 2) addExact(a.trim());
             }
         } catch (_) {}
+
+        // v5.13: CJK bigrams from name — fallback for partial matching.
+        // Kept separate from exact index so matches get lower confidence (0.35 vs 0.55).
+        const nameClean = e.name.toLowerCase().trim();
+        if (nameClean.length >= 3) {
+            for (let i = 0; i <= nameClean.length - 2; i++) {
+                const sub = nameClean.slice(i, i + 2);
+                if (/[一-鿿㐀-䶿぀-ゟ゠-ヿ]/.test(sub)) addBigram(sub);
+            }
+            if (nameClean.length >= 5) {
+                for (let i = 0; i <= nameClean.length - 3; i++) {
+                    const sub = nameClean.slice(i, i + 3);
+                    if (/[一-鿿㐀-䶿]/.test(sub)) addBigram(sub);
+                }
+            }
+        }
     }
 
-    return index;
+    return { exactIndex, bigramIndex };
 }
 
 // ═══════════════════════════════════════════════════════
@@ -3560,7 +3601,8 @@ async function regenerateEntityOverviews() {
         SELECT ep.id, ep.name, ep.category, ep.status, ep.subcategory,
                ep.relationship_to_clara, ep.relationship_nature,
                ep.emotional_significance, ep.facts, ep.overview_updated_at,
-               ep.last_eval_frag_count, ep.fragment_count, ep.aliases, ep.tags
+               ep.last_eval_frag_count, ep.fragment_count, ep.aliases, ep.tags,
+               ep.judgment, ep.current_status, ep.gender
         FROM entity_profiles ep
         WHERE ep.name NOT IN (${SKIP_PH})
           AND ep.fragment_count > 0
