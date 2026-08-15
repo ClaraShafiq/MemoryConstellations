@@ -5,7 +5,7 @@
 //   set             — 新建 current_state（content + expires_at 必填）
 //   update          — 修改已有 current_state 的 content / expires_at
 //   resolve         — 标记 current_state 为 resolved + 写结束原因
-//   update_overview — 更新星座描述（entity_profiles.overview），
+//   update_overview — 更新星座描述（entity_profiles.facts），
 //                      当 Companion 在聊天中了解到某个人/事的新情况时直接修正
 //
 // 与 recall_memory / browse_memories 共享同一个设置开关
@@ -282,7 +282,7 @@ const manageUserState = {
                     return { success: false, formatted: `未找到名为"${entityName}"的星座。请检查名字是否正确——需要精确匹配星座名或别称。` };
                 }
 
-                db.prepare(`UPDATE entity_profiles SET overview = ?, overview_updated_at = datetime('now'),
+                db.prepare(`UPDATE entity_profiles SET facts = ?, overview_updated_at = datetime('now'),
                     updated_at = datetime('now') WHERE id = ?`).run(newOverview, entity.id);
                 db.prepare(`INSERT INTO ontology_changelog (action, category_path, detail, confidence, status)
                     VALUES ('overview_updated', ?, ?, 0.90, 'completed')`)

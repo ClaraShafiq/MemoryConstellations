@@ -262,6 +262,7 @@ ${USER.name}同一天可能发生多个独立的事件——它们只是碰巧�
   - "我新家在某区" → entities: [{name:"${USER.name}",relation:"related_to"}, {name:"某区",relation:"related_to"}]
   - "和某位朋友去吃了烤肉" → entities: [{name:"某位朋友",relation:"knows"}, {name:"烤肉",relation:"consumed"}]
   - "我在追某部剧" → entities: [{name:"${USER.name}",relation:"related_to"}, {name:"某部剧",relation:"consumed"}]
+- ⚠️ 上面例子里的人名/地名/作品名（某位朋友/某区/某部剧）是占位符，写对话里真实出现的具体名字，绝不照抄「某X」。
 
 ### value_tags 字段说明（价值分类标签）
 
