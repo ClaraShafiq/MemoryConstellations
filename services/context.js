@@ -107,9 +107,9 @@ async function buildSmartContext(userMessage, healthStatus, skipVectorMemory = f
     // === 稳定部分 ===
     let corePrompt = fs.readFileSync('core-prompt.txt', 'utf8');
 
-    // v5.0: 核心洞察段 — deep cycle 产出，Clara 可编辑，始终在 system prompt 中
-    const coreInsight = (await getUserSetting('clara_core_insight')) || '';
-    corePrompt = corePrompt.replace('{{CORE_INSIGHT}}', coreInsight || '（你正在学习理解她——长期观察中的认知将逐渐在这里形成。）');
+    // v5.0: 核心洞察段 — deep cycle 产出，{{user.name}} 可编辑，始终在 system prompt 中
+    const coreInsight = (await getUserSetting('user_core_insight')) || '';
+    corePrompt = corePrompt.replace('{{CORE_INSIGHT}}', coreInsight || '（你正在学习理解{{user.pronoun}}——长期观察中的认知将逐渐在这里形成。）');
 
     estimatedTokens += Math.ceil(corePrompt.length / 4);
 

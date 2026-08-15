@@ -18,7 +18,7 @@ const CATEGORY_ORDER = [
     { key: 'health',               label: '健康' },
     { key: 'creative_work',        label: '创作' },
     { key: 'personal_history',     label: '过去经历' },
-    { key: 'relationship_with_draco', label: '与Draco的关系' },
+    { key: 'relationship_with_companion', label: '与伴侣的关系' },
     { key: 'finance',              label: '经济' },
     { key: 'communication',        label: '沟通风格' },
 ];
