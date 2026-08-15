@@ -1306,6 +1306,11 @@ function initDatabase() {
     runMigration(86, 'v5.10: memory_fragments.priority — 高价值碎片优先路由',
         `ALTER TABLE memory_fragments ADD COLUMN priority TEXT DEFAULT "normal";`);
 
+    // v87: memory_fragments.content_hash — 碎片级确定性硬去重
+    runMigration(87, 'v5.17: memory_fragments.content_hash — 碎片级确定性硬去重',
+        `ALTER TABLE memory_fragments ADD COLUMN content_hash TEXT;
+         CREATE INDEX IF NOT EXISTS idx_memory_fragments_hash ON memory_fragments(content_hash);`);
+
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {
         const existingRoots = db.prepare('SELECT COUNT(*) as c FROM memory_ontology WHERE parent_id IS NULL').get();

@@ -2,6 +2,8 @@
 // 文本处理工具函数
 // =================================================================
 
+const crypto = require('crypto');
+
 // 思考链过滤：去掉LLM在输出中"自言自语"的推理过程
 // 应用于流式输出的每个句子 + 主动消息的后处理
 const REASONING_PREFIX_CN = /^(?:让我(?:想想|分析|思考|考虑|来看|整理|先说|确认|检查|看看|来想|想一[想下])|我来(?:分析|看看|想想|思考|整理)|思考中|分析一下|考虑到|我在想|经过分析|我需要先|首先[，,]\s*)/;
@@ -192,4 +194,20 @@ function flushTextBuffer(textBuffer, res, components, onSentence) {
     });
 }
 
-module.exports = { filterThinkingProcess, splitIntoSentences, flushTextBuffer };
+// 碎片内容确定性哈希（规范化后 SHA256）—— 用于记忆碎片级硬去重。
+//
+// 规范化策略（刻意保守，避免误合并）：
+//   - 去全部空白（含全角空格 　），"Alice 搬家" 与 "Alice搬家" 同哈希
+//   - 小写（英文实体名大小写无关）
+//   - 保留标点——只有「除空白外完全一致」才算重复，语义近但标点不同不会误合并
+//
+// entity 参与哈希：同一句话关于不同实体不应被合并。
+function hashFragmentContent(entity, content) {
+    const SEP = ' '; // NUL 分隔符：不被 \s 剥除，避免 "A"+"BC" 与 "AB"+"C" 碰撞
+    const normalized = `${entity || ''}${SEP}${content || ''}`
+        .replace(/[\s　]+/g, '')
+        .toLowerCase();
+    return crypto.createHash('sha256').update(normalized).digest('hex');
+}
+
+module.exports = { filterThinkingProcess, splitIntoSentences, flushTextBuffer, hashFragmentContent };
