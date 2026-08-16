@@ -12,5 +12,5 @@ COPY . .
 
 EXPOSE 3000
 
-# 启动前初始化数据库，再起服务
-CMD ["sh", "-c", "node -e \"require('./database').initDatabase()\" && node index.js"]
+# 启动前初始化数据库，再起服务（首次运行自动从 example 生成 core-prompt.txt）
+CMD ["sh", "-c", "cp -n core-prompt.example.txt core-prompt.txt 2>/dev/null; cp -n memory_config.example.json memory_config.json 2>/dev/null; node -e \"require('./database').initDatabase()\" && node index.js"]
