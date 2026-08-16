@@ -4,7 +4,7 @@ FROM node:20-bookworm
 WORKDIR /app
 
 # 先装依赖（利用 Docker 层缓存）
-COPY package.json package-lock.json ./
+COPY package.json ./
 RUN npm install
 
 # 复制源码

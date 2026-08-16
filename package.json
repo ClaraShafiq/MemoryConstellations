@@ -15,6 +15,7 @@
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^11.10.0",
     "chromadb": "^3.0.0",
+    "csrf": "^3.1.0",
     "dotenv": "^16.6.1",
     "express": "^5.1.0",
     "express-session": "^1.18.1",
