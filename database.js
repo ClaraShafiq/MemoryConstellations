@@ -36,7 +36,7 @@ function initDatabase() {
     // 单例缓存：避免重复连接 + 重复跑迁移
     if (_initialized && db) return db;
 
-    db = new Database('sanctuary.db');
+    db = new Database(process.env.DB_PATH || 'sanctuary.db');
     db.pragma('journal_mode = WAL');
     db.pragma('busy_timeout = 5000');
 

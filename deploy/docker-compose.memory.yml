@@ -22,6 +22,7 @@
       - API_KEY=改成你的LLMkey
       # - GEMINI_API_KEY=或填Gemini的key
       - CHROMA_URL=http://chroma:7707     # 向量检索服务地址（chroma 容器）
+      - DB_PATH=/app/data/sanctuary.db   # 数据库文件落到持久化目录
     volumes:
       - ./memory-data:/app/data          # 持久化数据库 + 配置
 
