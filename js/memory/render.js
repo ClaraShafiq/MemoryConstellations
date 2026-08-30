@@ -225,9 +225,13 @@ function drawCore(T, cx, cy, orbitR, alpha, hovered) {
     // 双星间细弱光弧
     if (corePos.length === 2) {
         const [a, b] = corePos;
+        // CORE_STYLE 的 key 是配置里的名字（[UI.user.name]），不能用硬编码的
+        // 'User'/'AI' 去读——自定义名字时二者为 undefined，会在首帧抛错杀死 RAF 循环
+        const uRGB = (CORE_STYLE[UI.user.name] || {}).rgb || hexToRgbStr(UI.user.color);
+        const aRGB = (CORE_STYLE[UI.ai.name] || {}).rgb || hexToRgbStr(UI.ai.color);
         const lg = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
-        lg.addColorStop(0, `rgba(${CORE_STYLE.User.rgb},${0.16 * alpha})`);
-        lg.addColorStop(1, `rgba(${CORE_STYLE.AI.rgb},${0.16 * alpha})`);
+        lg.addColorStop(0, `rgba(${uRGB},${0.16 * alpha})`);
+        lg.addColorStop(1, `rgba(${aRGB},${0.16 * alpha})`);
         ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
         ctx.strokeStyle = lg; ctx.lineWidth = 0.7; ctx.stroke();
     }

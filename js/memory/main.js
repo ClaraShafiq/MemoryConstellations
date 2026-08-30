@@ -204,13 +204,22 @@ async function refresh() {
 // ── 主循环 ──
 let T = 0;
 function loop() {
-    // 空闲降帧：>3s 无交互 → 隔帧渲染（~30fps）
-    if (Date.now() - lastInteraction > 3000) {
-        frameSkip = !frameSkip;
-        if (frameSkip) { requestAnimationFrame(loop); return; }
+    // 单帧异常会永久打断 RAF 链：星图冻在最后一帧，
+    // 拖拽/点击其实生效了但永不重绘，表现为"点了没反应"。必须兜底。
+    try {
+        // 空闲降帧：>3s 无交互 → 隔帧渲染（~30fps）
+        if (Date.now() - lastInteraction > 3000) {
+            frameSkip = !frameSkip;
+            if (frameSkip) { requestAnimationFrame(loop); return; }
+        }
+        T += 0.012;
+        drawFrame(T, hovered);
+    } catch (err) {
+        (window.__loopErrs = window.__loopErrs || []).push(
+            String(err && err.message || err) + ' @ ' + String(err && err.stack || '').split('\n').filter(l => l.includes('/js/')).slice(0, 2).join(' << ')
+        );
+        console.error('[memory] loop error:', err);
     }
-    T += 0.012;
-    drawFrame(T, hovered);
     requestAnimationFrame(loop);
 }
 
