@@ -270,7 +270,9 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
             music_aggregate: '#ffcc66', book_aggregate: '#ffcc66', movie_aggregate: '#ffcc66'
         };
         const { USER, AI, UI } = require('../services/memoryConfig');
-        const GALAXY_LABELS = { person:'社交', pet:'社交', organization:'社交', place:'地点', event:'事件', project: USER.name + '的', work: USER.name + '的', term: USER.name + '的', hobby:'爱好', consumed:'爱好', music_aggregate:'爱好', book_aggregate:'爱好', movie_aggregate:'爱好' };
+        // 项目类星系标签需与前端 js/memory/data.js 的 GALAXIES（含'创作'）一致，
+        // 用 USER.name+'的' 会在前端找不到对应星系导致星座无法渲染
+        const GALAXY_LABELS = { person:'社交', pet:'社交', organization:'社交', place:'地点', event:'事件', project:'创作', work:'创作', term:'创作', hobby:'爱好', consumed:'爱好', music_aggregate:'爱好', book_aggregate:'爱好', movie_aggregate:'爱好' };
 
         const entities = db.prepare(`
             SELECT ep.id, ep.name, ep.category, ep.subcategory, ep.overview, ep.fragment_count,

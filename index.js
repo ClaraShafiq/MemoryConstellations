@@ -26,8 +26,9 @@ app.use(session({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Static files
-app.use(express.static(path.join(__dirname)));
+// Static files 移到需要鉴权的页面路由之后：
+// 否则 express.static 会先于 requireAuth 命中 memory.html，
+// 会话失效时页面照常打开但所有接口 302，星图变成只画背景尘埃的空壳
 
 // ── CSRF ──
 const csrf = require('csrf');
@@ -48,7 +49,7 @@ const requireAuth = (req, res, next) => {
 
 // ── Login ──
 app.get('/login', (req, res) => {
-  res.sendFile(path.join(__dirname, 'login.html'));
+  res.sendFile('login.html', { root: __dirname });
 });
 app.post('/login', (req, res) => {
   if (req.body.password === process.env.LOGIN_PASSWORD) {
@@ -87,8 +88,15 @@ app.get('/memory.html', requireAuth, (req, res) => {
   res.type('html').send(injected);
 });
 
+// Static files（放在需要鉴权的页面路由之后：
+// 否则 express.static 会先于 requireAuth 命中 memory.html，
+// 会话失效时页面照常打开但所有接口 302，星图变成只画背景尘埃的空壳）
+app.use(express.static(path.join(__dirname)));
+
 // ── Memory API ──
-app.use('/api/memory', require('./routes/memory-api'));
+// 上游 bug 修复：memory-api.js 内部路由已写完整路径（如 /api/memory/universe），
+// 这里不能再挂 /api/memory 前缀，否则变成双重前缀，前端全部 404
+app.use(require('./routes/memory-api'));
 
 // ── Chat ingest API（接收外部机器人消息，攒记忆）──
 app.use('/api', require('./routes/ingest'));
