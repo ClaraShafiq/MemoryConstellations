@@ -283,6 +283,23 @@ node scripts/import_memory.js backup.jsonl
 
 默认跳过已存在的记录，可安全重复导入。导出文件是纯文本 JSONL，可直接 diff / 查看 / 归档。
 
+### 6.3 数据库整理（长期运行后）
+
+SQLite 删掉的数据不会把空间还给操作系统，跑久了文件只涨不缩。整理一次：
+
+```bash
+node scripts/vacuum.js --dry-run   # 先看看能回收多少
+node scripts/vacuum.js             # 够划算才真的重建
+```
+
+两个注意点：**需要临时双倍磁盘**，且**全程独占锁库**——所以脚本会先检查剩余空间、回收量低于 20MB 时自动跳过；跑之前建议先停掉服务。
+
+想让它定期自动整理，挂个低峰期的 cron 就行：
+
+```
+30 4 * * 0  cd /path/to/app && node scripts/vacuum.js >> logs/vacuum.log 2>&1
+```
+
 ---
 
 ## 7. 接入聊天机器人（旁路攒记忆）
