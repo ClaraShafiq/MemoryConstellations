@@ -101,6 +101,17 @@ function initDatabase() {
             db.prepare(`UPDATE fragment_entities SET classified_by = 'companion_flash_seed' WHERE classified_by = 'draco_flash_seed'`).run();
         }
 
+        // 清理非记忆子系统遗留的空表（旧版随主项目整包带过来的，本仓库没有任何代码读写）
+        ['moments','moment_comments','moment_likes','worldbooks','tool_logs',
+         'health_data','health_events','books','book_chunks','book_reading_progress','book_annotations',
+         'snitch_notes','snitch_posts','snitch_fetched_urls','snitch_comments','snitch_post_queue',
+         'snitch_bookmarks','bot_snitch_actions','bot_snitch_sessions','snitch_bot_state',
+         'cinema_watch_status','cinema_danmaku','cinema_plot_segments','cinema_episode_summaries',
+         'cinema_series_summaries','cinema_progress','cinema_danmaku_archives','cinema_subtitle_config',
+         'cinema_film_meta','cinema_reviews','personal_places','alarms','newsapi_rate_log',
+         'cognitive_rules','pending_signals','companion_working_memory','companion_intents']
+          .forEach(t => { if (tableExists(t)) { db.exec(`DROP TABLE ${t}`); console.log(`[migration] 清理遗留表 ${t}`); } });
+
     } catch (e) {
         console.warn('[migration] 命名统一非致命错误:', e.message);
     }
@@ -149,96 +160,12 @@ function initDatabase() {
             request_type TEXT DEFAULT 'message',
             FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE SET NULL
         )`,
-
-        `CREATE TABLE IF NOT EXISTS moments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            author TEXT NOT NULL CHECK(author IN ('user', 'ai')),
-            content TEXT NOT NULL,
-            chat_id INTEGER,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            images TEXT,
-            FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE SET NULL
-        )`,
-
-        `CREATE TABLE IF NOT EXISTS moment_comments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            moment_id INTEGER NOT NULL,
-            content TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (moment_id) REFERENCES moments (id) ON DELETE CASCADE
-        )`,
-
-        `CREATE TABLE IF NOT EXISTS moment_likes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            moment_id INTEGER NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (moment_id) REFERENCES moments (id) ON DELETE CASCADE
-        )`,
-
         `CREATE TABLE IF NOT EXISTS user_settings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             setting_key TEXT UNIQUE NOT NULL,
             setting_value TEXT,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )`,
-
-        `CREATE TABLE IF NOT EXISTS worldbooks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            content TEXT NOT NULL,
-            injection_position TEXT NOT NULL CHECK(injection_position IN ('before', 'after')),
-            is_enabled BOOLEAN DEFAULT 1,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`,
-
-        `CREATE TABLE IF NOT EXISTS tool_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            tool_name TEXT NOT NULL,
-            input_params TEXT,
-            output_result TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE
-        )`,
-
-        `CREATE TABLE IF NOT EXISTS health_data (
-            date TEXT PRIMARY KEY,
-            resting_hr INTEGER,
-            hr_out_of_range_min INTEGER,
-            hr_fat_burn_min INTEGER,
-            hr_cardio_min INTEGER,
-            hr_peak_min INTEGER,
-            hrv_daily REAL,
-            hrv_deep REAL,
-            sleep_total_min INTEGER,
-            sleep_deep_min INTEGER,
-            sleep_light_min INTEGER,
-            sleep_rem_min INTEGER,
-            sleep_wake_min INTEGER,
-            sleep_efficiency INTEGER,
-            sleep_start_time TEXT,
-            sleep_end_time TEXT,
-            steps INTEGER,
-            distance REAL,
-            active_min_light INTEGER,
-            active_min_moderate INTEGER,
-            active_min_vigorous INTEGER,
-            sedentary_min INTEGER,
-            calories_out INTEGER,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`,
-
-        `CREATE TABLE IF NOT EXISTS health_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            domain TEXT NOT NULL,
-            trigger TEXT NOT NULL,
-            memo TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`,
-
         `CREATE TABLE IF NOT EXISTS api_configs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -289,127 +216,17 @@ function initDatabase() {
             reason        TEXT DEFAULT '',
             tick_id       TEXT DEFAULT ''
         )`,
-        `CREATE TABLE IF NOT EXISTS companion_working_memory (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            content    TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )`,
-        `CREATE TABLE IF NOT EXISTS books (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            author TEXT,
-            format TEXT NOT NULL CHECK(format IN ('epub', 'txt')),
-            file_path TEXT NOT NULL,
-            cover_image TEXT,
-            api_config_name TEXT,
-            total_chunks INTEGER DEFAULT 0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`,
-
-        `CREATE TABLE IF NOT EXISTS book_chunks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            book_id INTEGER NOT NULL,
-            chunk_index INTEGER NOT NULL,
-            chapter_title TEXT,
-            content TEXT NOT NULL,
-            FOREIGN KEY (book_id) REFERENCES books (id) ON DELETE CASCADE
-        )`,
-
-        `CREATE TABLE IF NOT EXISTS book_reading_progress (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            book_id INTEGER NOT NULL UNIQUE,
-            current_chunk_index INTEGER DEFAULT 0,
-            cumulative_summary TEXT DEFAULT '',
-            last_read_at DATETIME,
-            FOREIGN KEY (book_id) REFERENCES books (id) ON DELETE CASCADE
-        )`,
-
-        `CREATE TABLE IF NOT EXISTS book_annotations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            book_id INTEGER NOT NULL,
-            chunk_index INTEGER NOT NULL,
-            passage TEXT,
-            short_label TEXT,
-            content TEXT NOT NULL,
-            author TEXT NOT NULL CHECK(author IN ('ai', 'user')),
-            parent_id INTEGER,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (book_id) REFERENCES books (id) ON DELETE CASCADE,
-            FOREIGN KEY (parent_id) REFERENCES book_annotations (id) ON DELETE CASCADE
-        )`,
-
-        `CREATE TABLE IF NOT EXISTS snitch_notes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT NOT NULL,
-            source TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`,
-
-        `CREATE TABLE IF NOT EXISTS snitch_posts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT NOT NULL DEFAULT 'bot',
-            bot_id TEXT,
-            title TEXT,
-            body TEXT NOT NULL,
-            image_url TEXT,
-            source_url TEXT,
-            source_label TEXT,
-            tag TEXT,
-            comments INTEGER DEFAULT 0,
-            reposts INTEGER DEFAULT 0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`,
-
-        `CREATE TABLE IF NOT EXISTS snitch_fetched_urls (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT NOT NULL UNIQUE,
-            fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`,
-
-        `CREATE TABLE IF NOT EXISTS snitch_comments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            post_id INTEGER NOT NULL,
-            author TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (post_id) REFERENCES snitch_posts(id) ON DELETE CASCADE
-        )`,
-
-        `CREATE TABLE IF NOT EXISTS snitch_post_queue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bot_id TEXT NOT NULL,
-            title TEXT,
-            body TEXT NOT NULL,
-            source_url TEXT,
-            source_label TEXT,
-            tag TEXT,
-            image_url TEXT,
-            priority TEXT DEFAULT 'later' CHECK(priority IN ('now', 'later')),
-            fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            release_after DATETIME,
-            released_at DATETIME,
-            status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'released', 'discarded'))
-        )`
     ];
 
     createTables.forEach(sql => db.exec(sql));
 
     // ── 索引（IF NOT EXISTS，永远安全） ──
     const indexes = [
-        'CREATE INDEX IF NOT EXISTS idx_health_data_date ON health_data(date)',
-        'CREATE INDEX IF NOT EXISTS idx_health_events_date ON health_events(date)',
-        'CREATE INDEX IF NOT EXISTS idx_health_events_domain ON health_events(domain)',
         'CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories(tags)',
         'CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)',
         'CREATE INDEX IF NOT EXISTS idx_memories_hash ON memories(content_hash)',
         'CREATE INDEX IF NOT EXISTS idx_memories_chroma_id ON memories(chroma_id)',
         'CREATE INDEX IF NOT EXISTS idx_companion_inner_log_timestamp ON companion_inner_log(timestamp)',
-        'CREATE INDEX IF NOT EXISTS idx_book_chunks_book_id ON book_chunks(book_id, chunk_index)',
-        'CREATE INDEX IF NOT EXISTS idx_book_annotations_book_id ON book_annotations(book_id, chunk_index)',
-        'CREATE INDEX IF NOT EXISTS idx_book_annotations_parent ON book_annotations(parent_id)',
-        'CREATE INDEX IF NOT EXISTS idx_snitch_posts_created_at ON snitch_posts(created_at)',
-        'CREATE INDEX IF NOT EXISTS idx_snitch_comments_post_id ON snitch_comments(post_id)',
     ];
     indexes.forEach(sql => { try { db.exec(sql); } catch (e) { console.warn('[DB] 索引创建警告:', e.message); } });
 
@@ -468,18 +285,10 @@ function initDatabase() {
     runMigration(5, 'chats.type',
         "ALTER TABLE chats ADD COLUMN type TEXT DEFAULT 'text'");
 
-    runMigration(6, 'book_reading_progress.user_chunk_index',
-        'ALTER TABLE book_reading_progress ADD COLUMN user_chunk_index INTEGER DEFAULT 0');
 
-    runMigration(7, 'book_reading_progress.user_scroll_pct',
-        'ALTER TABLE book_reading_progress ADD COLUMN user_scroll_pct REAL DEFAULT 0');
 
     // v8-v9: Snitch 扩展
-    runMigration(8, 'snitch_post_queue.release_after',
-        'ALTER TABLE snitch_post_queue ADD COLUMN release_after DATETIME');
 
-    runMigration(9, 'snitch_comments.parent_id',
-        'ALTER TABLE snitch_comments ADD COLUMN parent_id INTEGER');
 
     // v10-v15: Memory fragments 扩展
     runMigration(10, 'memory_fragments.read_count',
@@ -521,50 +330,11 @@ function initDatabase() {
     runMigration(19, 'consolidation_runs.memories_skipped',
         'ALTER TABLE consolidation_runs ADD COLUMN memories_skipped INTEGER DEFAULT 0');
 
-    runMigration(20, 'snitch_bookmarks',
-        `CREATE TABLE IF NOT EXISTS snitch_bookmarks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            post_id INTEGER NOT NULL UNIQUE,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (post_id) REFERENCES snitch_posts(id) ON DELETE CASCADE
-        )`);
 
     // v22-v23: Bot/Snitch 交互表
-    runMigration(22, 'bot_snitch_actions',
-        `CREATE TABLE IF NOT EXISTS bot_snitch_actions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bot_id TEXT NOT NULL,
-            post_id INTEGER NOT NULL,
-            last_read_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            last_seen_comment_id INTEGER DEFAULT 0,
-            comment_count INTEGER DEFAULT 0,
-            UNIQUE(bot_id, post_id),
-            FOREIGN KEY (post_id) REFERENCES snitch_posts(id) ON DELETE CASCADE
-        )`);
 
-    runMigration(23, 'bot_snitch_sessions',
-        `CREATE TABLE IF NOT EXISTS bot_snitch_sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bot_id TEXT NOT NULL,
-            session_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            posts_seen INTEGER DEFAULT 0,
-            comments_made INTEGER DEFAULT 0
-        )`);
 
     // v24: Intents
-    runMigration(24, 'companion_intents',
-        `CREATE TABLE IF NOT EXISTS companion_intents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            intent_type TEXT NOT NULL,
-            rough_window TEXT NOT NULL,
-            reason TEXT NOT NULL,
-            weight REAL DEFAULT 0.5,
-            status TEXT DEFAULT 'pending',
-            created_at TEXT NOT NULL,
-            window_start TEXT,
-            window_end TEXT,
-            executed_at TEXT
-        )`);
 
     // v25-v27: Memory saga + entity + correction
     runMigration(25, 'memory_sagas',
@@ -610,107 +380,17 @@ function initDatabase() {
         )`);
 
     // v28-v36: Cinema 系统
-    runMigration(28, 'cinema_watch_status',
-        `CREATE TABLE IF NOT EXISTS cinema_watch_status (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            folder TEXT NOT NULL,
-            file TEXT NOT NULL,
-            marked_by TEXT DEFAULT 'manual' CHECK(marked_by IN ('manual', 'auto')),
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(folder, file)
-        )`);
 
-    runMigration(29, 'cinema_danmaku',
-        `CREATE TABLE IF NOT EXISTS cinema_danmaku (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            sender TEXT NOT NULL CHECK(sender IN ('user', 'ai')),
-            content TEXT NOT NULL,
-            video_timestamp TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
-        )`);
 
-    runMigration(30, 'cinema_plot_segments',
-        `CREATE TABLE IF NOT EXISTS cinema_plot_segments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_path TEXT NOT NULL,
-            segment_id INTEGER NOT NULL,
-            start_time TEXT NOT NULL,
-            end_time TEXT NOT NULL,
-            plot_summary TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(file_path, segment_id)
-        )`);
 
-    runMigration(31, 'cinema_episode_summaries',
-        `CREATE TABLE IF NOT EXISTS cinema_episode_summaries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_path TEXT NOT NULL UNIQUE,
-            summary_text TEXT NOT NULL,
-            token_count INTEGER DEFAULT 0,
-            generated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
 
-    runMigration(32, 'cinema_series_summaries',
-        `CREATE TABLE IF NOT EXISTS cinema_series_summaries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            series_folder TEXT NOT NULL,
-            summary_text TEXT NOT NULL,
-            last_episode_file TEXT,
-            token_count INTEGER DEFAULT 0,
-            generated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
 
-    runMigration(33, 'cinema_progress',
-        `CREATE TABLE IF NOT EXISTS cinema_progress (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_path TEXT NOT NULL UNIQUE,
-            last_position TEXT NOT NULL,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
 
-    runMigration(34, 'cinema_danmaku_archives',
-        `CREATE TABLE IF NOT EXISTS cinema_danmaku_archives (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            archive_range TEXT,
-            original_count INTEGER DEFAULT 0,
-            archived_summary TEXT NOT NULL,
-            token_count INTEGER DEFAULT 0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
-        )`);
 
-    runMigration(35, 'cinema_subtitle_config',
-        `CREATE TABLE IF NOT EXISTS cinema_subtitle_config (
-            file_path TEXT PRIMARY KEY,
-            source TEXT DEFAULT 'cloud' CHECK(source IN ('cloud','local','stt')),
-            local_sub_path TEXT,
-            offset_seconds REAL DEFAULT 0
-        )`);
 
-    runMigration(36, 'cinema_film_meta',
-        `CREATE TABLE IF NOT EXISTS cinema_film_meta (
-            folder TEXT PRIMARY KEY,
-            title TEXT,
-            overview TEXT,
-            poster_path TEXT,
-            cast_json TEXT DEFAULT '[]',
-            director TEXT,
-            year INTEGER,
-            tmdb_id INTEGER,
-            manual_notes TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
 
-    runMigration(37, 'cinema_film_meta.poster_local',
-        'ALTER TABLE cinema_film_meta ADD COLUMN poster_local TEXT');
 
     // v38: books.finished_note
-    runMigration(38, 'books.finished_note',
-        'ALTER TABLE books ADD COLUMN finished_note TEXT');
 
     // ── v39: Layer 回填（数据迁移，非 DDL） ──
     runMigration(39, 'layer_backfill', '', { silent: true });  // 占位，实际逻辑见下方
@@ -760,10 +440,6 @@ function initDatabase() {
     `);
 
     // v42: cinema_subtitle_config 多轨道支持
-    runMigration(42, 'cinema_subtitle_config.tracks_json',
-        'ALTER TABLE cinema_subtitle_config ADD COLUMN tracks_json TEXT DEFAULT \'[]\'');
-    runMigration(43, 'cinema_subtitle_config.active_track_index',
-        'ALTER TABLE cinema_subtitle_config ADD COLUMN active_track_index INTEGER DEFAULT 0');
 
     // ── v44: 记忆架构基表 + FTS5 + CHECK 约束修复（合并） ──
     // 解决三个问题：
@@ -939,33 +615,7 @@ function initDatabase() {
     runMigration(50, 'messages.source',
         "ALTER TABLE messages ADD COLUMN source TEXT DEFAULT NULL");
 
-    runMigration(49, 'cinema_reviews',
-        `CREATE TABLE IF NOT EXISTS cinema_reviews (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          folder TEXT NOT NULL,
-          file_path TEXT,
-          film_name TEXT NOT NULL,
-          film_type TEXT DEFAULT 'movie',
-          user_rating INTEGER,
-          user_review TEXT,
-          companion_rating INTEGER,
-          companion_review TEXT,
-          watched_date TEXT,
-          created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )`);
 
-    runMigration(51, 'personal_places',
-        `CREATE TABLE IF NOT EXISTS personal_places (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT NOT NULL,
-          type TEXT NOT NULL CHECK(type IN ('restaurant','cafe','dessert','bookstore','company','home','other')),
-          latitude REAL NOT NULL,
-          longitude REAL NOT NULL,
-          address TEXT,
-          visit_count INTEGER DEFAULT 1,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          last_visited_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
 
     // v52: memory_sagas.emotional_axis — Saga 情感主轴，驱动 jiwen 偏置
     runMigration(52, 'memory_sagas.emotional_axis',
@@ -985,35 +635,9 @@ function initDatabase() {
          ALTER TABLE memory_fragments ADD COLUMN entity_id INTEGER;`);
 
     // v56: alarms — StackChan 闹钟调度
-    runMigration(56, 'alarms table',
-        `CREATE TABLE IF NOT EXISTS alarms (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            trigger_at INTEGER NOT NULL,
-            message TEXT NOT NULL,
-            status TEXT DEFAULT 'pending' CHECK(status IN ('pending','firing','fired','missed','cancelled')),
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            fired_at DATETIME
-        )`);
 
     // v57-v58: SnitchBot 调度健壮性
-    runMigration(57, 'newsapi_rate_log',
-        `CREATE TABLE IF NOT EXISTS newsapi_rate_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bot_id TEXT,
-            called_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
-    runMigration(57, 'idx_newsapi_rate_log_called_at',
-        'CREATE INDEX IF NOT EXISTS idx_newsapi_rate_log_called_at ON newsapi_rate_log(called_at)');
 
-    runMigration(58, 'snitch_bot_state',
-        `CREATE TABLE IF NOT EXISTS snitch_bot_state (
-            bot_id TEXT NOT NULL,
-            key TEXT NOT NULL,
-            value TEXT,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (bot_id, key)
-        )`);
 
     // ── 记忆系统升级：本体论索引 ──
     runMigration(59, 'memory_ontology table',
@@ -1092,18 +716,6 @@ function initDatabase() {
         CREATE INDEX IF NOT EXISTS idx_cc_wrong_label ON cognitive_corrections(wrong_label);
         CREATE INDEX IF NOT EXISTS idx_cc_status ON cognitive_corrections(status);
 
-        CREATE TABLE IF NOT EXISTS cognitive_rules (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            rule_text TEXT NOT NULL,
-            wrong_label TEXT NOT NULL,
-            correct_label_pattern TEXT,
-            fused_from_correction_ids TEXT DEFAULT '[]',
-            fusion_count INTEGER DEFAULT 1,
-            status TEXT DEFAULT 'active' CHECK(status IN ('active','retired')),
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS idx_cr_wrong_label ON cognitive_rules(wrong_label);
-        CREATE INDEX IF NOT EXISTS idx_cr_status ON cognitive_rules(status);
 
         ALTER TABLE entity_profiles ADD COLUMN last_evaluated_at TEXT;
         ALTER TABLE entity_profiles ADD COLUMN relationship_confidence TEXT DEFAULT NULL;`);
@@ -1423,23 +1035,6 @@ function initDatabase() {
         `ALTER TABLE user_model ADD COLUMN schedule TEXT DEFAULT NULL;
          ALTER TABLE user_model ADD COLUMN last_triggered_at TEXT DEFAULT NULL;`);
 
-    runMigration(95, 'v5.11: pending_signals — L0 提醒信号队列表',
-        `CREATE TABLE IF NOT EXISTS pending_signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            signal_type TEXT NOT NULL DEFAULT 'reminder',
-            user_model_id INTEGER REFERENCES user_model(id),
-            title TEXT NOT NULL,
-            context TEXT NOT NULL,
-            priority INTEGER DEFAULT 5,
-            signal_window_start TEXT,
-            signal_window_end TEXT,
-            status TEXT DEFAULT 'pending' CHECK(status IN ('pending','injected','consumed','expired')),
-            first_injected_at TEXT,
-            consumed_at TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS idx_ps_status ON pending_signals(status);
-        CREATE INDEX IF NOT EXISTS idx_ps_user_model ON pending_signals(user_model_id);`);
 
     // ── v5.12: messages.is_activity — 活动时间线 ──
     runMigration(96, 'v5.12: messages.is_activity — 活动时间线',
