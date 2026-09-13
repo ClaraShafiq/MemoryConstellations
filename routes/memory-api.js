@@ -270,7 +270,9 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
             music_aggregate: '#ffcc66', book_aggregate: '#ffcc66', movie_aggregate: '#ffcc66'
         };
         const { USER, AI, UI } = require('../services/memoryConfig');
-        const GALAXY_LABELS = { person:'社交', pet:'社交', organization:'社交', place:'地点', event:'事件', project: USER.name + '的', work: USER.name + '的', term: USER.name + '的', hobby:'爱好', consumed:'爱好', music_aggregate:'爱好', book_aggregate:'爱好', movie_aggregate:'爱好' };
+        // category → 前端星系 id。前端的 GALAXIES 只有 爱好/社交/创作/事件/地点 五个，
+        // 映射到一个不存在的 id，星座就永远不会被画出来（项目/术语类曾因此整批消失）。
+        const GALAXY_LABELS = { person:'社交', pet:'社交', organization:'社交', place:'地点', event:'事件', project:'创作', work:'创作', term:'创作', hobby:'爱好', consumed:'爱好', object:'爱好', music_aggregate:'爱好', book_aggregate:'爱好', movie_aggregate:'爱好' };
 
         const entities = db.prepare(`
             SELECT ep.id, ep.name, ep.category, ep.subcategory, ep.overview, ep.fragment_count,
