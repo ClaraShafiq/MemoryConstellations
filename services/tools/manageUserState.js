@@ -125,7 +125,7 @@ const manageUserState = {
 
                 // Check active count limit
                 const activeCount = db.prepare(
-                    'SELECT COUNT(*) as cnt FROM clara_model WHERE type = ? AND status = ?'
+                    'SELECT COUNT(*) as cnt FROM user_model WHERE type = ? AND status = ?'
                 ).get('current_state', 'active')?.cnt || 0;
                 if (activeCount >= 12) {
                     return { success: false, formatted: '当前活跃状态已达上限（12条）。请先 resolve 一些过时的状态再新建。' };
@@ -133,7 +133,7 @@ const manageUserState = {
 
                 // Duplicate / supersede detection
                 const existingStates = db.prepare(
-                    'SELECT id, content FROM clara_model WHERE type = ? AND status = ?'
+                    'SELECT id, content FROM user_model WHERE type = ? AND status = ?'
                 ).all('current_state', 'active');
                 let supersededId = null;
                 let supersededContent = null;
@@ -153,7 +153,7 @@ const manageUserState = {
                     }
                 }
                 if (supersededId) {
-                    db.prepare(`UPDATE clara_model SET status = 'resolved', resolved_at = ?,
+                    db.prepare(`UPDATE user_model SET status = 'resolved', resolved_at = ?,
                         resolve_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                         .run(nowISO, `auto-superseded: newer state created with ${Math.round(bigramOverlap(supersededContent || '', content) * 100)}% overlap`, supersededId);
                     console.log(`[manageUserState] auto-resolved #${supersededId} (superseded by new set)`);
@@ -186,7 +186,7 @@ const manageUserState = {
                 }
 
                 const existing = db.prepare(
-                    'SELECT * FROM clara_model WHERE id = ? AND type = ? AND status = ?'
+                    'SELECT * FROM user_model WHERE id = ? AND type = ? AND status = ?'
                 ).get(args.state_id, 'current_state', 'active');
                 if (!existing) {
                     return { success: false, formatted: `未找到活跃状态 #${args.state_id}。它可能已经过期或被删除了。` };
@@ -236,14 +236,14 @@ const manageUserState = {
                 }
 
                 const existing = db.prepare(
-                    'SELECT * FROM clara_model WHERE id = ? AND type = ? AND status = ?'
+                    'SELECT * FROM user_model WHERE id = ? AND type = ? AND status = ?'
                 ).get(args.state_id, 'current_state', 'active');
                 if (!existing) {
                     return { success: false, formatted: `未找到活跃状态 #${args.state_id}。` };
                 }
 
                 const reason = args.resolve_reason.slice(0, 200);
-                db.prepare(`UPDATE clara_model SET status = 'resolved', resolved_at = ?,
+                db.prepare(`UPDATE user_model SET status = 'resolved', resolved_at = ?,
                     resolve_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                     .run(nowISO, `chat_companion: ${reason}`, args.state_id);
 

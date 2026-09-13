@@ -261,7 +261,7 @@ ${libText}
         // 拉最近 20 条，按 tick_id 分组后取最后 5 个 tick
         const logs = db.prepare(`
             SELECT tick_id, decision_type, intent, observation, reason, timestamp
-            FROM draco_inner_log
+            FROM companion_inner_log
             WHERE decision_type IN (${BEHAVIORAL_TYPES.map(() => '?').join(',')})
             ORDER BY id DESC LIMIT 20
         `).all(...BEHAVIORAL_TYPES);

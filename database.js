@@ -40,6 +40,71 @@ function initDatabase() {
     db.pragma('journal_mode = WAL');
     db.pragma('busy_timeout = 5000');
 
+    // ── v5.15: 命名统一——表/列/设置键 全部收敛到 user_* / companion_* ──
+    // 早期版本沿用了旧项目的内部标识符（clara_* / draco_*）。新库直接按新名建表；
+    // 老库在这里做一次原地重命名。
+    // ⚠️ 必须跑在建表之前：否则 createTables 的 IF NOT EXISTS 会先建出空的新表，
+    //    导致重命名被跳过、数据被留在旧表里（代码从此查不到）。
+    try {
+        const tableExists = n => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(n);
+        const colExists = (t, c) => tableExists(t) &&
+            db.prepare(`PRAGMA table_info(${t})`).all().some(r => r.name === c);
+        const renameTable = (from, to) => {
+            if (!tableExists(from)) return;
+            if (tableExists(to)) {
+                // 新表已存在：仅当新表为空、旧表有数据时才接管，避免误删
+                if (db.prepare(`SELECT COUNT(*) c FROM ${to}`).get().c !== 0) return;
+                if (db.prepare(`SELECT COUNT(*) c FROM ${from}`).get().c === 0) return;
+                db.exec(`DROP TABLE ${to}`);
+            }
+            db.exec(`ALTER TABLE ${from} RENAME TO ${to}`);
+            console.log(`[migration] 表 ${from} → ${to}`);
+        };
+        const renameColumn = (t, from, to) => {
+            if (colExists(t, from) && !colExists(t, to)) {
+                db.exec(`ALTER TABLE ${t} RENAME COLUMN ${from} TO ${to}`);
+                console.log(`[migration] 列 ${t}.${from} → ${to}`);
+            }
+        };
+        const renameSetting = (from, to) => {
+            if (!tableExists('user_settings')) return;
+            const r = db.prepare('UPDATE OR IGNORE user_settings SET setting_key = ? WHERE setting_key = ?').run(to, from);
+            if (r.changes) console.log(`[migration] 设置键 ${from} → ${to}`);
+        };
+
+        // 旧表名 → 新表名
+        [['clara_model', 'user_model'],
+         ['clara_patterns', 'user_patterns'],
+         ['draco_inner_log', 'companion_inner_log'],
+         ['draco_working_memory', 'companion_working_memory'],
+         ['draco_intents', 'companion_intents']].forEach(([a, b]) => renameTable(a, b));
+
+        // 旧列名 → 新列名
+        [['entity_profiles', 'relationship_to_clara', 'relationship_to_user'],
+         ['pending_signals', 'clara_model_id', 'user_model_id'],
+         ['book_reading_progress', 'clara_chunk_index', 'user_chunk_index'],
+         ['book_reading_progress', 'clara_scroll_pct', 'user_scroll_pct'],
+         ['cinema_reviews', 'clara_rating', 'user_rating'],
+         ['cinema_reviews', 'clara_review', 'user_review'],
+         ['cinema_reviews', 'draco_rating', 'companion_rating'],
+         ['cinema_reviews', 'draco_review', 'companion_review']].forEach(([t, a, b]) => renameColumn(t, a, b));
+
+        // 旧设置键 → 新设置键
+        [['clara_core_insight', 'user_core_insight'],
+         ['clara_core_insight_history', 'user_core_insight_history'],
+         ['clara_core_insight_updated_at', 'user_core_insight_updated_at'],
+         ['draco_state_snapshot', 'companion_state_snapshot']].forEach(([a, b]) => renameSetting(a, b));
+
+        // 旧来源标记 → 新来源标记
+        if (colExists('fragment_entities', 'classified_by')) {
+            db.prepare(`UPDATE fragment_entities SET classified_by = 'companion_rematch' WHERE classified_by = 'draco_rematch'`).run();
+            db.prepare(`UPDATE fragment_entities SET classified_by = 'companion_flash_seed' WHERE classified_by = 'draco_flash_seed'`).run();
+        }
+
+    } catch (e) {
+        console.warn('[migration] 命名统一非致命错误:', e.message);
+    }
+
     // ── v0: 基础表（IF NOT EXISTS，永远安全） ──
     const createTables = [
         `CREATE TABLE IF NOT EXISTS schema_version (
@@ -54,7 +119,7 @@ function initDatabase() {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             warning_38k_sent BOOLEAN DEFAULT 0,
             warning_40k_sent BOOLEAN DEFAULT 0,
-            current_draco_status TEXT DEFAULT '在线',
+            current_companion_status TEXT DEFAULT '在线',
             status_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )`,
 
@@ -87,7 +152,7 @@ function initDatabase() {
 
         `CREATE TABLE IF NOT EXISTS moments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            author TEXT NOT NULL CHECK(author IN ('clara', 'draco')),
+            author TEXT NOT NULL CHECK(author IN ('user', 'ai')),
             content TEXT NOT NULL,
             chat_id INTEGER,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -215,7 +280,7 @@ function initDatabase() {
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )`,
 
-        `CREATE TABLE IF NOT EXISTS draco_inner_log (
+        `CREATE TABLE IF NOT EXISTS companion_inner_log (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp     TEXT NOT NULL,
             decision_type TEXT NOT NULL,
@@ -224,7 +289,7 @@ function initDatabase() {
             reason        TEXT DEFAULT '',
             tick_id       TEXT DEFAULT ''
         )`,
-        `CREATE TABLE IF NOT EXISTS draco_working_memory (
+        `CREATE TABLE IF NOT EXISTS companion_working_memory (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             content    TEXT NOT NULL,
             created_at TEXT NOT NULL,
@@ -267,7 +332,7 @@ function initDatabase() {
             passage TEXT,
             short_label TEXT,
             content TEXT NOT NULL,
-            author TEXT NOT NULL CHECK(author IN ('draco', 'clara')),
+            author TEXT NOT NULL CHECK(author IN ('ai', 'user')),
             parent_id INTEGER,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (book_id) REFERENCES books (id) ON DELETE CASCADE,
@@ -339,7 +404,7 @@ function initDatabase() {
         'CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)',
         'CREATE INDEX IF NOT EXISTS idx_memories_hash ON memories(content_hash)',
         'CREATE INDEX IF NOT EXISTS idx_memories_chroma_id ON memories(chroma_id)',
-        'CREATE INDEX IF NOT EXISTS idx_draco_inner_log_timestamp ON draco_inner_log(timestamp)',
+        'CREATE INDEX IF NOT EXISTS idx_companion_inner_log_timestamp ON companion_inner_log(timestamp)',
         'CREATE INDEX IF NOT EXISTS idx_book_chunks_book_id ON book_chunks(book_id, chunk_index)',
         'CREATE INDEX IF NOT EXISTS idx_book_annotations_book_id ON book_annotations(book_id, chunk_index)',
         'CREATE INDEX IF NOT EXISTS idx_book_annotations_parent ON book_annotations(parent_id)',
@@ -388,8 +453,8 @@ function initDatabase() {
     // ═══════════════════════════════════════════════════════════
 
     // v1: 早期表结构扩展
-    runMigration(1, 'draco_inner_log.tick_id',
-        "ALTER TABLE draco_inner_log ADD COLUMN tick_id TEXT DEFAULT ''");
+    runMigration(1, 'companion_inner_log.tick_id',
+        "ALTER TABLE companion_inner_log ADD COLUMN tick_id TEXT DEFAULT ''");
 
     runMigration(2, 'messages.message_type',
         "ALTER TABLE messages ADD COLUMN message_type TEXT DEFAULT 'text' CHECK(message_type IN ('text', 'voice', 'proactive'))");
@@ -403,11 +468,11 @@ function initDatabase() {
     runMigration(5, 'chats.type',
         "ALTER TABLE chats ADD COLUMN type TEXT DEFAULT 'text'");
 
-    runMigration(6, 'book_reading_progress.clara_chunk_index',
-        'ALTER TABLE book_reading_progress ADD COLUMN clara_chunk_index INTEGER DEFAULT 0');
+    runMigration(6, 'book_reading_progress.user_chunk_index',
+        'ALTER TABLE book_reading_progress ADD COLUMN user_chunk_index INTEGER DEFAULT 0');
 
-    runMigration(7, 'book_reading_progress.clara_scroll_pct',
-        'ALTER TABLE book_reading_progress ADD COLUMN clara_scroll_pct REAL DEFAULT 0');
+    runMigration(7, 'book_reading_progress.user_scroll_pct',
+        'ALTER TABLE book_reading_progress ADD COLUMN user_scroll_pct REAL DEFAULT 0');
 
     // v8-v9: Snitch 扩展
     runMigration(8, 'snitch_post_queue.release_after',
@@ -464,15 +529,7 @@ function initDatabase() {
             FOREIGN KEY (post_id) REFERENCES snitch_posts(id) ON DELETE CASCADE
         )`);
 
-    // v21-v23: Bot/Snitch 交互表
-    runMigration(21, 'draco_snitch_reads',
-        `CREATE TABLE IF NOT EXISTS draco_snitch_reads (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            post_id INTEGER NOT NULL,
-            read_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (post_id) REFERENCES snitch_posts(id) ON DELETE CASCADE
-        )`);
-
+    // v22-v23: Bot/Snitch 交互表
     runMigration(22, 'bot_snitch_actions',
         `CREATE TABLE IF NOT EXISTS bot_snitch_actions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -495,8 +552,8 @@ function initDatabase() {
         )`);
 
     // v24: Intents
-    runMigration(24, 'draco_intents',
-        `CREATE TABLE IF NOT EXISTS draco_intents (
+    runMigration(24, 'companion_intents',
+        `CREATE TABLE IF NOT EXISTS companion_intents (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             intent_type TEXT NOT NULL,
             rough_window TEXT NOT NULL,
@@ -530,7 +587,7 @@ function initDatabase() {
             status_since TEXT,
             source_fragment_ids TEXT DEFAULT '[]',
             aliases TEXT DEFAULT '[]',
-            relationship_to_clara TEXT,
+            relationship_to_user TEXT,
             relationship_nature TEXT,
             emotional_significance TEXT,
             first_mentioned_date TEXT,
@@ -567,7 +624,7 @@ function initDatabase() {
         `CREATE TABLE IF NOT EXISTS cinema_danmaku (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id INTEGER NOT NULL,
-            sender TEXT NOT NULL CHECK(sender IN ('clara', 'draco')),
+            sender TEXT NOT NULL CHECK(sender IN ('user', 'ai')),
             content TEXT NOT NULL,
             video_timestamp TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -889,10 +946,10 @@ function initDatabase() {
           file_path TEXT,
           film_name TEXT NOT NULL,
           film_type TEXT DEFAULT 'movie',
-          clara_rating INTEGER,
-          clara_review TEXT,
-          draco_rating INTEGER,
-          draco_review TEXT,
+          user_rating INTEGER,
+          user_review TEXT,
+          companion_rating INTEGER,
+          companion_review TEXT,
           watched_date TEXT,
           created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )`);
@@ -918,9 +975,9 @@ function initDatabase() {
     runMigration(53, 'memories.consolidation_type',
         "ALTER TABLE memories ADD COLUMN consolidation_type TEXT DEFAULT 'standard'");
 
-    // v54: draco_inner_log.is_processed — Auto-Historian 批处理标记
-    runMigration(54, 'draco_inner_log.is_processed',
-        "ALTER TABLE draco_inner_log ADD COLUMN is_processed INTEGER DEFAULT 0");
+    // v54: companion_inner_log.is_processed — Auto-Historian 批处理标记
+    runMigration(54, 'companion_inner_log.is_processed',
+        "ALTER TABLE companion_inner_log ADD COLUMN is_processed INTEGER DEFAULT 0");
 
     // v55: entity_profiles.aliases + memory_fragments.entity_id — 实体结构化关联
     runMigration(55, 'entity aliases + fragment entity_id FK',
@@ -1007,7 +1064,7 @@ function initDatabase() {
          CREATE INDEX IF NOT EXISTS idx_oc_status ON ontology_changelog(status);`);
 
     runMigration(63, 'entity relationship fields + fragment insight + 人物 root',
-        `ALTER TABLE entity_profiles ADD COLUMN relationship_to_clara TEXT;
+        `ALTER TABLE entity_profiles ADD COLUMN relationship_to_user TEXT;
          ALTER TABLE entity_profiles ADD COLUMN relationship_nature TEXT;
          ALTER TABLE entity_profiles ADD COLUMN emotional_significance TEXT;
          ALTER TABLE entity_profiles ADD COLUMN first_mentioned_date TEXT;
@@ -1108,8 +1165,8 @@ function initDatabase() {
          -- Step 5: Flatten all remaining nodes
          UPDATE memory_ontology SET parent_id = NULL;`);
 
-    runMigration(71, 'clara_model — unified four-layer memory model',
-        `CREATE TABLE IF NOT EXISTS clara_model (
+    runMigration(71, 'user_model — unified four-layer memory model',
+        `CREATE TABLE IF NOT EXISTS user_model (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             type TEXT NOT NULL CHECK(type IN ('immutable_fact','stable_trait','current_state','active_hypothesis')),
             content TEXT NOT NULL,
@@ -1123,8 +1180,8 @@ function initDatabase() {
             resolved_at TEXT,
             resolve_reason TEXT,
             evolution_history TEXT DEFAULT '[]',
-            superseded_by INTEGER DEFAULT NULL REFERENCES clara_model(id),
-            contradicts_id INTEGER DEFAULT NULL REFERENCES clara_model(id),
+            superseded_by INTEGER DEFAULT NULL REFERENCES user_model(id),
+            contradicts_id INTEGER DEFAULT NULL REFERENCES user_model(id),
             source_fragment_ids TEXT DEFAULT '[]',
             entity_ids TEXT DEFAULT '[]',
             parent_skill_id INTEGER DEFAULT NULL,
@@ -1134,10 +1191,10 @@ function initDatabase() {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
-        CREATE INDEX IF NOT EXISTS idx_cm_type ON clara_model(type);
-        CREATE INDEX IF NOT EXISTS idx_cm_status ON clara_model(status);
-        CREATE INDEX IF NOT EXISTS idx_cm_last_evidence ON clara_model(last_evidence_at);
-        CREATE INDEX IF NOT EXISTS idx_cm_parent_skill ON clara_model(parent_skill_id);`);
+        CREATE INDEX IF NOT EXISTS idx_cm_type ON user_model(type);
+        CREATE INDEX IF NOT EXISTS idx_cm_status ON user_model(status);
+        CREATE INDEX IF NOT EXISTS idx_cm_last_evidence ON user_model(last_evidence_at);
+        CREATE INDEX IF NOT EXISTS idx_cm_parent_skill ON user_model(parent_skill_id);`);
 
     // ── v73-v76: v4.7 实体星系 — 知识树退役、苗圃机制、边标签、溯源链路 ──
     runMigration(73, 'v4.7: fragment_entities junction table', `
@@ -1147,7 +1204,7 @@ function initDatabase() {
             entity_id INTEGER NOT NULL REFERENCES entity_profiles(id),
             relation TEXT,
             confidence REAL DEFAULT 0.70,
-            classified_by TEXT DEFAULT 'draco_flash',
+            classified_by TEXT DEFAULT 'companion_flash',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(fragment_id, entity_id)
         );
@@ -1242,41 +1299,41 @@ function initDatabase() {
         console.error('[DB] v76 fragment_entities 回填失败:', e.message);
     }
 
-    runMigration(72, 'clara_model — source_quality + source_diversity for evidence pipeline',
-        `ALTER TABLE clara_model ADD COLUMN source_quality TEXT DEFAULT 'inferred' CHECK(source_quality IN ('direct_statement','inferred','backfilled'));
-         ALTER TABLE clara_model ADD COLUMN source_diversity INTEGER DEFAULT 1;
+    runMigration(72, 'user_model — source_quality + source_diversity for evidence pipeline',
+        `ALTER TABLE user_model ADD COLUMN source_quality TEXT DEFAULT 'inferred' CHECK(source_quality IN ('direct_statement','inferred','backfilled'));
+         ALTER TABLE user_model ADD COLUMN source_diversity INTEGER DEFAULT 1;
          -- Backfill existing entries: seeded from entity_profiles with high confidence = direct_statement
-         UPDATE clara_model SET source_quality = 'direct_statement' WHERE type = 'immutable_fact' AND migration_source LIKE '%entity_profiles%';
+         UPDATE user_model SET source_quality = 'direct_statement' WHERE type = 'immutable_fact' AND migration_source LIKE '%entity_profiles%';
          -- seeded from skills/hypothesis detection = inferred
-         UPDATE clara_model SET source_quality = 'inferred' WHERE migration_source LIKE '%detectNewTraits%' OR migration_source LIKE '%archivist_skills%';
-         UPDATE clara_model SET source_quality = 'backfilled' WHERE migration_source IS NULL OR migration_source = '';`);
+         UPDATE user_model SET source_quality = 'inferred' WHERE migration_source LIKE '%detectNewTraits%' OR migration_source LIKE '%archivist_skills%';
+         UPDATE user_model SET source_quality = 'backfilled' WHERE migration_source IS NULL OR migration_source = '';`);
 
     runMigration(79, 'v4.8: memories.audit_status for episode quality audit',
         `ALTER TABLE memories ADD COLUMN audit_status TEXT DEFAULT NULL;`);
 
     // v80-v81: Cognitive Model — AI active state management + TTL overhaul
-    runMigration(80, 'v5.0: clara_model.created_by for source attribution',
-        `ALTER TABLE clara_model ADD COLUMN created_by TEXT DEFAULT 'deep_cycle';`);
+    runMigration(80, 'v5.0: user_model.created_by for source attribution',
+        `ALTER TABLE user_model ADD COLUMN created_by TEXT DEFAULT 'deep_cycle';`);
 
-    runMigration(81, 'v5.0: clara_model.expires_at for explicit TTL timestamps',
-        `ALTER TABLE clara_model ADD COLUMN expires_at TEXT DEFAULT NULL;
+    runMigration(81, 'v5.0: user_model.expires_at for explicit TTL timestamps',
+        `ALTER TABLE user_model ADD COLUMN expires_at TEXT DEFAULT NULL;
          -- Backfill expires_at for active current_state entries based on TTL rules
-         UPDATE clara_model SET created_by = 'deep_cycle' WHERE created_by IS NULL;
+         UPDATE user_model SET created_by = 'deep_cycle' WHERE created_by IS NULL;
          -- ID 210: emotional/until_event → created_at + 30 days
-         UPDATE clara_model SET expires_at = datetime(created_at, '+30 days')
+         UPDATE user_model SET expires_at = datetime(created_at, '+30 days')
            WHERE id = 210 AND type = 'current_state' AND expires_at IS NULL;
          -- ID 232: relational/days (was bug: days key missing in TTL_MAP) → +72h
-         UPDATE clara_model SET expires_at = datetime(created_at, '+72 hours')
+         UPDATE user_model SET expires_at = datetime(created_at, '+72 hours')
            WHERE id = 232 AND type = 'current_state' AND expires_at IS NULL;
          -- ID 205: situational/until_event → created_at + 30 days
-         UPDATE clara_model SET expires_at = datetime(created_at, '+30 days')
+         UPDATE user_model SET expires_at = datetime(created_at, '+30 days')
            WHERE id = 205 AND type = 'current_state' AND expires_at IS NULL;`);
 
     runMigration(82, 'v5.1: entity_profiles.tags for constellation tags/aliases',
         `ALTER TABLE entity_profiles ADD COLUMN tags TEXT DEFAULT '[]';`);
 
-    runMigration(83, 'v5.2: clara_patterns — accumulated behavioral observations',
-        `CREATE TABLE IF NOT EXISTS clara_patterns (
+    runMigration(83, 'v5.2: user_patterns — accumulated behavioral observations',
+        `CREATE TABLE IF NOT EXISTS user_patterns (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             content TEXT NOT NULL,
             category TEXT DEFAULT 'behavior' CHECK(category IN ('behavior','preference','emotional','social','other')),
@@ -1294,10 +1351,10 @@ function initDatabase() {
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );`);
 
-    runMigration(84, 'v5.3: clara_patterns — add strategy + mismatch tracking',
-        `ALTER TABLE clara_patterns ADD COLUMN strategy TEXT;
-         ALTER TABLE clara_patterns ADD COLUMN last_mismatch_at DATETIME;
-         ALTER TABLE clara_patterns ADD COLUMN mismatch_count INTEGER DEFAULT 0;`);
+    runMigration(84, 'v5.3: user_patterns — add strategy + mismatch tracking',
+        `ALTER TABLE user_patterns ADD COLUMN strategy TEXT;
+         ALTER TABLE user_patterns ADD COLUMN last_mismatch_at DATETIME;
+         ALTER TABLE user_patterns ADD COLUMN mismatch_count INTEGER DEFAULT 0;`);
 
     // v85: memories.entity_id — 叙事片段与星座的关联
     runMigration(85, 'v5.7: memories.entity_id — episode→constellation link',
@@ -1329,12 +1386,12 @@ function initDatabase() {
          ALTER TABLE entity_profiles ADD COLUMN entity_scope TEXT DEFAULT 'instance'
             CHECK(entity_scope IN ('instance','template','alias'));`);
 
-    // ── v5.6: clara_patterns 矛盾计数 + dormant 状态 ──
-    runMigration(91, 'clara_patterns.contradiction_count — 用户行为模式矛盾计数',
-        'ALTER TABLE clara_patterns ADD COLUMN contradiction_count INTEGER DEFAULT 0');
+    // ── v5.6: user_patterns 矛盾计数 + dormant 状态 ──
+    runMigration(91, 'user_patterns.contradiction_count — 用户行为模式矛盾计数',
+        'ALTER TABLE user_patterns ADD COLUMN contradiction_count INTEGER DEFAULT 0');
 
-    runMigration(92, 'clara_patterns: status 支持 dormant',
-        `CREATE TABLE IF NOT EXISTS clara_patterns_v2 (
+    runMigration(92, 'user_patterns: status 支持 dormant',
+        `CREATE TABLE IF NOT EXISTS user_patterns_v2 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             content TEXT NOT NULL,
             category TEXT DEFAULT 'behavior' CHECK(category IN ('behavior','preference','emotional','social','other')),
@@ -1349,10 +1406,10 @@ function initDatabase() {
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             strategy TEXT, last_mismatch_at DATETIME, mismatch_count INTEGER DEFAULT 0, contradiction_count INTEGER DEFAULT 0
         );
-        INSERT OR IGNORE INTO clara_patterns_v2 (id, content, category, evidence_count, first_seen, last_seen, confidence, source_fragment_ids, tags, status, created_at, updated_at, strategy, last_mismatch_at, mismatch_count, contradiction_count)
-            SELECT id, content, category, evidence_count, first_seen, last_seen, confidence, source_fragment_ids, tags, status, created_at, updated_at, strategy, last_mismatch_at, mismatch_count, contradiction_count FROM clara_patterns;
-        DROP TABLE clara_patterns;
-        ALTER TABLE clara_patterns_v2 RENAME TO clara_patterns;`);
+        INSERT OR IGNORE INTO user_patterns_v2 (id, content, category, evidence_count, first_seen, last_seen, confidence, source_fragment_ids, tags, status, created_at, updated_at, strategy, last_mismatch_at, mismatch_count, contradiction_count)
+            SELECT id, content, category, evidence_count, first_seen, last_seen, confidence, source_fragment_ids, tags, status, created_at, updated_at, strategy, last_mismatch_at, mismatch_count, contradiction_count FROM user_patterns;
+        DROP TABLE user_patterns;
+        ALTER TABLE user_patterns_v2 RENAME TO user_patterns;`);
 
     // ── v5.9: entity_profiles 热度追踪 ──
     runMigration(93, 'v5.9: entity_profiles — 热度追踪',
@@ -1362,15 +1419,15 @@ function initDatabase() {
     db.prepare(`UPDATE entity_profiles SET hit_count = MIN(fragment_count, 100) WHERE hit_count = 0 AND fragment_count > 0`).run();
 
     // ── v5.11: L0 定时提醒系统 — schedule + last_triggered_at + pending_signals ──
-    runMigration(94, 'v5.11: clara_model.schedule + last_triggered_at — 定时提醒',
-        `ALTER TABLE clara_model ADD COLUMN schedule TEXT DEFAULT NULL;
-         ALTER TABLE clara_model ADD COLUMN last_triggered_at TEXT DEFAULT NULL;`);
+    runMigration(94, 'v5.11: user_model.schedule + last_triggered_at — 定时提醒',
+        `ALTER TABLE user_model ADD COLUMN schedule TEXT DEFAULT NULL;
+         ALTER TABLE user_model ADD COLUMN last_triggered_at TEXT DEFAULT NULL;`);
 
     runMigration(95, 'v5.11: pending_signals — L0 提醒信号队列表',
         `CREATE TABLE IF NOT EXISTS pending_signals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             signal_type TEXT NOT NULL DEFAULT 'reminder',
-            clara_model_id INTEGER REFERENCES clara_model(id),
+            user_model_id INTEGER REFERENCES user_model(id),
             title TEXT NOT NULL,
             context TEXT NOT NULL,
             priority INTEGER DEFAULT 5,
@@ -1382,7 +1439,7 @@ function initDatabase() {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_ps_status ON pending_signals(status);
-        CREATE INDEX IF NOT EXISTS idx_ps_clara_model ON pending_signals(clara_model_id);`);
+        CREATE INDEX IF NOT EXISTS idx_ps_user_model ON pending_signals(user_model_id);`);
 
     // ── v5.12: messages.is_activity — 活动时间线 ──
     runMigration(96, 'v5.12: messages.is_activity — 活动时间线',
@@ -1417,6 +1474,9 @@ function initDatabase() {
     } catch (e) {
         console.warn('[migration] chat_mode 回填非致命错误:', e.message);
     }
+
+    // v5.15 命名统一：实际重命名逻辑在 initDatabase 开头执行（必须早于建表），这里只登记版本号
+    runMigration(101, 'v5.15: 命名统一', 'SELECT 1');
 
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {

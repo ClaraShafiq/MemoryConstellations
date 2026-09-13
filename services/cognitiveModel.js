@@ -15,7 +15,7 @@ const { callLLM } = require('./llm');
 const { WORLD_CONTEXT } = require('./worldContext');
 const { fillPrompt, USER, AI } = require('./nameResolver');
 const { encryption } = require('../encryption');
-const { getCompanionPersonaBase } = require('./dracoPersona');
+const { getCompanionPersonaBase } = require('./companionPersona');
 
 // v5.10: 增强版 system prompt — Companion 人格 + User 画像
 // 供 detectNewTraits / readUserRawMessages 等需要深度理解 {{user.name}} 的 LLM 调用使用
@@ -127,7 +127,7 @@ function createEntry(type, content, opts = {}) {
     }
 
     const result = db.prepare(`
-        INSERT INTO clara_model (type, content, confidence, decay_type, decay_params,
+        INSERT INTO user_model (type, content, confidence, decay_type, decay_params,
             source_fragment_ids, entity_ids, parent_skill_id, migration_source, tags, priority,
             source_quality, source_diversity, created_by, expires_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -148,7 +148,7 @@ function createEntry(type, content, opts = {}) {
 
 function updateEntry(id, updates) {
     const db = getDb();
-    const existing = db.prepare('SELECT * FROM clara_model WHERE id = ?').get(id);
+    const existing = db.prepare('SELECT * FROM user_model WHERE id = ?').get(id);
     if (!existing) return null;
 
     const allowed = ['content', 'confidence', 'decay_type', 'decay_params',
@@ -182,32 +182,32 @@ function updateEntry(id, updates) {
     sets.push('updated_at = CURRENT_TIMESTAMP');
     vals.push(id);
 
-    db.prepare(`UPDATE clara_model SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    db.prepare(`UPDATE user_model SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
     return true;
 }
 
 function resolveEntry(id, reason = '') {
     const db = getDb();
-    db.prepare(`UPDATE clara_model SET status = 'resolved', resolved_at = datetime('now'),
+    db.prepare(`UPDATE user_model SET status = 'resolved', resolved_at = datetime('now'),
         resolve_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(reason, id);
 }
 
 function abandonEntry(id, reason = '') {
     const db = getDb();
-    db.prepare(`UPDATE clara_model SET status = 'abandoned', resolved_at = datetime('now'),
+    db.prepare(`UPDATE user_model SET status = 'abandoned', resolved_at = datetime('now'),
         resolve_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(reason, id);
 }
 
 function supersedeEntry(id, newId, reason = '') {
     const db = getDb();
-    db.prepare(`UPDATE clara_model SET status = 'superseded', superseded_by = ?,
+    db.prepare(`UPDATE user_model SET status = 'superseded', superseded_by = ?,
         resolved_at = datetime('now'), resolve_reason = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?`).run(newId, reason, id);
 }
 
 function correctEntry(id, newContent) {
     const db = getDb();
-    const existing = db.prepare('SELECT * FROM clara_model WHERE id = ?').get(id);
+    const existing = db.prepare('SELECT * FROM user_model WHERE id = ?').get(id);
     if (!existing) return null;
 
     const history = JSON.parse(existing.evolution_history || '[]');
@@ -217,7 +217,7 @@ function correctEntry(id, newContent) {
         at: new Date().toISOString(),
     });
 
-    db.prepare(`UPDATE clara_model SET status = 'corrected', content = ?,
+    db.prepare(`UPDATE user_model SET status = 'corrected', content = ?,
         evolution_history = ?, resolved_at = datetime('now'), updated_at = CURRENT_TIMESTAMP
         WHERE id = ?`).run(newContent, JSON.stringify(history), id);
     return true;
@@ -229,7 +229,7 @@ function correctEntry(id, newContent) {
 
 function addEvidence(id, fragmentId, confirms = true, opts = {}) {
     const db = getDb();
-    const entry = db.prepare('SELECT * FROM clara_model WHERE id = ?').get(id);
+    const entry = db.prepare('SELECT * FROM user_model WHERE id = ?').get(id);
     if (!entry) return null;
 
     const { sourceMsgIds = [] } = opts; // message IDs that produced this evidence
@@ -334,7 +334,7 @@ function addEvidence(id, fragmentId, confirms = true, opts = {}) {
             const tags = JSON.parse(entry.tags || '[]');
             if (!tags.includes('needs_review')) {
                 tags.push('needs_review');
-                db.prepare(`UPDATE clara_model SET tags = ?, priority = MAX(priority, 5),
+                db.prepare(`UPDATE user_model SET tags = ?, priority = MAX(priority, 5),
                     updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                     .run(JSON.stringify(tags), id);
             }
@@ -343,7 +343,7 @@ function addEvidence(id, fragmentId, confirms = true, opts = {}) {
         // Record contradiction in evolution_history for processModelDecay counting
         const evoHistory = JSON.parse(entry.evolution_history || '[]');
         evoHistory.push({ type: 'contradiction', at: now, source_independent: isIndependentSource });
-        db.prepare(`UPDATE clara_model SET evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+        db.prepare(`UPDATE user_model SET evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
             .run(JSON.stringify(evoHistory), id);
     }
 
@@ -354,7 +354,7 @@ function addEvidence(id, fragmentId, confirms = true, opts = {}) {
         if (sourceIds.length > 50) sourceIds = sourceIds.slice(-50);
     }
 
-    db.prepare(`UPDATE clara_model SET evidence_count = ?, confidence = ?,
+    db.prepare(`UPDATE user_model SET evidence_count = ?, confidence = ?,
         last_evidence_at = ?, source_fragment_ids = ?, source_diversity = ?,
         ${confirms ? '' : 'last_contradiction_at = ?, '}
         updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
@@ -365,7 +365,7 @@ function addEvidence(id, fragmentId, confirms = true, opts = {}) {
 
     // Auto-upgrade hypothesis: requires diverse independent sources (not same-day echo)
     if (entry.type === 'active_hypothesis' && sourceDiversity >= 3 && newConfidence >= 0.70) {
-        db.prepare(`UPDATE clara_model SET type = 'stable_trait', decay_type = 'evidence_dependent',
+        db.prepare(`UPDATE user_model SET type = 'stable_trait', decay_type = 'evidence_dependent',
             source_quality = 'inferred', updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(id);
         console.log(`[UserModel] 🆙 假设升级为特质: "${entry.content.slice(0, 60)}" (id=${id}, evidence=${newCount}, diversity=${sourceDiversity})`);
         return { upgraded: true, id, content: entry.content };
@@ -376,7 +376,7 @@ function addEvidence(id, fragmentId, confirms = true, opts = {}) {
 
 // ═══════════════════════════════════════════════════════
 // Lightweight Evidence Matching (zero LLM + zero ChromaDB)
-// Runs in tick cycle — matches recent fragments against clara_model entries
+// Runs in tick cycle — matches recent fragments against user_model entries
 // via keyword/entity overlap. Accumulates evidence without LLM cost.
 // ═══════════════════════════════════════════════════════
 
@@ -410,7 +410,7 @@ function matchEvidenceFromFragments() {
     // Get all active model entries that can accept evidence
     const entries = db.prepare(`
         SELECT id, type, content, entity_ids, source_fragment_ids, source_quality, confidence
-        FROM clara_model WHERE status = 'active'
+        FROM user_model WHERE status = 'active'
         ORDER BY priority DESC, confidence DESC
     `).all();
 
@@ -538,7 +538,7 @@ function processModelDecay() {
         relational:  { hours: 4, day: 12, days: 72 },
     };
     const states = db.prepare(`
-        SELECT id, content, created_at, expires_at, decay_params, created_by FROM clara_model
+        SELECT id, content, created_at, expires_at, decay_params, created_by FROM user_model
         WHERE type = 'current_state' AND status = 'active'
         ORDER BY created_at ASC
     `).all();
@@ -560,7 +560,7 @@ function processModelDecay() {
             toResolve.push(...chatEntries);
         }
         for (const s of toResolve.slice(0, excess)) {
-            db.prepare(`UPDATE clara_model SET status = 'resolved', resolved_at = datetime('now'),
+            db.prepare(`UPDATE user_model SET status = 'resolved', resolved_at = datetime('now'),
                 resolve_reason = 'auto-resolved: hard cap (12 active limit)', updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?`).run(s.id);
             changes.resolved++;
@@ -570,7 +570,7 @@ function processModelDecay() {
 
     // Re-fetch after cap enforcement
     const activeStates = db.prepare(`
-        SELECT id, content, created_at, expires_at, decay_params FROM clara_model
+        SELECT id, content, created_at, expires_at, decay_params FROM user_model
         WHERE type = 'current_state' AND status = 'active'
     `).all();
 
@@ -579,7 +579,7 @@ function processModelDecay() {
         if (s.expires_at) {
             const expiresAt = new Date(s.expires_at);
             if (now >= expiresAt) {
-                db.prepare(`UPDATE clara_model SET status = 'resolved', resolved_at = datetime('now'),
+                db.prepare(`UPDATE user_model SET status = 'resolved', resolved_at = datetime('now'),
                     resolve_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                     .run(`auto-resolved: expires_at ${s.expires_at} reached`, s.id);
                 changes.resolved++;
@@ -600,7 +600,7 @@ function processModelDecay() {
 
         const hoursSince = (now - new Date(s.created_at)) / (1000 * 60 * 60);
         if (hoursSince >= ttlHours) {
-            db.prepare(`UPDATE clara_model SET status = 'resolved', resolved_at = datetime('now'),
+            db.prepare(`UPDATE user_model SET status = 'resolved', resolved_at = datetime('now'),
                 resolve_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                 .run(`auto-resolved: TTL ${category}/${ttlCat} (${ttlHours}h) exceeded after ${hoursSince.toFixed(1)}h`, s.id);
             changes.resolved++;
@@ -611,7 +611,7 @@ function processModelDecay() {
     // --- active_hypothesis: abandon if stale ---
     const hyps = db.prepare(`
         SELECT id, content, last_evidence_at, evidence_count, created_at
-        FROM clara_model WHERE type = 'active_hypothesis' AND status = 'active'
+        FROM user_model WHERE type = 'active_hypothesis' AND status = 'active'
     `).all();
 
     for (const h of hyps) {
@@ -619,7 +619,7 @@ function processModelDecay() {
         const daysSince = (now - lastEv) / (1000 * 60 * 60 * 24);
 
         if (daysSince >= HYPOTHESIS_ABANDON_DAYS && h.evidence_count < HYPOTHESIS_UPGRADE_EVIDENCE) {
-            db.prepare(`UPDATE clara_model SET status = 'abandoned', resolved_at = datetime('now'),
+            db.prepare(`UPDATE user_model SET status = 'abandoned', resolved_at = datetime('now'),
                 resolve_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                 .run(`auto-abandoned: ${daysSince.toFixed(0)}d no evidence, only ${h.evidence_count} confirmations`, h.id);
             changes.abandoned++;
@@ -629,7 +629,7 @@ function processModelDecay() {
     // --- stable_trait: flag for review if contradictions >= threshold ---
     const traits = db.prepare(`
         SELECT id, content, confidence, last_contradiction_at, evidence_count
-        FROM clara_model WHERE type = 'stable_trait' AND status = 'active'
+        FROM user_model WHERE type = 'stable_trait' AND status = 'active'
     `).all();
 
     for (const t of traits) {
@@ -639,7 +639,7 @@ function processModelDecay() {
         if (contradictionAge > 30) continue; // stale contradictions don't count
 
         // Check contradiction count from evolution history
-        const history = db.prepare('SELECT evolution_history FROM clara_model WHERE id = ?').get(t.id);
+        const history = db.prepare('SELECT evolution_history FROM user_model WHERE id = ?').get(t.id);
         const hist = JSON.parse(history?.evolution_history || '[]');
         const recentContradictions = hist.filter(h =>
             h.type === 'contradiction' &&
@@ -648,7 +648,7 @@ function processModelDecay() {
 
         if (recentContradictions >= TRAIT_CONTRADICTION_THRESHOLD) {
             // Flag for LLM review — don't auto-downgrade
-            db.prepare(`UPDATE clara_model SET tags = ?, priority = MAX(priority, 5),
+            db.prepare(`UPDATE user_model SET tags = ?, priority = MAX(priority, 5),
                 updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                 .run(JSON.stringify([...new Set([...JSON.parse(t.tags || '[]'), 'needs_review'])]), t.id);
             changes.flagged++;
@@ -657,7 +657,7 @@ function processModelDecay() {
 
     // --- stable_trait: dormant/revive based on evidence freshness ---
     const dormantCheck = db.prepare(`
-        SELECT id, last_evidence_at, tags FROM clara_model
+        SELECT id, last_evidence_at, tags FROM user_model
         WHERE type = 'stable_trait' AND status = 'active'
     `).all();
 
@@ -669,13 +669,13 @@ function processModelDecay() {
 
         if (daysSince > 14 && !tags.includes('dormant')) {
             tags.push('dormant');
-            db.prepare(`UPDATE clara_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+            db.prepare(`UPDATE user_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                 .run(JSON.stringify(tags), t.id);
             changes.dormant++;
             console.log(`[UserModel] 💤 trait #${t.id} 标记 dormant (${daysSince.toFixed(0)}天无证据)`);
         } else if (daysSince <= 14 && tags.includes('dormant')) {
             const revived = tags.filter(tag => tag !== 'dormant');
-            db.prepare(`UPDATE clara_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+            db.prepare(`UPDATE user_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                 .run(JSON.stringify(revived), t.id);
             changes.revived++;
             console.log(`[UserModel] 🌱 trait #${t.id} 复活 (${daysSince.toFixed(0)}天前有新证据)`);
@@ -700,7 +700,7 @@ function crossRefStateWithEntities() {
 
     // ── 1. Get all active current_state entries ──
     const states = db.prepare(`
-        SELECT id, content, created_by FROM clara_model
+        SELECT id, content, created_by FROM user_model
         WHERE type = 'current_state' AND status = 'active'
     `).all();
     if (states.length === 0) return changes;
@@ -754,15 +754,15 @@ function crossRefStateWithEntities() {
             const overlapRatio = overlap / Math.max(wordsB.length, 1);
             if (overlapRatio > 0.5) {
                 // Flag both for review (any source)
-                const tagsA = db.prepare('SELECT tags FROM clara_model WHERE id = ?').get(a.id);
-                const tagsB = db.prepare('SELECT tags FROM clara_model WHERE id = ?').get(b.id);
+                const tagsA = db.prepare('SELECT tags FROM user_model WHERE id = ?').get(a.id);
+                const tagsB = db.prepare('SELECT tags FROM user_model WHERE id = ?').get(b.id);
                 const ta = (() => { try { return JSON.parse(tagsA?.tags || '[]'); } catch (_) { return []; } })();
                 const tb = (() => { try { return JSON.parse(tagsB?.tags || '[]'); } catch (_) { return []; } })();
                 if (!ta.includes('needs_review')) { ta.push('needs_review'); }
                 if (!tb.includes('needs_review')) { tb.push('needs_review'); }
-                db.prepare(`UPDATE clara_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+                db.prepare(`UPDATE user_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                     .run(JSON.stringify(ta), a.id);
-                db.prepare(`UPDATE clara_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+                db.prepare(`UPDATE user_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                     .run(JSON.stringify(tb), b.id);
                 changes.stateConflicts++;
                 const sameSource = a.created_by === b.created_by ? ' (同源)' : '';
@@ -773,7 +773,7 @@ function crossRefStateWithEntities() {
 
     // ── 5. current_state ↔ stable_trait bigram overlap ──
     const traits = db.prepare(`
-        SELECT id, content FROM clara_model
+        SELECT id, content FROM user_model
         WHERE type = 'stable_trait' AND status = 'active'
     `).all();
 
@@ -792,11 +792,11 @@ function crossRefStateWithEntities() {
             let bgOverlap = 0;
             for (const bg of segT) { if (segS.has(bg)) bgOverlap++; }
             if (bgOverlap >= 5) {
-                const tags = db.prepare('SELECT tags FROM clara_model WHERE id = ?').get(s.id);
+                const tags = db.prepare('SELECT tags FROM user_model WHERE id = ?').get(s.id);
                 const currentTags = (() => { try { return JSON.parse(tags?.tags || '[]'); } catch (_) { return []; } })();
                 if (!currentTags.includes('needs_review')) {
                     currentTags.push('needs_review');
-                    db.prepare(`UPDATE clara_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+                    db.prepare(`UPDATE user_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                         .run(JSON.stringify(currentTags), s.id);
                     changes.traitFlags++;
                     console.log(`[UserModel] 🔗 crossref: current_state #${s.id} ↔ trait #${t.id} bigram=${bgOverlap} → needs_review`);
@@ -818,7 +818,7 @@ function crossRefStateWithEntities() {
 async function validateHypotheses() {
     const db = getDb();
     const hyps = db.prepare(`
-        SELECT * FROM clara_model
+        SELECT * FROM user_model
         WHERE type = 'active_hypothesis' AND status = 'active' AND evidence_count >= ?
         ORDER BY confidence DESC
         LIMIT 10
@@ -872,7 +872,7 @@ ${hyps.map(h => `[id=${h.id}] ${h.content} (证据${h.evidence_count}次, 独立
                     }
                     const history = JSON.parse(hyp.evolution_history || '[]');
                     history.push({ type: 'upgraded_from_hypothesis', at: new Date().toISOString(), evidence_count: hyp.evidence_count, source_diversity: hyp.source_diversity });
-                    db.prepare(`UPDATE clara_model SET type = 'stable_trait', decay_type = 'evidence_dependent',
+                    db.prepare(`UPDATE user_model SET type = 'stable_trait', decay_type = 'evidence_dependent',
                         evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                         .run(JSON.stringify(history), hyp.id);
                     upgraded++;
@@ -911,7 +911,7 @@ async function detectNewTraits() {
 
     // Collect high-confidence entity relationships
     const entities = db.prepare(`
-        SELECT id, name, relationship_to_clara, relationship_nature, emotional_significance, relationship_confidence
+        SELECT id, name, relationship_to_user, relationship_nature, emotional_significance, relationship_confidence
         FROM entity_profiles
         WHERE relationship_confidence IS NOT NULL AND relationship_confidence != ''
         ORDER BY last_mentioned_date DESC LIMIT 15
@@ -938,7 +938,7 @@ async function detectNewTraits() {
 
     // Get entity overviews for rich context
     const entityOverviews = db.prepare(`
-        SELECT name, overview, relationship_to_clara FROM entity_profiles
+        SELECT name, overview, relationship_to_user FROM entity_profiles
         WHERE overview IS NOT NULL AND overview != ''
         ORDER BY last_mentioned_date DESC LIMIT 8
     `).all();
@@ -964,8 +964,8 @@ async function detectNewTraits() {
         })
         .filter(Boolean);
 
-    // Get existing clara_model entries to avoid duplicates
-    const existing = db.prepare(`SELECT id, type, content FROM clara_model WHERE status = 'active'`).all();
+    // Get existing user_model entries to avoid duplicates
+    const existing = db.prepare(`SELECT id, type, content FROM user_model WHERE status = 'active'`).all();
     const existingContent = existing.map(e => e.content);
 
     const hasSignals = monitors.length > 0 || entities.length > 0 || categories.length > 0 || chatSamples.length > 0;
@@ -1040,7 +1040,7 @@ ${entityOverviews.map(e => `- ${e.name}: ${e.facts?.slice(0, 200)}`).join('\n') 
 ${monitors.length > 0 ? monitors.map(m => `- trigger: ${m.trigger_config} | analysis: ${m.analysis_config} | 置信度: ${m.confidence}`).join('\n') : '(空)'}
 
 ### 信号5 — 高置信度实体关系
-${entities.map(e => `- ${e.name}: ${e.relationship_to_clara || '?'} (性质: ${e.relationship_nature || '?'})`).join('\n') || '(空)'}
+${entities.map(e => `- ${e.name}: ${e.relationship_to_user || '?'} (性质: ${e.relationship_nature || '?'})`).join('\n') || '(空)'}
 
 ---
 
@@ -1110,7 +1110,7 @@ ${entities.map(e => `- ${e.name}: ${e.relationship_to_clara || '?'} (性质: ${e
                     const type = d.type || 'active_hypothesis';
                     // stable_trait 上限
                     if (type === 'stable_trait') {
-                        const tc = db.prepare(`SELECT COUNT(*) as c FROM clara_model WHERE type='stable_trait' AND status='active'`).get()?.c || 0;
+                        const tc = db.prepare(`SELECT COUNT(*) as c FROM user_model WHERE type='stable_trait' AND status='active'`).get()?.c || 0;
                         if (tc >= 6) { console.log(`[UserModel] ⛔ stable_trait 上限6，skip`); skipped++; break; }
                     }
                     // Ensure companion_intuition tag — code-level fallback in case LLM omits it
@@ -1129,12 +1129,12 @@ ${entities.map(e => `- ${e.name}: ${e.relationship_to_clara || '?'} (性质: ${e
                 }
                 case 'confirm': {
                     if (!d.target_id) { skipped++; break; }
-                    const target = db.prepare('SELECT id, confidence FROM clara_model WHERE id = ?').get(d.target_id);
+                    const target = db.prepare('SELECT id, confidence FROM user_model WHERE id = ?').get(d.target_id);
                     if (target) {
                         addEvidence(d.target_id, null, true, { note: d.new_evidence?.slice(0, 200), sourceMsgIds: [] });
                         const adj = d.confidence_adjust || 0.05;
                         const newConf = Math.min(0.85, (target.confidence || 0.5) + adj);
-                        db.prepare(`UPDATE clara_model SET confidence = ?, last_evidence_at = datetime('now'), updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+                        db.prepare(`UPDATE user_model SET confidence = ?, last_evidence_at = datetime('now'), updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                             .run(newConf, d.target_id);
                     }
                     confirmed++;
@@ -1143,12 +1143,12 @@ ${entities.map(e => `- ${e.name}: ${e.relationship_to_clara || '?'} (性质: ${e
                 }
                 case 'refine': {
                     if (!d.target_id || !d.new_content) { skipped++; break; }
-                    const target = db.prepare('SELECT content, evolution_history FROM clara_model WHERE id = ?').get(d.target_id);
+                    const target = db.prepare('SELECT content, evolution_history FROM user_model WHERE id = ?').get(d.target_id);
                     if (target) {
                         let hist = [];
                         try { hist = JSON.parse(target.evolution_history || '[]'); } catch (_) {}
                         hist.push({ action: 'refined', previous: target.content.slice(0, 120), at: new Date().toISOString(), reasoning: d.reasoning || '' });
-                        db.prepare(`UPDATE clara_model SET content = ?, evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+                        db.prepare(`UPDATE user_model SET content = ?, evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                             .run(d.new_content.slice(0, 200), JSON.stringify(hist), d.target_id);
                     }
                     refined++;
@@ -1188,7 +1188,7 @@ function anchorEntriesToFragments(entryIds, opts = {}) {
 
     // Look up entry objects
     const placeholders = entryIds.map(() => '?').join(',');
-    const entries = db.prepare(`SELECT id, content FROM clara_model WHERE id IN (${placeholders})`).all(...entryIds);
+    const entries = db.prepare(`SELECT id, content FROM user_model WHERE id IN (${placeholders})`).all(...entryIds);
     if (entries.length === 0) return;
 
     // orderDir ASC = oldest-first for seed anchoring (capture earliest evidence);
@@ -1239,7 +1239,7 @@ function anchorEntriesToFragments(entryIds, opts = {}) {
         }
 
         if (matchedFragIds.length > 0) {
-            const existing = db.prepare('SELECT source_fragment_ids, entity_ids FROM clara_model WHERE id = ?').get(entry.id);
+            const existing = db.prepare('SELECT source_fragment_ids, entity_ids FROM user_model WHERE id = ?').get(entry.id);
             const existingFragIds = safeParseJson(existing?.source_fragment_ids);
             const rawEntityIds = safeParseJson(existing?.entity_ids);
             const existingEntityIds = Array.isArray(rawEntityIds) ? rawEntityIds : [];
@@ -1255,7 +1255,7 @@ function anchorEntriesToFragments(entryIds, opts = {}) {
             }
             const mergedEntities = [...new Set([...existingEntityIds, ...matchedEntityIds])];
 
-            db.prepare(`UPDATE clara_model SET source_fragment_ids = ?, entity_ids = ?,
+            db.prepare(`UPDATE user_model SET source_fragment_ids = ?, entity_ids = ?,
                 evidence_count = ?, last_evidence_at = datetime('now'),
                 updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                 .run(JSON.stringify(mergedFrags), JSON.stringify(mergedEntities),
@@ -1273,7 +1273,7 @@ function seedAnchorOrphanEntries() {
     const db = getDb();
 
     const orphans = db.prepare(`
-        SELECT id FROM clara_model
+        SELECT id FROM user_model
         WHERE status = 'active'
           AND (source_fragment_ids IS NULL OR source_fragment_ids = '' OR source_fragment_ids = '[]')
         LIMIT 20
@@ -1295,7 +1295,7 @@ async function reviewFlaggedTraits() {
     const db = getDb();
 
     const flagged = db.prepare(`
-        SELECT * FROM clara_model
+        SELECT * FROM user_model
         WHERE type = 'stable_trait' AND status = 'active'
         AND tags LIKE '%needs_review%'
         ORDER BY priority DESC, confidence ASC
@@ -1348,14 +1348,14 @@ ${flagged.map(t => {
 
             switch (d.decision) {
                 case 'keep':
-                    db.prepare(`UPDATE clara_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+                    db.prepare(`UPDATE user_model SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                         .run(JSON.stringify(tags), trait.id);
                     kept++;
                     break;
                 case 'downgrade': {
                     const history = JSON.parse(trait.evolution_history || '[]');
                     history.push({ type: 'downgraded_to_hypothesis', at: new Date().toISOString(), reason: 'contradiction review' });
-                    db.prepare(`UPDATE clara_model SET type = 'active_hypothesis', decay_type = 'evidence_dependent',
+                    db.prepare(`UPDATE user_model SET type = 'active_hypothesis', decay_type = 'evidence_dependent',
                         evidence_count = 1, confidence = 0.35, tags = ?, evolution_history = ?,
                         updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                         .run(JSON.stringify(tags), JSON.stringify(history), trait.id);
@@ -1367,7 +1367,7 @@ ${flagged.map(t => {
                     if (d.revised_content && d.revised_content !== trait.content) {
                         const history = JSON.parse(trait.evolution_history || '[]');
                         history.push({ type: 'revised', previous: trait.content, revised: d.revised_content, at: new Date().toISOString() });
-                        db.prepare(`UPDATE clara_model SET content = ?, tags = ?, evolution_history = ?,
+                        db.prepare(`UPDATE user_model SET content = ?, tags = ?, evolution_history = ?,
                             confidence = MAX(0.40, confidence - 0.05), updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                             .run(d.revised_content, JSON.stringify(tags), JSON.stringify(history), trait.id);
                         revised++;
@@ -1393,7 +1393,7 @@ async function reviewStableTraits() {
 
     // Pick all active stable_traits — 24h gate prevents excessive re-review
     const traits = db.prepare(`
-        SELECT * FROM clara_model
+        SELECT * FROM user_model
         WHERE type = 'stable_trait' AND status = 'active'
         ORDER BY
             CASE WHEN last_evidence_at IS NULL THEN 1 ELSE 0 END,
@@ -1551,14 +1551,14 @@ ${blocks}
 
             switch (d.decision) {
                 case 'confirmed':
-                    db.prepare(`UPDATE clara_model SET evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+                    db.prepare(`UPDATE user_model SET evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                         .run(JSON.stringify(history), trait.id);
                     confirmed++;
                     break;
                 case 'refine':
                     if (d.revised_content && d.revised_content !== trait.content) {
                         const confAdj = d.confidence_adjust || -0.05;
-                        db.prepare(`UPDATE clara_model SET content = ?, confidence = MAX(0.35, MIN(0.85, confidence + ?)),
+                        db.prepare(`UPDATE user_model SET content = ?, confidence = MAX(0.35, MIN(0.85, confidence + ?)),
                             evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                             .run(d.revised_content, confAdj, JSON.stringify(history), trait.id);
                         refined++;
@@ -1566,7 +1566,7 @@ ${blocks}
                     }
                     break;
                 case 'weaken':
-                    db.prepare(`UPDATE clara_model SET confidence = MAX(0.25, confidence - 0.10),
+                    db.prepare(`UPDATE user_model SET confidence = MAX(0.25, confidence - 0.10),
                         evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                         .run(JSON.stringify(history), trait.id);
                     weakened++;
@@ -1574,7 +1574,7 @@ ${blocks}
                 case 'note_pattern':
                     if (d.observation) {
                         // Record observation without modifying the trait
-                        db.prepare(`UPDATE clara_model SET evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+                        db.prepare(`UPDATE user_model SET evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                             .run(JSON.stringify(history), trait.id);
                         noted++;
                         console.log(`[UserModel] 👁️ 观察记录 #${trait.id}: ${d.observation.slice(0, 80)}`);
@@ -1615,7 +1615,7 @@ async function harvestFacts() {
 
     // Get existing immutable_fact entries for dedup
     const existingFacts = db.prepare(`
-        SELECT content FROM clara_model WHERE type = 'immutable_fact' AND status = 'active'
+        SELECT content FROM user_model WHERE type = 'immutable_fact' AND status = 'active'
     `).all();
     const existingContents = existingFacts.map(e => e.content);
 
@@ -1738,7 +1738,7 @@ function resolveExpiredStates() {
     const db = getDb();
     // current_state older than 14 days with no evidence → resolve
     const result = db.prepare(`
-        UPDATE clara_model SET status = 'resolved', resolved_at = datetime('now'),
+        UPDATE user_model SET status = 'resolved', resolved_at = datetime('now'),
             resolve_reason = 'auto-resolved: stale current_state',
             updated_at = CURRENT_TIMESTAMP
         WHERE type = 'current_state' AND status = 'active'
@@ -1823,7 +1823,7 @@ function getModelContext(maxTokens = 500) {
     const db = getDb();
 
     const facts = db.prepare(`
-        SELECT content FROM clara_model
+        SELECT content FROM user_model
         WHERE type = 'immutable_fact' AND status = 'active'
         ORDER BY priority DESC, confidence DESC
     `).all();
@@ -1831,7 +1831,7 @@ function getModelContext(maxTokens = 500) {
     const traits = db.prepare(`
         SELECT cm.id, cm.content, cm.confidence, cm.evidence_count, cm.source_quality,
                cm.last_evidence_at, cm.source_fragment_ids
-        FROM clara_model cm
+        FROM user_model cm
         WHERE cm.type = 'stable_trait' AND cm.status = 'active'
         ORDER BY cm.confidence DESC LIMIT 10
     `).all();
@@ -1840,13 +1840,13 @@ function getModelContext(maxTokens = 500) {
     resolveFirstObservedFromMessages(traits);
 
     const states = db.prepare(`
-        SELECT content, confidence, last_evidence_at, source_quality FROM clara_model
+        SELECT content, confidence, last_evidence_at, source_quality FROM user_model
         WHERE type = 'current_state' AND status = 'active'
         ORDER BY last_evidence_at DESC LIMIT 8
     `).all();
 
     const hyps = db.prepare(`
-        SELECT content, confidence, evidence_count, last_evidence_at FROM clara_model
+        SELECT content, confidence, evidence_count, last_evidence_at FROM user_model
         WHERE type = 'active_hypothesis' AND status = 'active'
         ORDER BY confidence DESC LIMIT 6
     `).all();
@@ -1855,7 +1855,7 @@ function getModelContext(maxTokens = 500) {
         return '';
     }
 
-    const lines = ['<clara_model>',
+    const lines = ['<user_model>',
         '（以下是你通过长期观察已内化的认知，不需要再从记忆库里翻出来重复确认。）',
         ''];
 
@@ -1911,7 +1911,7 @@ function getModelContext(maxTokens = 500) {
         lines.push('');
     }
 
-    lines.push('</clara_model>');
+    lines.push('</user_model>');
 
     // Rough token estimate: ~1.5 chars per token for Chinese, trim if needed
     const text = lines.join('\n');
@@ -1919,7 +1919,7 @@ function getModelContext(maxTokens = 500) {
     if (estimatedTokens > maxTokens) {
         // Trim least confident items first
         const trimmed = lines.slice(0, Math.floor(lines.length * maxTokens / estimatedTokens));
-        trimmed.push('</clara_model>');
+        trimmed.push('</user_model>');
         return trimmed.join('\n');
     }
 
@@ -1935,7 +1935,7 @@ function getWhisperRelevant() {
 
     const recent = db.prepare(`
         SELECT type, content, status, confidence, evidence_count, updated_at, resolve_reason
-        FROM clara_model
+        FROM user_model
         WHERE updated_at > datetime('now', '-7 days')
           AND (status != 'active' OR type = 'stable_trait')
         ORDER BY updated_at DESC
@@ -1968,7 +1968,7 @@ function seedFromExisting() {
     const db = getDb();
 
     // Check if already seeded
-    const existing = db.prepare('SELECT COUNT(*) as c FROM clara_model').get();
+    const existing = db.prepare('SELECT COUNT(*) as c FROM user_model').get();
     if (existing.c > 0) {
         console.log(`[UserModel] 已有 ${existing.c} 条记录，跳过播种`);
         return { skipped: true, existing: existing.c };
@@ -2018,12 +2018,12 @@ function seedFromExisting() {
     // From entity_profiles: high-confidence relationships → immutable_fact or stable_trait
     const entities = db.prepare(`
         SELECT * FROM entity_profiles
-        WHERE relationship_to_clara IS NOT NULL AND relationship_to_clara != ''
+        WHERE relationship_to_user IS NOT NULL AND relationship_to_user != ''
         ORDER BY last_mentioned_date DESC
     `).all();
 
     for (const ent of entities) {
-        if (!ent.relationship_to_clara) continue;
+        if (!ent.relationship_to_user) continue;
 
         // Parse confidence from string or number
         let relConf = 0.5;
@@ -2035,7 +2035,7 @@ function seedFromExisting() {
         }
 
         // Skip fictional characters, public figures without real interaction
-        const relText = ent.relationship_to_clara;
+        const relText = ent.relationship_to_user;
         if (/虚构|文学角色|作品中的人物|并无实际人际|而非现实人物|欣赏其.*作品/.test(relText)) continue;
         if (ent.entity_type === 'fictional' || ent.entity_type === 'public_figure') continue;
 
@@ -2075,7 +2075,7 @@ function backfillModelEvidence() {
     // evidence_count = source_fragment_ids 数组长度
     // source_diversity = source_fragment_ids 中不同日期的数量
     const dirtyEntries = db.prepare(`
-        SELECT id, source_fragment_ids FROM clara_model
+        SELECT id, source_fragment_ids FROM user_model
         WHERE status = 'active'
           AND source_fragment_ids IS NOT NULL
           AND source_fragment_ids != ''
@@ -2090,7 +2090,7 @@ function backfillModelEvidence() {
             SELECT COUNT(DISTINCT DATE(created_at)) as c FROM memory_fragments
             WHERE id IN (${placeholders}) AND status = 'active'
         `).get(...fids)?.c || 0;
-        db.prepare(`UPDATE clara_model SET evidence_count = ?,
+        db.prepare(`UPDATE user_model SET evidence_count = ?,
             source_diversity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
             .run(fids.length, Math.max(distinctDates, 1), e.id);
         fixCount++;
@@ -2101,7 +2101,7 @@ function backfillModelEvidence() {
 
     // ── 孤儿锚定：source_fragment_ids 为空的条目，用 bigram 匹配补证据 ──
     const orphans = db.prepare(`
-        SELECT id FROM clara_model
+        SELECT id FROM user_model
         WHERE status = 'active'
           AND (source_fragment_ids IS NULL OR source_fragment_ids = '' OR source_fragment_ids = '[]')
         LIMIT 20
@@ -2118,7 +2118,7 @@ function backfillModelEvidence() {
 
     // After anchoring, recalculate evidence_count from the now-populated source_fragment_ids
     db.prepare(`
-        UPDATE clara_model
+        UPDATE user_model
         SET evidence_count = json_array_length(source_fragment_ids),
             updated_at = CURRENT_TIMESTAMP
         WHERE id IN (${orphanIds.map(() => '?').join(',')})
@@ -2139,7 +2139,7 @@ async function readUserRawMessages() {
     // v5.4: LLM needs full visibility to avoid creating near-duplicates.
     // The most recent entry still drives the message window and extend target.
     const allActiveStates = db.prepare(`
-        SELECT * FROM clara_model WHERE type = 'current_state' AND status = 'active'
+        SELECT * FROM user_model WHERE type = 'current_state' AND status = 'active'
         ORDER BY created_at DESC
     `).all();
     const prevState = allActiveStates[0] || null; // most recent for extend + audit
@@ -2166,7 +2166,7 @@ async function readUserRawMessages() {
 
     // Get existing stable_traits as short summaries ({{ai.name}} needs to know his own "tricks")
     const traits = db.prepare(`
-        SELECT id, content FROM clara_model
+        SELECT id, content FROM user_model
         WHERE type = 'stable_trait' AND status = 'active'
         ORDER BY confidence DESC
     `).all();
@@ -2300,7 +2300,7 @@ action: extend=旧便签还够用，只续命。create=状态变了或上次判�
                 at: new Date().toISOString(),
             });
             
-            db.prepare(`UPDATE clara_model SET last_evidence_at = datetime('now'),
+            db.prepare(`UPDATE user_model SET last_evidence_at = datetime('now'),
                 decay_params = ?, evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                 .run(newDecayParams, JSON.stringify(prevHist), prevState.id);
             
@@ -2320,7 +2320,7 @@ action: extend=旧便签还够用，只续命。create=状态变了或上次判�
                     note: (result.audit_retro || '').slice(0, 150),
                     at: new Date().toISOString(),
                 });
-                db.prepare('UPDATE clara_model SET evolution_history = ? WHERE id = ?')
+                db.prepare('UPDATE user_model SET evolution_history = ? WHERE id = ?')
                     .run(JSON.stringify(prevHist), prevState.id);
                 console.log(`[UserModel]   ↳ 观察审计回流: 上次预测 ${verdict === 'confirmed' ? '✓ 准确' : '✗ 失准'}`);
             } catch (_) {}
@@ -2333,7 +2333,7 @@ action: extend=旧便签还够用，只续命。create=状态变了或上次判�
         for (const c of contradictions) {
             if (!c || !validTraitIds.has(c.trait_id)) continue;
             try {
-                const trait = db.prepare('SELECT evolution_history, tags, last_contradiction_at FROM clara_model WHERE id = ?').get(c.trait_id);
+                const trait = db.prepare('SELECT evolution_history, tags, last_contradiction_at FROM user_model WHERE id = ?').get(c.trait_id);
                 const hist = JSON.parse(trait.evolution_history || '[]');
                 hist.push({
                     type: 'observation_refute',
@@ -2343,7 +2343,7 @@ action: extend=旧便签还够用，只续命。create=状态变了或上次判�
                 });
                 const tags = JSON.parse(trait.tags || '[]');
                 if (!tags.includes('needs_review')) tags.push('needs_review');
-                db.prepare(`UPDATE clara_model SET evolution_history = ?, tags = ?,
+                db.prepare(`UPDATE user_model SET evolution_history = ?, tags = ?,
                     last_contradiction_at = datetime('now'), updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
                     .run(JSON.stringify(hist), JSON.stringify(tags), c.trait_id);
                 console.log(`[UserModel]   ↳ 观察反驳 trait #${c.trait_id}: ${(c.observation || '').slice(0, 60)} → needs_review`);
@@ -2359,7 +2359,7 @@ action: extend=旧便签还够用，只续命。create=状态变了或上次判�
         // chat_companion 条目（通过 manage_user_state 工具创建的领域明确状态）
         // 不受影响，继续按各自 TTL 独立过期。
         const resolvedCount = db.prepare(`
-            UPDATE clara_model SET status = 'resolved',
+            UPDATE user_model SET status = 'resolved',
                 resolve_reason = 'superseded by newer holistic snapshot',
                 updated_at = CURRENT_TIMESTAMP
             WHERE type = 'current_state' AND status = 'active' AND created_by = 'deep_cycle'
@@ -2461,7 +2461,7 @@ async function integrateProfileTraits() {
     const profileEntries = db.prepare(`
         SELECT id, type, content, confidence, tags, evidence_count, source_diversity,
                source_quality, source_fragment_ids, evolution_history, status
-        FROM clara_model
+        FROM user_model
         WHERE status IN ('active', 'dormant')
           AND type IN ('stable_trait', 'active_hypothesis')
         ORDER BY confidence DESC
@@ -2563,7 +2563,7 @@ async function integrateProfileTraits() {
             diversity: candidate.source_diversity,
             evidence: candidate.evidence_count,
         });
-        db.prepare(`UPDATE clara_model SET evolution_history = ?, updated_at = datetime('now') WHERE id = ?`)
+        db.prepare(`UPDATE user_model SET evolution_history = ?, updated_at = datetime('now') WHERE id = ?`)
             .run(JSON.stringify(history), candidate.id);
 
         console.log(`[UserModel] profile: INTEGRATED #${candidate.id} — tier=${tier.name} cat=${category} diversity=${candidate.source_diversity}`);
@@ -2633,7 +2633,7 @@ ${profileSummary.slice(0, 800)}
 function _logProfileDecision(db, entryId, decision, detail) {
     let history = [];
     try {
-        const row = db.prepare('SELECT evolution_history FROM clara_model WHERE id = ?').get(entryId);
+        const row = db.prepare('SELECT evolution_history FROM user_model WHERE id = ?').get(entryId);
         if (row?.evolution_history) history = JSON.parse(row.evolution_history);
     } catch (_) {}
     history.push({
@@ -2641,7 +2641,7 @@ function _logProfileDecision(db, entryId, decision, detail) {
         at: new Date().toISOString(),
         detail: detail?.slice(0, 300),
     });
-    db.prepare(`UPDATE clara_model SET evolution_history = ?, updated_at = datetime('now') WHERE id = ?`)
+    db.prepare(`UPDATE user_model SET evolution_history = ?, updated_at = datetime('now') WHERE id = ?`)
         .run(JSON.stringify(history), entryId);
 }
 
@@ -2743,7 +2743,7 @@ async function runUserModelCycle() {
 // stable_trait 或 active_hypothesis 的候选。
 //
 // 本函数扫描 fragment_count≥5 且有 overview 的 term 实体，
-// 查重后提案进 clara_model。不替换现有信号管线——作为
+// 查重后提案进 user_model。不替换现有信号管线——作为
 // 第7个信号源，走同一套 dedup/verify/review 质检。
 // ═══════════════════════════════════════════════════════
 
@@ -2761,7 +2761,7 @@ async function bridgeStarMapToModel() {
 
 function mergeModelEntries(winnerId, loserIds, mergedContent) {
     const db = getDb();
-    const winner = db.prepare('SELECT * FROM clara_model WHERE id = ?').get(winnerId);
+    const winner = db.prepare('SELECT * FROM user_model WHERE id = ?').get(winnerId);
     if (!winner) throw new Error(`Winner entry #${winnerId} not found`);
 
     // 1. Collect all source_fragment_ids from winner + losers
@@ -2769,7 +2769,7 @@ function mergeModelEntries(winnerId, loserIds, mergedContent) {
     const allEntityIds = [...safeParseJson(winner.entity_ids)];
 
     for (const lid of loserIds) {
-        const loser = db.prepare('SELECT * FROM clara_model WHERE id = ?').get(lid);
+        const loser = db.prepare('SELECT * FROM user_model WHERE id = ?').get(lid);
         if (!loser) continue;
         allFragIds.push(...safeParseJson(loser.source_fragment_ids));
         allEntityIds.push(...safeParseJson(loser.entity_ids));
@@ -2787,7 +2787,7 @@ function mergeModelEntries(winnerId, loserIds, mergedContent) {
         previous_content: winner.content,
     });
 
-    db.prepare(`UPDATE clara_model SET content = ?, source_fragment_ids = ?,
+    db.prepare(`UPDATE user_model SET content = ?, source_fragment_ids = ?,
         entity_ids = ?, evidence_count = ?, evolution_history = ?,
         updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(
         mergedContent,
@@ -2800,7 +2800,7 @@ function mergeModelEntries(winnerId, loserIds, mergedContent) {
 
     // 3. Supersede losers
     for (const lid of loserIds) {
-        db.prepare(`UPDATE clara_model SET status = 'superseded',
+        db.prepare(`UPDATE user_model SET status = 'superseded',
             resolve_reason = ?, resolved_at = datetime('now'),
             updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
             .run(`merged into #${winnerId} (auto dedup)`, lid);
@@ -2817,7 +2817,7 @@ function mergeModelEntries(winnerId, loserIds, mergedContent) {
 async function detectModelOverlaps() {
     const db = getDb();
     const traits = db.prepare(`
-        SELECT id, content, confidence FROM clara_model
+        SELECT id, content, confidence FROM user_model
         WHERE type = 'stable_trait' AND status = 'active'
         ORDER BY confidence DESC
     `).all();
@@ -2869,9 +2869,9 @@ ${traitList}`;
             if (!loserId) continue;
 
             // Verify both traits still exist and are active
-            const winner = db.prepare('SELECT confidence FROM clara_model WHERE id = ? AND status = ?')
+            const winner = db.prepare('SELECT confidence FROM user_model WHERE id = ? AND status = ?')
                 .get(winnerId, 'active');
-            const loser = db.prepare('SELECT confidence FROM clara_model WHERE id = ? AND status = ?')
+            const loser = db.prepare('SELECT confidence FROM user_model WHERE id = ? AND status = ?')
                 .get(loserId, 'active');
             if (!winner || !loser) continue;
 
@@ -2879,7 +2879,7 @@ ${traitList}`;
             if (Math.abs(winner.confidence - loser.confidence) > 0.20) {
                 console.log(`[UserModel] ⏭️ 跳过合并 #${winnerId}↔#${loserId}: conf 差距过大 (${winner.confidence.toFixed(2)} vs ${loser.confidence.toFixed(2)})`);
                 // Record the observation but don't merge
-                const winnerHist = safeParseJson(db.prepare('SELECT evolution_history FROM clara_model WHERE id = ?').get(winnerId)?.evolution_history);
+                const winnerHist = safeParseJson(db.prepare('SELECT evolution_history FROM user_model WHERE id = ?').get(winnerId)?.evolution_history);
                 winnerHist.push({
                     type: 'overlap_noted',
                     pair_id: loserId,
@@ -2887,7 +2887,7 @@ ${traitList}`;
                     action: 'skipped (confidence gap > 0.20)',
                     at: new Date().toISOString(),
                 });
-                db.prepare('UPDATE clara_model SET evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+                db.prepare('UPDATE user_model SET evolution_history = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
                     .run(JSON.stringify(winnerHist), winnerId);
                 continue;
             }
@@ -2922,7 +2922,7 @@ async function synthesizeCoreInsight() {
     const { setUserSetting } = require('../utils/settings');
 
     const traits = db.prepare(`
-        SELECT content, confidence FROM clara_model
+        SELECT content, confidence FROM user_model
         WHERE type = 'stable_trait' AND status = 'active'
         ORDER BY confidence DESC
     `).all();
@@ -2930,7 +2930,7 @@ async function synthesizeCoreInsight() {
     if (traits.length === 0) return { synthesized: false, reason: 'no active traits' };
 
     const cs = db.prepare(`
-        SELECT content FROM clara_model
+        SELECT content FROM user_model
         WHERE type = 'current_state' AND status = 'active'
         ORDER BY last_evidence_at DESC LIMIT 1
     `).get();
@@ -3079,7 +3079,7 @@ function manageCurrentState(content, opts = {}) {
 
     // ── Step 1: Find existing active current_state entries ──
     const activeStates = db.prepare(
-        'SELECT * FROM clara_model WHERE type = ? AND status = ? ORDER BY created_at DESC'
+        'SELECT * FROM user_model WHERE type = ? AND status = ? ORDER BY created_at DESC'
     ).all('current_state', 'active');
 
     // ── Step 2: Check for overlap ──
@@ -3125,7 +3125,7 @@ function manageCurrentState(content, opts = {}) {
                     trigger: extra_context || 'Companion refined within 30min window',
                     at: nowISO,
                 });
-                db.prepare(`UPDATE clara_model SET content = ?,
+                db.prepare(`UPDATE user_model SET content = ?,
                     expires_at = COALESCE(?, expires_at),
                     evolution_history = ?, evidence_count = evidence_count + 1,
                     last_evidence_at = ?, updated_at = CURRENT_TIMESTAMP
@@ -3152,7 +3152,7 @@ function manageCurrentState(content, opts = {}) {
             at: nowISO,
         });
 
-        db.prepare(`UPDATE clara_model SET content = ?,
+        db.prepare(`UPDATE user_model SET content = ?,
             expires_at = COALESCE(?, expires_at),
             evolution_history = ?, evidence_count = evidence_count + 1,
             last_evidence_at = ?, updated_at = CURRENT_TIMESTAMP
@@ -3179,7 +3179,7 @@ function manageCurrentState(content, opts = {}) {
             at: nowISO,
         });
 
-        db.prepare(`UPDATE clara_model SET status = 'resolved', resolved_at = ?,
+        db.prepare(`UPDATE user_model SET status = 'resolved', resolved_at = ?,
             resolve_reason = ?, evolution_history = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?`).run(
             nowISO,

@@ -43,7 +43,7 @@ function normalizeTime(ts) {
 function mapSender(raw) {
     const s = String(raw || '').trim().toLowerCase();
     if (s === 'user' || s === 'human' || s === '我' || s === 'me') return 'user';
-    return 'ai'; // assistant/ai/bot/draco/它 及其它默认当 AI
+    return 'ai'; // assistant/ai/bot/它 及其它默认当 AI
 }
 
 // 把一条消息（简单格式 或 OneBot 事件）规整成 {sender, content, timestamp}

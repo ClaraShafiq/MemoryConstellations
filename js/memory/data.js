@@ -67,11 +67,11 @@ export function hslToRgbStr(hue, sat, lit) {
 
 // ── 宇宙数据（模块内单例） ──
 export const universe = {
-    constellations: [],   // 普通星座（不含 Clara/Draco）
+    constellations: [],   // 普通星座（不含双星核心）
     core: [],             // 双星核心档案
-    claraModel: [],
+    userModel: [],
     archlog: [],
-    mergeProposals: [],   // 待 Clara 裁决的合并提案
+    mergeProposals: [],   // 待用户裁决的合并提案
     bridges: [],          // 星座桥 [{a, b, weight}]（conId 对）
     galaxyBridges: [],    // 星系聚合桥 [{a, b, weight}]（galaxyId 对）
     totalFragments: 0,
@@ -178,7 +178,7 @@ export async function loadUniverse() {
 
     universe.constellations = cons;
     universe.core = data.core || [];
-    universe.claraModel = data.claraModel || [];
+    universe.userModel = data.cognitiveModel || [];   // 后端 /universe 返回的键名是 cognitiveModel
     universe.patterns = data.patterns || [];
     universe.archlog = data.archlog || [];
     universe.mergeProposals = data.mergeProposals || [];

@@ -1,27 +1,25 @@
 // services/nameResolver.js — v5.3 OSS
 // Centralized user/AI display name resolution.
-// All hardcoded "Clara"/"Draco" in prompts, display strings, and sender
-// mappings should go through this module instead of being literals.
+// Prompts and display strings should go through this module instead of
+// hardcoding names.
 //
-// After open-sourcing, users only need to edit memory_config.json
-// and core-prompt.txt — the code auto-adapts to their chosen names.
+// Users only need to edit memory_config.json and core-prompt.txt —
+// the code auto-adapts to their chosen names.
 
 const { USER, AI, SKIP_NAMES, resolveTemplate } = require('./memoryConfig');
 
 /**
- * Replace hardcoded "Clara"/"Draco" with configured names in prompt strings.
+ * Replace name placeholders with configured names in prompt strings.
  * Aligns with the existing fillPrompt pattern used across the codebase.
  *
  * 先解析 {{user.name}}/{{user.pronoun}}/{{ai.name}} 等双花括号模板，
- * 再处理 {user}/{ai} 单花括号与旧版硬编码 Clara/Draco 字面量。
+ * 再处理 {user}/{ai} 单花括号写法。
  */
 function fillPrompt(str) {
     if (typeof str !== 'string') return str;
     return resolveTemplate(str)
         .replace(/\{user\}/g, USER.name)
-        .replace(/\{ai\}/g, AI.name)
-        .replace(/Clara/g, USER.name)      // 向后兼容旧版硬编码
-        .replace(/Draco/g, AI.name);
+        .replace(/\{ai\}/g, AI.name);
 }
 
 /**
@@ -35,12 +33,12 @@ function senderName(sender) {
 
 /**
  * Map DB entity field values to display names.
- * Canonical DB values 'Clara'/'Draco' → configured names.
+ * Canonical DB values 'user'/'ai' → configured names.
  * Unknown entities pass through unchanged.
  */
 function entityDisplayName(entity) {
-    if (entity === 'Clara') return USER.name;
-    if (entity === 'Draco') return AI.name;
+    if (entity === 'user') return USER.name;
+    if (entity === 'ai') return AI.name;
     return entity;
 }
 

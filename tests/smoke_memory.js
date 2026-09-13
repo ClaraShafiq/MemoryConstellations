@@ -47,7 +47,7 @@ async function main() {
     console.log('── 1. 数据库 ──');
     const tables = ['memory_fragments', 'memory_fragments_fts', 'memories', 'memories_fts',
                     'entity_profiles', 'fragment_entities', 'entity_timeline',
-                    'clara_model', 'memory_sagas', 'ontology_changelog'];
+                    'user_model', 'memory_sagas', 'ontology_changelog'];
     for (const t of tables) {
         test(`表 ${t}`, () => {
             const r = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(t);
@@ -85,8 +85,8 @@ async function main() {
         const r = db.prepare("INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, confidence, classified_by) VALUES (1, 7, 0.60, 'test')").run();
     });
 
-    // ── 4. Clara Model ──
-    console.log('\n── 4. Clara Model ──');
+    // ── 4. User Model ──
+    console.log('\n── 4. User Model ──');
     test('processModelDecay 不抛异常', () => {
         const { processModelDecay } = require('../services/cognitiveModel');
         const r = processModelDecay();

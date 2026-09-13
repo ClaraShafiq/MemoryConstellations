@@ -190,7 +190,7 @@ ${AI.name}的发言只提取以下两类，其余全部忽略：
 - 不要为了产出而编造不属于这批消息的事情。如果拿不准是否重复，宁可跳过。
 - 下面的内容**仅供你去重参考**，不是让你复述或总结的。不要把它们写进entries。
 
-{DRACO_MEMORY_CONTEXT}
+{COMPANION_MEMORY_CONTEXT}
 
 ## 综合提取密度平衡原则
 你在记，不是在总结规律。一条只记一个具体信息。${USER.name}今天很累不代表其最近状态不好。某天点了个汉堡不代表偏好汉堡。规律是后面 Consolidator 的活，不是你的活。
@@ -382,10 +382,10 @@ async function getKnownEntities(messagesText) {
 async function getEntityRelationContext() {
     const db = getDb();
     const rows = db.prepare(`
-        SELECT name, relationship_to_clara, relationship_confidence
+        SELECT name, relationship_to_user, relationship_confidence
         FROM entity_profiles
         WHERE category = 'person'
-          AND relationship_to_clara IS NOT NULL
+          AND relationship_to_user IS NOT NULL
         ORDER BY
             CASE relationship_confidence
                 WHEN 'high' THEN 0
@@ -404,7 +404,7 @@ async function getEntityRelationContext() {
     if (highConf.length) {
         ctx += '## 已知关系（确定信息，直接使用）\n';
         for (const r of highConf) {
-            ctx += `- ${r.name}：${r.relationship_to_clara} [已确认]\n`;
+            ctx += `- ${r.name}：${r.relationship_to_user} [已确认]\n`;
         }
         ctx += '\n';
     }
@@ -412,8 +412,8 @@ async function getEntityRelationContext() {
         ctx += '## 待观察关系（尚不确定，勿给结论）\n';
         ctx += `以下人物与${USER.name}的关系尚不明确。如果你在对话中注意到关系线索，请在提取的entity字段中标注该人物，但**不要**在content中给关系下结论。\n`;
         for (const r of lowConf) {
-            const hint = r.relationship_to_clara
-                ? `（当前猜测: ${r.relationship_to_clara}，未确认）`
+            const hint = r.relationship_to_user
+                ? `（当前猜测: ${r.relationship_to_user}，未确认）`
                 : '（关系待定）';
             ctx += `- ${r.name}${hint}\n`;
         }
@@ -561,15 +561,15 @@ async function runScribe(messages, since) {
         : mainText;
 
     // 已有记忆去重参考：对 {user} 的消息跑 Librarian 检索，注入已有碎片供 Scribe 比对
-    let dracoMemoryContext = '（记忆库中暂无相关记录。）';
+    let companionMemoryContext = '（记忆库中暂无相关记录。）';
     try {
-        const claraMsgs = messages.filter(m => m.sender === 'user');
-        if (claraMsgs.length > 0) {
-            const claraText = claraMsgs.map(m => dec(m).slice(0, 300)).join(' ').slice(0, 1000);
+        const userMsgs = messages.filter(m => m.sender === 'user');
+        if (userMsgs.length > 0) {
+            const userText = userMsgs.map(m => dec(m).slice(0, 300)).join(' ').slice(0, 1000);
             const { searchHybrid } = require('./librarian');
-            const retrieved = await searchHybrid(claraText, 15);
+            const retrieved = await searchHybrid(userText, 15);
             if (retrieved.length > 0) {
-                dracoMemoryContext = retrieved.map((f, i) => {
+                companionMemoryContext = retrieved.map((f, i) => {
                     const dateLabel = f.source_date || f.date_label || '';
                     const entity = f.entity || '?';
                     const type = f.type || f._table || '?';
@@ -621,7 +621,7 @@ async function runScribe(messages, since) {
     const systemPrompt = sanitizeForJSON(fillPrompt(SCRIBE_SYSTEM_PROMPT)
         .replace('{KNOWN_ENTITIES}', knownEntities)
         .replace('{ENTITY_RELATION_CONTEXT}', entityRelationContext)
-        .replace('{DRACO_MEMORY_CONTEXT}', dracoMemoryContext)
+        .replace('{COMPANION_MEMORY_CONTEXT}', companionMemoryContext)
         .replace('{CORRECTION_LESSONS}', correctionLessons)
         .replace('{OPEN_INTENTIONS}', openIntentions));
 

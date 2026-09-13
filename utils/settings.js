@@ -39,7 +39,7 @@ const setUserSetting = async (key, value) => {
             DO UPDATE SET setting_value = ?, updated_at = CURRENT_TIMESTAMP
         `).run(key, value, value);
         
-        if (key !== 'draco_state_snapshot') {
+        if (key !== 'companion_state_snapshot') {
             console.log(`✅ 设置已更新: ${key} = ${value}`);
         }
     } catch (error) {

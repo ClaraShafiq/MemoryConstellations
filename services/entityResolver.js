@@ -411,7 +411,7 @@ async function resolveEntityIds(fragmentIds, conversationText) {
             SELECT COUNT(*) as c FROM entity_profiles ep
             WHERE ep.category = 'person'
               AND ep.name NOT IN ('${USER.name}', '${AI.name}')
-              AND (ep.relationship_to_clara IS NULL OR ep.relationship_to_clara = '')
+              AND (ep.relationship_to_user IS NULL OR ep.relationship_to_user = '')
               AND (SELECT COUNT(*) FROM memory_fragments WHERE entity_id = ep.id AND status = 'active') >= 5
         `).get();
 

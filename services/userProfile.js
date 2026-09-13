@@ -42,7 +42,7 @@ function assembleProfile(maxTokens = 500) {
     const entries = db.prepare(`
         SELECT id, type, content, tags, confidence, source_quality,
                evidence_count, last_evidence_at, created_at
-        FROM clara_model
+        FROM user_model
         WHERE status = 'active'
           AND type IN ('stable_trait', 'immutable_fact')
           AND confidence >= 0.5
@@ -132,7 +132,7 @@ function assembleProfileJSON() {
     const entries = db.prepare(`
         SELECT id, type, content, tags, confidence, source_quality,
                evidence_count, last_evidence_at, created_at, updated_at
-        FROM clara_model
+        FROM user_model
         WHERE status = 'active'
           AND type IN ('stable_trait', 'immutable_fact')
         ORDER BY priority DESC, confidence DESC, created_at

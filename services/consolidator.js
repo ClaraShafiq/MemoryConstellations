@@ -452,9 +452,9 @@ async function detectContradictions(consolidatedResult) {
         const result = JSON.parse(clean);
 
         if (result.contradictions?.length > 0) {
-            // 记录到 draco_inner_log
+            // 记录到 companion_inner_log
             const insertLog = db.prepare(`
-                INSERT INTO draco_inner_log (timestamp, decision_type, intent, observation, reason, tick_id)
+                INSERT INTO companion_inner_log (timestamp, decision_type, intent, observation, reason, tick_id)
                 VALUES (datetime('now'), 'contradiction_found', ?, ?, ?, 'consolidator')
             `);
             for (const c of result.contradictions) {
@@ -464,17 +464,17 @@ async function detectContradictions(consolidatedResult) {
                     c.description
                 );
 
-                // Wire contradiction to clara_model — find matching entries
+                // Wire contradiction to user_model — find matching entries
                 try {
                     const { addEvidence: cmAddEvidence } = require('./cognitiveModel');
-                    // Find clara_model entries referencing the existing memory's entities
+                    // Find user_model entries referencing the existing memory's entities
                     const existingMem = db.prepare('SELECT content, source_msg_ids FROM memories WHERE id = ?').get(c.existing_memory_id);
                     if (existingMem) {
                         // Get fragments from the consolidated result to use as evidence source
                         const fragIds = consolidatedResult.fragmentIds || [];
-                        // Find clara_model entries that share entity overlap with the existing memory
+                        // Find user_model entries that share entity overlap with the existing memory
                         const cmEntries = db.prepare(`
-                            SELECT id FROM clara_model WHERE status = 'active'
+                            SELECT id FROM user_model WHERE status = 'active'
                             AND content LIKE '%' || ? || '%'
                             LIMIT 5
                         `).all(newContent.slice(0, 40));
@@ -486,7 +486,7 @@ async function detectContradictions(consolidatedResult) {
                         for (const ent of entityNames.slice(0, 3)) {
                             // Match entity ID in the JSON array: entity_ids LIKE '%"<id>"%' or '[<id>,'
                             const byEntity = db.prepare(`
-                                SELECT id FROM clara_model WHERE status = 'active'
+                                SELECT id FROM user_model WHERE status = 'active'
                                 AND (content LIKE '%' || ? || '%'
                                      OR entity_ids LIKE '%' || ? || '%')
                                 LIMIT 3
@@ -505,12 +505,12 @@ async function detectContradictions(consolidatedResult) {
                                     try { return JSON.parse(existingMem.source_msg_ids || '[]'); } catch { return []; }
                                 })();
                                 cmAddEvidence(entry.id, fragIds[0], false, { sourceMsgIds: msgIds });
-                                console.log(`[Consolidator] 矛盾已注入 clara_model #${entry.id}: ${c.description?.slice(0, 60)}`);
+                                console.log(`[Consolidator] 矛盾已注入 user_model #${entry.id}: ${c.description?.slice(0, 60)}`);
                             }
                         }
                     }
                 } catch (e) {
-                    console.error('[Consolidator] 矛盾注入clara_model失败:', e.message);
+                    console.error('[Consolidator] 矛盾注入user_model失败:', e.message);
                 }
 
                 console.log(`[Consolidator] 矛盾检测: 新记忆#${consolidatedResult.memoryId} vs 已有#${c.existing_memory_id}: ${c.description}`);
@@ -912,7 +912,7 @@ async function consolidateFlash(highEWFragments, windowMsgIds) {
     // 写入 inner_log
     try {
         db.prepare(`
-            INSERT INTO draco_inner_log (timestamp, decision_type, intent, observation, reason)
+            INSERT INTO companion_inner_log (timestamp, decision_type, intent, observation, reason)
             VALUES (datetime('now'), 'flash_consolidation', 'memory_integration', ?, ?)
         `).run(
             `Flash整合：${highEWFragments.length}条高EW碎片 → episode #${result.memoryId}`,

@@ -2,7 +2,7 @@
 // memoryConfig — 记忆子系统配置加载器
 //
 // 读取 memory_config.json，提供 {{user.name}} 等模板变量替换。
-// 所有硬编码的 Clara/Draco 引用应通过此模块获取，而不是直接写字符串。
+// 所有硬编码的人名引用应通过此模块获取，而不是直接写字符串。
 //
 // 消费端用法:
 //   const { USER, AI, REL, PROJ, fillTemplate } = require('./memoryConfig');

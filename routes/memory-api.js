@@ -275,7 +275,7 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
         const entities = db.prepare(`
             SELECT ep.id, ep.name, ep.category, ep.subcategory, ep.overview, ep.fragment_count,
                    ep.related_entities, ep.current_status, ep.status as lifecycle_status,
-                   ep.updated_at, ep.created_at, ep.relationship_to_clara, ep.aliases, ep.tags,
+                   ep.updated_at, ep.created_at, ep.relationship_to_user, ep.aliases, ep.tags,
                    ep.entity_type
             FROM entity_profiles ep
             WHERE ep.status = 'active' AND ep.fragment_count > 0
@@ -285,7 +285,7 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
                 ep.fragment_count DESC
         `).all();
 
-        // 子分类派生：从 entity_type + relationship_to_clara 提取，不再靠 LLM 猜
+        // 子分类派生：从 entity_type + relationship_to_user 提取，不再靠 LLM 猜
         function deriveSubcategory(ent) {
             // pet 直接按 category
             if (ent.category === 'pet') return 'pet';
@@ -294,7 +294,7 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
                 const et = ent.entity_type || '';
                 if (et === 'public_figure') return 'celebrity';
                 if (et === 'fictional_character') return 'fictional';
-                const rel = (ent.relationship_to_clara || '').toLowerCase();
+                const rel = (ent.relationship_to_user || '').toLowerCase();
                 if (/母亲|父亲|妈妈|爸爸|女儿|儿子|家人|亲戚|家属/.test(rel)) return 'family';
                 if (/朋友|好友|闺蜜|死党|伙伴|老朋友/.test(rel)) return 'friend';
                 if (/网友|线上|群友|小红书.*认识/.test(rel)) return 'online';
@@ -318,7 +318,7 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
             name: ent.name,
             overview: ent.overview || '',
             fragment_count: ent.fragment_count,
-            relationship: ent.relationship_to_clara || '',
+            relationship: ent.relationship_to_user || '',
             currentStatus: ent.current_status || '',
             updatedAt: ent.updated_at,
             color: ent.name === USER.name ? UI.user_color : UI.ai_color,
@@ -421,19 +421,19 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
                 lifecycleStatus: ent.lifecycle_status,
                 coolingCount,
                 relatedEntities: safeJsonParse(ent.related_entities) || [],
-                relationship: ent.relationship_to_clara || '',
+                relationship: ent.relationship_to_user || '',
                 currentStatus: ent.current_status || '',
                 updatedAt: ent.updated_at,
                 createdAt: ent.created_at,
             };
         });
 
-        // ── Clara Model 认知模型 ──
+        // ── User Model 认知模型 ──
         const cognitiveModel = db.prepare(`
             SELECT id, type, content, confidence, evidence_count,
                    decay_type, status, last_evidence_at, created_at, decay_params, tags, priority,
                    created_by, expires_at
-            FROM clara_model
+            FROM user_model
             WHERE status = 'active'
             ORDER BY
                 CASE type
@@ -452,7 +452,7 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
         const archlog = db.prepare(`
             SELECT created_at AS time, action, category_path, detail, status
             FROM ontology_changelog
-            WHERE action != 'merge_proposal'  -- 提案有独立的「Draco的疑问」面板
+            WHERE action != 'merge_proposal'  -- 提案有独立的「AI的疑问」面板
             ORDER BY created_at DESC LIMIT 15
         `).all().map(r => {
             const detail = safeJsonParse(r.detail);
@@ -536,7 +536,7 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
             };
         });
 
-        // ── 待确认合并提案（Draco 提案，Clara 裁决）──
+        // ── 待确认合并提案（AI 提案，用户裁决）──
         const mergeProposals = db.prepare(`
             SELECT id, category_path, detail, created_at
             FROM ontology_changelog
@@ -547,7 +547,7 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
         // ── v5.2: Patterns (accumulated behavioral observations) ──
         const patterns = db.prepare(`
             SELECT id, content, category, evidence_count, first_seen, last_seen, confidence, status, tags
-            FROM clara_patterns WHERE status = 'active'
+            FROM user_patterns WHERE status = 'active'
             ORDER BY confidence DESC
         `).all().map(p => ({
             ...p,
@@ -605,7 +605,7 @@ router.get('/api/memory/:id', requireAuth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
-// v4.8: 合并提案裁决 — Clara 人工确认/拒绝
+// v4.8: 合并提案裁决 — 用户人工确认/拒绝
 // POST /api/memory/merge-proposal/:id  body: { decision: 'approve' | 'reject' }
 // ═══════════════════════════════════════════════════════
 
@@ -648,14 +648,14 @@ router.post('/api/memory/merge-proposal/:id', requireAuth, (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
-// v5.0: 核心洞察 — Clara 手动编辑
+// v5.0: 核心洞察 — 用户手动编辑
 // ═══════════════════════════════════════════════════════
 
 router.get('/api/memory/core-insight', requireAuth, async (req, res) => {
     try {
         const { getUserSetting } = require('../utils/settings');
-        const insight = await getUserSetting('clara_core_insight') || '';
-        const updatedAt = await getUserSetting('clara_core_insight_updated_at') || '';
+        const insight = await getUserSetting('user_core_insight') || '';
+        const updatedAt = await getUserSetting('user_core_insight_updated_at') || '';
         res.json({ ok: true, insight, updated_at: updatedAt });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -668,16 +668,16 @@ router.post('/api/memory/core-insight', requireAuth, async (req, res) => {
         if (typeof insight !== 'string') return res.status(400).json({ error: 'insight required' });
         const { getUserSetting, setUserSetting } = require('../utils/settings');
         // Archive current version
-        const current = await getUserSetting('clara_core_insight');
+        const current = await getUserSetting('user_core_insight');
         let history = [];
-        try { history = JSON.parse(await getUserSetting('clara_core_insight_history') || '[]'); } catch (_) {}
+        try { history = JSON.parse(await getUserSetting('user_core_insight_history') || '[]'); } catch (_) {}
         if (current && current !== insight) {
-            history.push({ content: current, archived_at: new Date().toISOString(), source: 'clara_manual' });
+            history.push({ content: current, archived_at: new Date().toISOString(), source: 'user_manual' });
             if (history.length > 5) history = history.slice(-5);
         }
-        await setUserSetting('clara_core_insight', insight);
-        await setUserSetting('clara_core_insight_history', JSON.stringify(history));
-        await setUserSetting('clara_core_insight_updated_at', new Date().toISOString());
+        await setUserSetting('user_core_insight', insight);
+        await setUserSetting('user_core_insight_history', JSON.stringify(history));
+        await setUserSetting('user_core_insight_updated_at', new Date().toISOString());
         res.json({ ok: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -1524,10 +1524,10 @@ router.get('/api/archivist/status', requireAuth, (req, res) => {
         `).get();
 
         const recentEntities = db.prepare(`
-            SELECT id, name, relationship_to_clara, relationship_confidence
+            SELECT id, name, relationship_to_user, relationship_confidence
             FROM entity_profiles
             WHERE category = 'person'
-              AND relationship_to_clara IS NOT NULL
+              AND relationship_to_user IS NOT NULL
             ORDER BY
                 CASE WHEN relationship_confidence = 'high' THEN 0 ELSE 1 END,
                 last_evaluated_at DESC
@@ -1543,7 +1543,7 @@ router.get('/api/archivist/status', requireAuth, (req, res) => {
         const totalFrags = db.prepare("SELECT COUNT(*) as c FROM memory_fragments WHERE status = 'active'").get();
         const classified = db.prepare("SELECT COUNT(DISTINCT fragment_id) as c FROM fragment_categories").get();
         const insighted = db.prepare("SELECT COUNT(*) as c FROM memory_fragments WHERE status = 'active' AND insight IS NOT NULL").get();
-        const entitiesWithRel = db.prepare("SELECT COUNT(*) as c FROM entity_profiles WHERE category = 'person' AND relationship_to_clara IS NOT NULL").get();
+        const entitiesWithRel = db.prepare("SELECT COUNT(*) as c FROM entity_profiles WHERE category = 'person' AND relationship_to_user IS NOT NULL").get();
 
         const whisper = getLastWhisper();
 
@@ -1571,15 +1571,15 @@ router.get('/api/archivist/status', requireAuth, (req, res) => {
 router.put('/api/entity/:id', requireAuth, (req, res) => {
     const db = getDb();
     try {
-        const { relationship_to_clara, relationship_confidence } = req.body;
-        if (!relationship_to_clara && !relationship_confidence) {
+        const { relationship_to_user, relationship_confidence } = req.body;
+        if (!relationship_to_user && !relationship_confidence) {
             return res.status(400).json({ error: 'No fields to update' });
         }
         const updates = [];
         const params = [];
-        if (relationship_to_clara !== undefined) {
-            updates.push("relationship_to_clara = ?");
-            params.push(relationship_to_clara);
+        if (relationship_to_user !== undefined) {
+            updates.push("relationship_to_user = ?");
+            params.push(relationship_to_user);
         }
         if (relationship_confidence !== undefined) {
             const valid = ['high','medium','low'];

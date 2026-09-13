@@ -263,8 +263,8 @@ const browseMemories = {
         if (entityProfile.facts) {
           output += `${entityProfile.facts}\n`;
         } else {
-          if (entityProfile.relationship_to_clara) {
-            output += `${entityProfile.name}是User的${entityProfile.relationship_to_clara}`;
+          if (entityProfile.relationship_to_user) {
+            output += `${entityProfile.name}是User的${entityProfile.relationship_to_user}`;
             if (entityProfile.relationship_nature) {
               const natureLabels = { close: '关系紧密', conflicted: '存在冲突', complex: '关系复杂', distant: '比较疏远', dependent: 'User依赖对方' };
               output += `，${natureLabels[entityProfile.relationship_nature] || entityProfile.relationship_nature}`;

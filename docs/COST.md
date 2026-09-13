@@ -9,7 +9,7 @@
 | Deep cycle (classify/rematch/graduate) | ~15 | flash-lite | ~$0.03 |
 | Snitch/news bots | ~5 | flash-lite | ~$0.01 |
 | Music/book extraction | ~3 | flash-lite | ~$0.01 |
-| Clara Model (read/validate/detect) | ~5 | flash-lite | ~$0.02 |
+| User Model (read/validate/detect) | ~5 | flash-lite | ~$0.02 |
 | Seed merge & emergence | ~3 | flash-lite | ~$0.01 |
 | **Total** | **~80** | | **~$0.22/day** |
 

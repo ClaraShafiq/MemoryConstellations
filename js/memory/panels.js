@@ -358,7 +358,7 @@ export function renderArchlog() {
 }
 
 // ── User 认知模型 ──
-// immutable_fact v4.8 退役。stable_trait/active_hypothesis v5.2 退役，由 clara_patterns 替代。
+// immutable_fact v4.8 退役。stable_trait/active_hypothesis v5.2 退役，由 user_patterns 替代。
 const MODEL_LAYERS = [
     { type: 'current_state', label: '● 当前状态', cls: 'state' },
     { type: 'pattern', label: '◇ 观察模式', cls: 'pat' },
@@ -366,7 +366,7 @@ const MODEL_LAYERS = [
 
 export function renderModelPanel() {
     const counts = {};
-    universe.claraModel.forEach(e => counts[e.type] = (counts[e.type] || 0) + 1);
+    universe.userModel.forEach(e => counts[e.type] = (counts[e.type] || 0) + 1);
     const patCount = (universe.patterns || []).filter(p => p.status === 'active').length;
     counts['pattern'] = patCount;
     $('mp-body').innerHTML = MODEL_LAYERS.map(l => `
@@ -392,7 +392,7 @@ function showModelDetail(filterType) {
 
     // ── Current State ──
     if (!filterType || filterType === 'current_state') {
-        const states = universe.claraModel.filter(e => e.type === 'current_state');
+        const states = universe.userModel.filter(e => e.type === 'current_state');
         html += `<div class="md-section"><div class="md-section-title">● 当前状态 (${states.length})</div>`;
         if (!states.length) html += '<div class="md-empty">暂无</div>';
         else states.forEach(e => {
@@ -406,7 +406,7 @@ function showModelDetail(filterType) {
                     extra = `<span class="md-ttl">${remainText}</span>`;
                 }
             }
-            if (e.created_by === 'chat_draco') extra += '<span class="md-source">🖊️ AI</span>';
+            if (e.created_by === 'chat_companion') extra += '<span class="md-source">🖊️ AI</span>';
             else if (e.created_by === 'deep_cycle') extra += '<span class="md-source">🌙 深循环</span>';
             html += `<div class="md-row"><span class="mdot mp-dot-s state"></span><span style="flex:1">${esc(e.content)}</span>${extra}</div>`;
         });
@@ -578,7 +578,7 @@ async function loadPipelineStatus() {
         if (!$('tb-count')) return;
         $('tb-count').textContent = '碎片 ' + (s.fragments?.total || 0).toLocaleString();
         $('tb-entities').textContent = '实体 ' + (s.entities?.total || 0) + (s.entities?.seeds > 0 ? '/' + s.entities.seeds + '种' : '');
-        $('tb-cm').textContent = 'CM ' + (s.claraModel?.total || 0);
+        $('tb-cm').textContent = 'CM ' + (s.userModel?.total || 0);
         if (s.lastScribe) {
             const mins = Math.round((Date.now() - new Date(s.lastScribe + 'Z').getTime()) / 60000);
             $('tb-scribe').textContent = 'Scribe ' + (mins < 60 ? mins + 'min前' : Math.round(mins/60) + 'h前');

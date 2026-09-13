@@ -35,7 +35,7 @@ const ARCHIVIST_VERIFY_CONFIG_ID = 38;  // [心跳]flash — 分类校验/insigh
 
 const TICK_INTERVAL_MS = 2 * 60 * 1000;       // Agent 循环 tick 间隔
 // 从 memory_config.json 读取深循环触发间隔（默认 60 分钟）
-const CLARA_IDLE_DEEP_CYCLE_MS = (() => {
+const USER_IDLE_DEEP_CYCLE_MS = (() => {
     try {
         const cfg = require('../memory_config.json');
         const mins = cfg.rhythm?.deep_cycle_idle_minutes;
@@ -109,8 +109,8 @@ let agentState = {
     inTick: false,
 
     // Companion activity tracking
-    dracoActive: false,
-    dracoLastActive: Date.now(),
+    companionActive: false,
+    companionLastActive: Date.now(),
 
     // User idle → deep cycle trigger
     lastUserMessageTime: 0,
@@ -197,7 +197,7 @@ function listTools() {
 
 function _isCompanionActive() {
     // Use notify flag first (stream.js/proactive.js set this)
-    if (agentState.dracoActive) return true;
+    if (agentState.companionActive) return true;
     // Fallback: check actual scene (catches proactive actions)
     try {
         const stateService = require('./state');
@@ -211,9 +211,9 @@ function _getLastCompanionActivityTime() {
     try {
         const stateService = require('./state');
         const state = stateService.getStateSync();
-        return state ? state.lastActivity : agentState.dracoLastActive;
+        return state ? state.lastActivity : agentState.companionLastActive;
     } catch (_) {
-        return agentState.dracoLastActive;
+        return agentState.companionLastActive;
     }
 }
 
@@ -221,7 +221,7 @@ function _getLastCompanionActivityTime() {
 // Proactive notification: reduces need for state service polling
 function isCompanionActive() {
     // Use the same logic as internal _isCompanionActive
-    if (agentState.dracoActive) return true;
+    if (agentState.companionActive) return true;
     try {
         const stateService = require('./state');
         const scene = stateService.getCompanionScene();
@@ -231,10 +231,10 @@ function isCompanionActive() {
 }
 
 function setCompanionActive(active) {
-    const wasActive = agentState.dracoActive;
-    agentState.dracoActive = active;
+    const wasActive = agentState.companionActive;
+    agentState.companionActive = active;
     if (!active) {
-        agentState.dracoLastActive = Date.now();
+        agentState.companionLastActive = Date.now();
     }
     if (wasActive && !active) {
         console.log('[Archivist Agent] Companion 回复结束，恢复全速');
@@ -244,7 +244,7 @@ function setCompanionActive(active) {
 async function start() {
     if (agentState.running) return;
     agentState.running = true;
-    agentState.dracoLastActive = Date.now();
+    agentState.companionLastActive = Date.now();
 
     console.log('[Archivist Agent] 启动 — Agent 循环 (2min tick) + 事件驱动 + Companion 感知');
 
@@ -269,7 +269,7 @@ function stop() {
 function getStatus() {
     return {
         running: agentState.running,
-        dracoActive: agentState.dracoActive,
+        companionActive: agentState.companionActive,
         inTick: agentState.inTick,
         dailyLLMCalls: agentState.dailyLLMCalls,
         totalClassified: agentState.totalClassified,
@@ -397,7 +397,7 @@ async function agentTick() {
         }
 
         const userIdleMs = Date.now() - lastUserTime;
-        const shouldDeepCycle = userIdleMs >= CLARA_IDLE_DEEP_CYCLE_MS
+        const shouldDeepCycle = userIdleMs >= USER_IDLE_DEEP_CYCLE_MS
                              && !agentState.deepCycleSinceLastUserMsg;
 
         // 1. Assess tree health
@@ -449,7 +449,7 @@ async function agentTick() {
         }, MIN_GAP_BOOK_EXTRACT);
 
         // 5d. Lightweight evidence matching — zero LLM + zero ChromaDB
-        // Matches new fragments against clara_model entries via keyword overlap
+        // Matches new fragments against user_model entries via keyword overlap
         if (newFragCount > 0) {
             try {
                 matchEvidenceFromFragments();
@@ -748,12 +748,12 @@ async function assessTreeHealth() {
     // Entity overviews needing update
     const staleEntityOverviews = _countStaleEntityOverviews(db);
 
-    // Missing relationships (entities without relationship_to_clara, with enough fragments)
+    // Missing relationships (entities without relationship_to_user, with enough fragments)
     const missingRelations = db.prepare(`
         SELECT COUNT(*) as c FROM entity_profiles ep
         WHERE ep.category = 'person'
           AND ep.name NOT IN (${SKIP_PH})
-          AND (ep.relationship_to_clara IS NULL OR ep.relationship_to_clara = '')
+          AND (ep.relationship_to_user IS NULL OR ep.relationship_to_user = '')
           AND (SELECT COUNT(*) FROM memory_fragments WHERE entity_id = ep.id AND status = 'active') >= ?
     `).get(...SKIP_NAMES, ENTITY_DISCOVERY_MIN_FRAGS)?.c || 0;
 
@@ -852,7 +852,7 @@ function _checkDailyLLMReset() {
 }
 
 function _canCallLLM(count = 1) {
-    const maxPerTick = agentState.dracoActive ? MAX_LLM_PER_TICK_ACTIVE : MAX_LLM_PER_TICK_IDLE;
+    const maxPerTick = agentState.companionActive ? MAX_LLM_PER_TICK_ACTIVE : MAX_LLM_PER_TICK_IDLE;
     if (agentState.tickLLMCalls + count > maxPerTick) return false;
     if (agentState.dailyLLMCalls + count > MAX_DAILY_LLM_CALLS) {
         console.warn(`[Archivist Agent] ⚠️ 日 LLM 调用达上限 (${MAX_DAILY_LLM_CALLS})，跳过本 tick 剩余任务`);
@@ -862,7 +862,7 @@ function _canCallLLM(count = 1) {
 }
 
 function _countRemainingLLM() {
-    const maxPerTick = agentState.dracoActive ? MAX_LLM_PER_TICK_ACTIVE : MAX_LLM_PER_TICK_IDLE;
+    const maxPerTick = agentState.companionActive ? MAX_LLM_PER_TICK_ACTIVE : MAX_LLM_PER_TICK_IDLE;
     const tickRemaining = Math.max(0, maxPerTick - agentState.tickLLMCalls);
     const dailyRemaining = Math.max(0, MAX_DAILY_LLM_CALLS - agentState.dailyLLMCalls);
     return Math.min(tickRemaining, dailyRemaining);
@@ -1345,7 +1345,7 @@ async function classifyFragments(opts = {}) {
                         assignment.frag_id, assignment.entity_id,
                         assignment.relation || null,
                         assignment.confidence || 0.70,
-                        'draco_flash'
+                        'companion_flash'
                     );
                     if (info.changes > 0) written++;
 
@@ -1415,7 +1415,7 @@ async function classifyFragments(opts = {}) {
                                 VALUES (?, ?, 'seed', ?)`).run(seed.name, seed.category || 'term', JSON.stringify([]));
                             // Link the fragment that triggered this seed
                             if (seed.trigger_frag_id) {
-                                insertFe.run(seed.trigger_frag_id, r.lastInsertRowid, null, 0.50, 'draco_flash_seed');
+                                insertFe.run(seed.trigger_frag_id, r.lastInsertRowid, null, 0.50, 'companion_flash_seed');
                                 db.prepare(`UPDATE entity_profiles SET fragment_count = 1 WHERE id = ?`).run(r.lastInsertRowid);
                             }
                             console.log(`[Archivist] 🌱 种入苗圃: ${seed.name} (${seed.category})`);
@@ -1736,7 +1736,7 @@ async function rematchFragmentsForSeeds() {
             const writeBatch = db.transaction(() => {
                 for (const item of items) {
                     if (item.match === true && item.frag_id && item.seed_id) {
-                        const r = insertFe.run(item.frag_id, item.seed_id, 'draco_rematch');
+                        const r = insertFe.run(item.frag_id, item.seed_id, 'companion_rematch');
                         if (r.changes > 0) batchRematched++;
                     }
                 }
@@ -2251,7 +2251,7 @@ function executeEntityMerge(survivorId, victimId) {
 // v4.8: refreshIntuitionStopwords — 直觉触发词去高频
 //
 // 统计近30天 User 消息的 top-N 高频词（2-4字滑窗），存
-// user_settings.intuition_stopwords。claraIntuition 匹配时跳过
+// user_settings.intuition_stopwords。intuition 匹配时跳过
 // 这些词——否则「代码/界面/开源」这类日常词让直觉永远全量激活。
 // 纯 SQL + 字符统计，零 LLM。
 // ═══════════════════════════════════════════════════════
@@ -3126,7 +3126,7 @@ function _bigramOverlap(textA, textB) {
 // ── Freshness-based状态刷新（每2min）──
 function refreshPatternStates() {
     const db = getDb();
-    const allPatterns = db.prepare("SELECT * FROM clara_patterns WHERE status IN ('active','dormant','superseded')").all();
+    const allPatterns = db.prepare("SELECT * FROM user_patterns WHERE status IN ('active','dormant','superseded')").all();
     let changed = 0, dormantCount = 0, archivedCount = 0;
 
     for (const p of allPatterns) {
@@ -3150,7 +3150,7 @@ function refreshPatternStates() {
             }
 
             if (newStatus !== p.status) {
-                db.prepare("UPDATE clara_patterns SET status=?, updated_at=datetime('now') WHERE id=?")
+                db.prepare("UPDATE user_patterns SET status=?, updated_at=datetime('now') WHERE id=?")
                     .run(newStatus, p.id);
                 changed++;
             }
@@ -3185,14 +3185,14 @@ async function maintainPatterns() {
 
     // 收集已有pattern的碎片ID（含dormant和superseded，含archived）
     const existingFragIds = new Set();
-    db.prepare("SELECT source_fragment_ids FROM clara_patterns WHERE status IN ('active','dormant','superseded')").all()
+    db.prepare("SELECT source_fragment_ids FROM user_patterns WHERE status IN ('active','dormant','superseded')").all()
         .forEach(p => { try { JSON.parse(p.source_fragment_ids || '[]').forEach(id => existingFragIds.add(id)); } catch(_) {} });
 
     const newFrags = recentFrags.filter(f => !existingFragIds.has(f.id));
     if (newFrags.length < MIN_PATTERN_FRAGS) return { matched: 0, reason: `only ${newFrags.length} unmatched` };
 
     // 2. 匹配到所有非archived pattern（含 dormant + superseded）
-    const existingPatterns = db.prepare("SELECT * FROM clara_patterns WHERE status != 'archived' ORDER BY evidence_count DESC").all();
+    const existingPatterns = db.prepare("SELECT * FROM user_patterns WHERE status != 'archived' ORDER BY evidence_count DESC").all();
     let matchedCount = 0, revivedCount = 0, supersededCount = 0;
     const mergeCandidates = []; // {patternA_id, patternB_id, overlap}
 
@@ -3214,7 +3214,7 @@ async function maintainPatterns() {
             if (hasNegation) {
                 const contrCount = (bestMatch.contradiction_count || 0) + 1;
                 const newStatus = contrCount >= PATTERN_CONTRADICT_THRESHOLD ? bestMatch.status : bestMatch.status;
-                db.prepare(`UPDATE clara_patterns SET contradiction_count=?, status=?,
+                db.prepare(`UPDATE user_patterns SET contradiction_count=?, status=?,
                     last_seen=?, updated_at=datetime('now') WHERE id=?`)
                     .run(contrCount, newStatus, frag.source_date, bestMatch.id);
                 matchedCount++;
@@ -3224,7 +3224,7 @@ async function maintainPatterns() {
             // 漂移检测：碎片有时态信号 → 旧pattern标记superseded
             const isDrift = _detectDrift(frag.content);
             if (isDrift && bestMatch.status !== 'superseded') {
-                db.prepare(`UPDATE clara_patterns SET status='superseded', last_seen=?,
+                db.prepare(`UPDATE user_patterns SET status='superseded', last_seen=?,
                     updated_at=datetime('now') WHERE id=?`).run(frag.source_date, bestMatch.id);
                 supersededCount++;
                 // 碎片不进旧pattern的证据链——它将是新pattern的种子
@@ -3240,7 +3240,7 @@ async function maintainPatterns() {
                 const newLast = frag.source_date > (bestMatch.last_seen || frag.source_date) ? frag.source_date : bestMatch.last_seen;
                 const newConf = _calcPatternConfidence(newCount, newFirst, newLast);
                 const wasDormantOrSuperseded = bestMatch.status === 'dormant' || bestMatch.status === 'superseded';
-                db.prepare(`UPDATE clara_patterns SET evidence_count=?, first_seen=?, last_seen=?,
+                db.prepare(`UPDATE user_patterns SET evidence_count=?, first_seen=?, last_seen=?,
                     confidence=?, source_fragment_ids=?, status='active', updated_at=datetime('now') WHERE id=?`)
                     .run(newCount, newFirst, newLast, newConf, JSON.stringify(fragIds), bestMatch.id);
                 matchedCount++;
@@ -3282,7 +3282,7 @@ async function _mergePatterns(db, candidates) {
     // 加载pattern内容
     const allIds = [...new Set(unique.flatMap(c => [c.patternA_id, c.patternB_id]))];
     const patternMap = new Map();
-    db.prepare(`SELECT id, content, evidence_count, first_seen, last_seen, source_fragment_ids FROM clara_patterns WHERE id IN (${allIds.map(()=>'?').join(',')})`).all(...allIds)
+    db.prepare(`SELECT id, content, evidence_count, first_seen, last_seen, source_fragment_ids FROM user_patterns WHERE id IN (${allIds.map(()=>'?').join(',')})`).all(...allIds)
         .forEach(p => patternMap.set(p.id, p));
 
     const prompt = `判断每对行为模式是否在描述同一个底层特质。是 → merge=true。不是 → merge=false。
@@ -3323,11 +3323,11 @@ ${unique.map((c, i) => {
             const newFirst = dates.reduce((a,b) => a<b?a:b, dates[0]);
             const newLast = dates.reduce((a,b) => a>b?a:b, dates[0]);
             const newConf = _calcPatternConfidence(mergedIds.length, newFirst, newLast);
-            db.prepare(`UPDATE clara_patterns SET evidence_count=?, first_seen=?, last_seen=?, confidence=?,
+            db.prepare(`UPDATE user_patterns SET evidence_count=?, first_seen=?, last_seen=?, confidence=?,
                 source_fragment_ids=?, content=CASE WHEN evidence_count<? THEN ? ELSE content END, updated_at=datetime('now') WHERE id=?`)
                 .run(mergedIds.length, newFirst, newLast, newConf, JSON.stringify(mergedIds),
                      sub.evidence_count, main.content, main.id);
-            db.prepare(`UPDATE clara_patterns SET status='merged', updated_at=datetime('now') WHERE id=?`).run(sub.id);
+            db.prepare(`UPDATE user_patterns SET status='merged', updated_at=datetime('now') WHERE id=?`).run(sub.id);
             console.log(`[Archivist] 🔗 模式合并: #${main.id}←#${sub.id} "${main.content.slice(0,40)}"`);
         }
     } catch (e) {
@@ -3630,7 +3630,7 @@ async function regenerateEntityOverviews() {
     // Fetch all entities with fragments
     const entities = db.prepare(`
         SELECT ep.id, ep.name, ep.category, ep.status, ep.subcategory,
-               ep.relationship_to_clara, ep.relationship_nature,
+               ep.relationship_to_user, ep.relationship_nature,
                ep.emotional_significance, ep.facts, ep.overview_updated_at,
                ep.last_eval_frag_count, ep.fragment_count, ep.aliases, ep.tags,
                ep.judgment, ep.current_status, ep.gender
@@ -3762,7 +3762,7 @@ async function regenerateEntityOverviews() {
         if (allItems.length === 0) continue;
 
         const relationshipInfo = [];
-        if (ent.relationship_to_clara) relationshipInfo.push(`关系：${ent.relationship_to_clara}`);
+        if (ent.relationship_to_user) relationshipInfo.push(`关系：${ent.relationship_to_user}`);
         if (ent.relationship_nature) relationshipInfo.push(`关系性质：${ent.relationship_nature}`);
         if (ent.emotional_significance) relationshipInfo.push(`情感意义：${ent.emotional_significance}`);
 
@@ -4360,7 +4360,7 @@ async function discoverEntityRelationships(options = {}) {
         FROM entity_profiles ep
         JOIN memory_fragments mf ON mf.entity_id = ep.id
         WHERE ep.category = 'person'
-          AND (ep.relationship_to_clara IS NULL OR ep.relationship_to_clara = '')
+          AND (ep.relationship_to_user IS NULL OR ep.relationship_to_user = '')
           AND ep.name NOT IN (${SKIP_NAMES.map(() => '?').join(',')})
           AND mf.status = 'active'
         GROUP BY ep.id
@@ -4562,17 +4562,17 @@ ${fragmentTexts}
             const entityType = rel.entity_type || 'unknown';
 
             const existingRel = db.prepare(
-                'SELECT relationship_to_clara, relationship_confidence FROM entity_profiles WHERE id = ?'
+                'SELECT relationship_to_user, relationship_confidence FROM entity_profiles WHERE id = ?'
             ).get(cand.entityProfileId);
 
             // Oscillation guard
-            if (existingRel && existingRel.relationship_to_clara && existingRel.relationship_to_clara !== '') {
+            if (existingRel && existingRel.relationship_to_user && existingRel.relationship_to_user !== '') {
                 const changeCount = db.prepare(
                     'SELECT COUNT(*) as c FROM cognitive_corrections WHERE entity_id = ?'
                 ).get(cand.entityProfileId);
-                if (changeCount.c >= 3 && existingRel.relationship_to_clara !== relText) {
+                if (changeCount.c >= 3 && existingRel.relationship_to_user !== relText) {
                     console.warn(`[Archivist] ⚠️ 关系振荡: ${cand.name} 已被修改 ${changeCount.c} 次，跳过本次变更`);
-                    console.warn(`  当前: ${existingRel.relationship_to_clara} → 拟变更: ${relText}`);
+                    console.warn(`  当前: ${existingRel.relationship_to_user} → 拟变更: ${relText}`);
                     db.prepare("UPDATE entity_profiles SET last_evaluated_at = datetime('now') WHERE id = ?")
                         .run(cand.entityProfileId);
                     // Set entity_id on fragments (no knowledge tree nodes)
@@ -4619,11 +4619,11 @@ ${fragmentTexts}
             }
 
             // Correction detection
-            if (existingRel && existingRel.relationship_to_clara && existingRel.relationship_to_clara !== '' &&
-                existingRel.relationship_to_clara !== relText && relConf === 'high') {
+            if (existingRel && existingRel.relationship_to_user && existingRel.relationship_to_user !== '' &&
+                existingRel.relationship_to_user !== relText && relConf === 'high') {
 
                 const { logCorrection, analyzeMispattern } = require('./cognitiveEvolution');
-                const oldLabel = existingRel.relationship_to_clara;
+                const oldLabel = existingRel.relationship_to_user;
                 const mispattern = await analyzeMispattern(cand.name, oldLabel, relText, fragments);
                 const evidence = fragments.slice(0, 3)
                     .map(f => (f.content || '').substring(0, 120))
@@ -4640,7 +4640,7 @@ ${fragmentTexts}
 
             if (cand.isNew) {
                 const info = db.prepare(`
-                    INSERT INTO entity_profiles (name, category, entity_type, relationship_to_clara, relationship_nature, emotional_significance, relationship_confidence, last_eval_frag_count, last_evaluated_at, first_mentioned_date, last_mentioned_date)
+                    INSERT INTO entity_profiles (name, category, entity_type, relationship_to_user, relationship_nature, emotional_significance, relationship_confidence, last_eval_frag_count, last_evaluated_at, first_mentioned_date, last_mentioned_date)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)
                 `).run(cand.name, cand.category || 'person', entityType, relText, relNature, relEmo, relConf, fragments.length, firstDate, lastDate);
                 cand.entityProfileId = info.lastInsertRowid;
@@ -4650,7 +4650,7 @@ ${fragmentTexts}
             } else {
                 db.prepare(`
                     UPDATE entity_profiles
-                    SET relationship_to_clara = ?, relationship_nature = ?, emotional_significance = ?,
+                    SET relationship_to_user = ?, relationship_nature = ?, emotional_significance = ?,
                         relationship_confidence = ?, last_hypothesis = NULL,
                         entity_type = COALESCE(entity_type, ?),
                         last_eval_frag_count = ?, last_evaluated_at = datetime('now'),
@@ -4700,7 +4700,7 @@ async function extractFragmentInsights(batchSize = INSIGHT_BATCH_MAX) {
     const entityMap = new Map();
     if (entityIds.length > 0) {
         const profiles = db.prepare(`
-            SELECT id, name, relationship_to_clara, emotional_significance
+            SELECT id, name, relationship_to_user, emotional_significance
             FROM entity_profiles WHERE id IN (${entityIds.map(() => '?').join(',')})
         `).all(...entityIds);
         for (const p of profiles) entityMap.set(p.id, p);
@@ -4708,8 +4708,8 @@ async function extractFragmentInsights(batchSize = INSIGHT_BATCH_MAX) {
 
     let entityContext = '';
     for (const [id, ep] of entityMap) {
-        if (ep.relationship_to_clara) {
-            entityContext += `- ${ep.name}: ${ep.relationship_to_clara}`;
+        if (ep.relationship_to_user) {
+            entityContext += `- ${ep.name}: ${ep.relationship_to_user}`;
             if (ep.emotional_significance) entityContext += ` (${ep.emotional_significance})`;
             entityContext += '\n';
         }
@@ -4717,8 +4717,8 @@ async function extractFragmentInsights(batchSize = INSIGHT_BATCH_MAX) {
 
     const fragmentList = fragments.map((f, i) => {
         const ep = f.entity_id ? entityMap.get(f.entity_id) : null;
-        const entityNote = ep && ep.relationship_to_clara
-            ? ` [已知关系: ${ep.name} — ${ep.relationship_to_clara}]`
+        const entityNote = ep && ep.relationship_to_user
+            ? ` [已知关系: ${ep.name} — ${ep.relationship_to_user}]`
             : (f.entity ? ` [涉及: ${f.entity}]` : '');
         return `[${i}] ${f.content}${entityNote}`;
     }).join('\n\n');

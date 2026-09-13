@@ -70,20 +70,8 @@ app.get('/memory.html', requireAuth, (req, res) => {
     user: { name: memoryConfig.user.name, color: memoryConfig.ui.user_color },
     ai:   { name: memoryConfig.ai.name,   color: memoryConfig.ui.ai_color },
   })};</script>`;
-  const namePatch = `<script>document.addEventListener('DOMContentLoaded',()=>{
-    const n=window.MEMORY_UI_CONFIG;
-    if(!n)return;
-    const fix=t=>t.replace(/Draco/g,n.ai.name).replace(/Clara/g,n.user.name);
-    const sub=document.querySelector('.arch-sub');
-    if(sub)sub.textContent=fix(sub.textContent);
-    const title=document.querySelector('.mq-title');
-    if(title)title.textContent=fix(title.textContent);
-    const editor=document.getElementById('ci-editor');
-    if(editor)editor.placeholder=fix(editor.placeholder);
-  });</script>`;
   const injected = html
-    .replace('</head>', `<meta name="csrf-token" content="${csrfToken}">\n${configScript}\n</head>`)
-    .replace('</body>', `${namePatch}\n</body>`);
+    .replace('</head>', `<meta name="csrf-token" content="${csrfToken}">\n${configScript}\n</head>`);
   res.type('html').send(injected);
 });
 
