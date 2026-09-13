@@ -322,8 +322,6 @@ Memory pipeline only, excluding your chat model. Estimates based on an active us
 | File | What |
 |------|------|
 | `OSS_SETUP.md` | Step-by-step deployment guide + AI agent setup script |
-| `TECH_DOCS.md` | System overview, database schema, API reference |
-| `MEMORY_ARCH.md` | Full memory architecture design, cognitive model, lifecycle engine |
 | `docs/COST.md` | Per-model pricing and cost breakdown |
 
 ---
