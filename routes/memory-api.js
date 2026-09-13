@@ -572,8 +572,44 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
     }
 });
 
+// GET /api/memory/pipeline-status — 管线状态总览（memory.html 顶部状态条用）
+router.get('/api/memory/pipeline-status', requireAuth, (req, res) => {
+    try {
+        const db = getDb();
+        const frags = db.prepare(`SELECT COUNT(*) as total,
+            SUM(CASE WHEN value_tags LIKE '%emotional_critical%' THEN 1 ELSE 0 END) as ec,
+            SUM(CASE WHEN value_tags LIKE '%future_hook%' THEN 1 ELSE 0 END) as fh,
+            SUM(CASE WHEN value_tags LIKE '%relationship_signal%' THEN 1 ELSE 0 END) as rs,
+            SUM(CASE WHEN value_tags LIKE '%noise%' THEN 1 ELSE 0 END) as ns
+            FROM memory_fragments WHERE status = 'active'`).get();
+        const entities = db.prepare(`SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN status='seed' THEN 1 ELSE 0 END) as seeds
+            FROM entity_profiles WHERE status IN ('active','seed')`).get();
+        const cm = db.prepare(`SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN type='stable_trait' THEN 1 ELSE 0 END) as traits,
+            SUM(CASE WHEN type='current_state' THEN 1 ELSE 0 END) as states
+            FROM user_model WHERE status='active'`).get();
+        const lastScribe = db.prepare(`SELECT MAX(processed_until) as t FROM scribe_runs WHERE status='done'`).get();
+
+        res.json({
+            fragments: { total: frags.total, ec: frags.ec || 0, fh: frags.fh || 0, rs: frags.rs || 0, ns: frags.ns || 0 },
+            entities: { total: entities.total, seeds: entities.seeds || 0 },
+            userModel: { total: cm.total, traits: cm.traits || 0, states: cm.states || 0 },
+            lastScribe: lastScribe?.t || null,
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // GET /api/memory/:id - 获取单个记忆详情
-router.get('/api/memory/:id', requireAuth, async (req, res) => {
+router.get('/api/memory/:id', requireAuth, async (req, res, next) => {
+    // 具名路由（/api/memory/core-insight 等）注册在这个通配路由之后，
+    // 不挡一下会被它整个吃掉，变成 "Memory not found" 404。
+    if (!/^\d+$/.test(req.params.id)) return next();
+
     const db = getDb();
     const memoryId = req.params.id;
     
