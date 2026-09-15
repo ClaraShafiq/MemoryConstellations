@@ -300,6 +300,19 @@ node scripts/vacuum.js             # 够划算才真的重建
 30 4 * * 0  cd /path/to/app && node scripts/vacuum.js >> logs/vacuum.log 2>&1
 ```
 
+### 6.4 FTS 索引体检 / 重建
+
+检索结果对不上、或者搜旧词还能命中已经删掉的记忆时，跑这个：
+
+```bash
+node scripts/rebuild_fts.js --check   # 先体检
+node scripts/rebuild_fts.js           # 有问题就重建
+```
+
+**为什么不能直接用 FTS5 自带的 `rebuild` 指令**：中文索引是把正文按单字切开展开的（`splitCJK`），而 `rebuild` 会拿内容表的**原文**重新分词——跑一次，单字索引整条失效，而且**一句报错都没有**。
+
+另外，FTS 的 `COUNT(*)` 是量不准的（它会委托到内容表，永远"看起来对"），所以体检看的是 `_docsize` 影子表。`rebuild_fts.js` 已经按这个来做了。
+
 ---
 
 ## 7. 接入聊天机器人（旁路攒记忆）

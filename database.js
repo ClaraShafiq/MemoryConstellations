@@ -484,7 +484,13 @@ function initDatabase() {
         CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
             USING fts5(title, tags_text);
 
-        -- ④ memory_fragments_fts 触发器（content-sync 模式，用 splitCJK 分词）
+        -- ④ memory_fragments_fts 触发器（external content 模式，用 splitCJK 分词）
+        -- ⚠️ external content 表不能用裸 DELETE/UPDATE：
+        --    · 裸 DELETE 只摘行不摘 posting，旧词仍能命中；
+        --    · 裸 UPDATE 是「只加不删」，旧内容的 posting 永远留着；
+        --    · 而且摘除时 SQLite 会拿内容表里的**原文**重新分词，跟我们索进去的
+        --      splitCJK 形态对不上，摘不干净。
+        --    正确做法是用 FTS5 的 'delete' 指令，并把「当初索引进去的值」原样传回去。
         -- 先删后建，确保触发器与源码一致（IF NOT EXISTS 会导致旧版本永久残留）
         DROP TRIGGER IF EXISTS mf_fts_insert;
         CREATE TRIGGER mf_fts_insert
@@ -496,15 +502,17 @@ function initDatabase() {
         DROP TRIGGER IF EXISTS mf_fts_update;
         CREATE TRIGGER mf_fts_update
             AFTER UPDATE ON memory_fragments BEGIN
-                UPDATE memory_fragments_fts
-                SET content = splitCJK(new.content), entity = splitCJK(COALESCE(new.entity, ''))
-                WHERE rowid = new.id;
+                INSERT INTO memory_fragments_fts(memory_fragments_fts, rowid, content, entity)
+                VALUES ('delete', old.id, splitCJK(old.content), splitCJK(COALESCE(old.entity, '')));
+                INSERT INTO memory_fragments_fts(rowid, content, entity)
+                VALUES (new.id, splitCJK(new.content), splitCJK(COALESCE(new.entity, '')));
             END;
 
         DROP TRIGGER IF EXISTS mf_fts_delete;
         CREATE TRIGGER mf_fts_delete
             AFTER DELETE ON memory_fragments BEGIN
-                DELETE FROM memory_fragments_fts WHERE rowid = old.id;
+                INSERT INTO memory_fragments_fts(memory_fragments_fts, rowid, content, entity)
+                VALUES ('delete', old.id, splitCJK(old.content), splitCJK(COALESCE(old.entity, '')));
             END;
 
         -- ⑤ memories_fts 触发器（独立表模式，内联 REPLACE 展开 tags JSON）
@@ -1072,6 +1080,27 @@ function initDatabase() {
 
     // v5.15 命名统一：实际重命名逻辑在 initDatabase 开头执行（必须早于建表），这里只登记版本号
     runMigration(101, 'v5.15: 命名统一', 'SELECT 1');
+
+    // v5.16: FTS 触发器修正——老库的裸 DELETE/UPDATE 触发器让索引「只增不减」，
+    // 搜旧词还能命中已删/已改的碎片。换成 external content 的正确形式。
+    // 换完建议再跑一次 scripts/rebuild_fts.js，把历史积累的幽灵 posting 清掉。
+    runMigration(102, 'v5.16: FTS 触发器修正（external content 正确形式）', `
+        DROP TRIGGER IF EXISTS mf_fts_delete;
+        CREATE TRIGGER mf_fts_delete
+            AFTER DELETE ON memory_fragments BEGIN
+                INSERT INTO memory_fragments_fts(memory_fragments_fts, rowid, content, entity)
+                VALUES ('delete', old.id, splitCJK(old.content), splitCJK(COALESCE(old.entity, '')));
+            END;
+
+        DROP TRIGGER IF EXISTS mf_fts_update;
+        CREATE TRIGGER mf_fts_update
+            AFTER UPDATE ON memory_fragments BEGIN
+                INSERT INTO memory_fragments_fts(memory_fragments_fts, rowid, content, entity)
+                VALUES ('delete', old.id, splitCJK(old.content), splitCJK(COALESCE(old.entity, '')));
+                INSERT INTO memory_fragments_fts(rowid, content, entity)
+                VALUES (new.id, splitCJK(new.content), splitCJK(COALESCE(new.entity, '')));
+            END;
+    `);
 
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {

@@ -6,7 +6,6 @@
 
 require('dotenv').config();
 const { initDatabase } = require('../database');
-const { initSettings } = require('../routes/settings');
 
 let passed = 0;
 let failed = 0;
@@ -39,7 +38,6 @@ async function main() {
     console.log('🧪 Memory Constellations — 记忆管线冒烟测试\n');
 
     initDatabase();
-    initSettings();
     const { getDb } = require('../database');
     const db = getDb();
 
@@ -66,8 +64,11 @@ async function main() {
         if (!fragId) throw new Error('写入失败');
     });
     test('FTS5 索引同步', () => {
-        const r = db.prepare("SELECT content FROM memory_fragments_fts WHERE content MATCH '冒烟测试'").get();
-        if (!r) throw new Error('FTS5 未索引');
+        // 索引侧是 splitCJK 展开的单字形态（中文按单字切），查整串「冒烟测试」永远查不到。
+        // 这里必须按 librarian 的方式查：拆成单字再 OR。
+        const matchStr = [...'冒烟测试'].map(c => `"${c}"`).join(' OR ');
+        const r = db.prepare('SELECT COUNT(*) c FROM memory_fragments_fts WHERE memory_fragments_fts MATCH ?').get(matchStr);
+        if (r.c === 0) throw new Error('FTS5 未索引（单字检索无命中）');
     });
     test('清理测试碎片', () => {
         db.prepare('DELETE FROM memory_fragments WHERE id = ?').run(fragId);
@@ -75,14 +76,35 @@ async function main() {
 
     // ── 3. 实体星系 ──
     console.log('\n── 3. 实体星系 ──');
-    test('entity_profiles 有核心实体', () => {
+    // entity_profiles 不在建表时播种——实体是管线（Scribe / Entity Resolver）跑出来的。
+    // 所以这里自己造两个，验证「能写」以及「碎片↔实体 能挂上」，而不是断言存在预置数据。
+    let coreEntityId = null;
+    let starFragId = null;
+    test('entity_profiles 可写入核心实体', () => {
         const { USER, AI } = require('../services/memoryConfig');
-        const u = db.prepare("SELECT id FROM entity_profiles WHERE name = ?").get(USER.name);
-        const a = db.prepare("SELECT id FROM entity_profiles WHERE name = ?").get(AI.name);
-        if (!u || !a) throw new Error('核心实体缺失');
+        const ins = db.prepare("INSERT OR IGNORE INTO entity_profiles (name, category, aliases, tags) VALUES (?, 'person', '[]', '[]')");
+        ins.run(USER.name);
+        ins.run(AI.name);
+        const u = db.prepare('SELECT id FROM entity_profiles WHERE name = ?').get(USER.name);
+        if (!u) throw new Error('核心实体写入失败');
+        coreEntityId = u.id;
     });
     test('fragment_entities 可写入', () => {
-        const r = db.prepare("INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, confidence, classified_by) VALUES (1, 7, 0.60, 'test')").run();
+        // entity_id 必须用真实存在的 id——写死数字会被外键拒掉
+        const f = db.prepare(`INSERT INTO memory_fragments
+            (type, entity, content, source, source_date, status)
+            VALUES ('event', 'Test', '星系关联冒烟碎片', 'chat', '2026-01-01', 'active')`).run();
+        starFragId = f.lastInsertRowid;
+        db.prepare('INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, confidence, classified_by) VALUES (?, ?, 0.60, ?)')
+            .run(starFragId, coreEntityId, 'smoke_test');
+        const n = db.prepare('SELECT COUNT(*) c FROM fragment_entities WHERE fragment_id = ?').get(starFragId).c;
+        if (n === 0) throw new Error('碎片↔实体关联未写入');
+    });
+    test('清理星系测试数据', () => {
+        if (starFragId) {
+            db.prepare('DELETE FROM fragment_entities WHERE fragment_id = ?').run(starFragId);
+            db.prepare('DELETE FROM memory_fragments WHERE id = ?').run(starFragId);
+        }
     });
 
     // ── 4. User Model ──
@@ -105,7 +127,14 @@ async function main() {
         if (!USER.name || !AI.name) throw new Error('USER/AI 缺失');
     });
     test('source_routing 配置加载', () => {
-        const raw = require('../memory_config.json');
+        // 新克隆的仓库只有 memory_config.example.json（真配置在 .gitignore 里），
+        // memoryConfig 会自动回退到 example——所以这里也照同样的回退来查。
+        let raw;
+        try {
+            raw = require('../memory_config.json');
+        } catch (_) {
+            raw = require('../memory_config.example.json');
+        }
         if (!raw.source_routing || typeof raw.source_routing !== 'object') throw new Error('source_routing 缺失或格式错误');
     });
 
