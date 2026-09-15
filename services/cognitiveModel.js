@@ -16,6 +16,7 @@ const { WORLD_CONTEXT } = require('./worldContext');
 const { fillPrompt, USER, AI } = require('./nameResolver');
 const { encryption } = require('../encryption');
 const { getCompanionPersonaBase } = require('./companionPersona');
+const { sqlNow, sqlTimeAhead, DAY_MS } = require('../utils/time');
 
 // v5.10: 增强版 system prompt — Companion 人格 + User 画像
 // 供 detectNewTraits / readUserRawMessages 等需要深度理解 {{user.name}} 的 LLM 调用使用
@@ -119,7 +120,7 @@ function createEntry(type, content, opts = {}) {
 
     // v5.0: expires_at hard cap — max 90 days from now
     if (expires_at) {
-        const maxExpiry = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
+        const maxExpiry = sqlTimeAhead(90 * DAY_MS);
         if (expires_at > maxExpiry) {
             console.log(`[UserModel] ⚠️ expires_at ${expires_at} exceeds 90d cap, clamping to ${maxExpiry}`);
             expires_at = maxExpiry;
@@ -284,7 +285,7 @@ function addEvidence(id, fragmentId, confirms = true, opts = {}) {
     // ── Confidence adjustment ──
     const newCount = entry.evidence_count + 1;
     let newConfidence = entry.confidence;
-    const now = new Date().toISOString();
+    const now = sqlNow();
 
     // Cap depends on source_quality
     const sourceQuality = entry.source_quality || 'inferred';
@@ -496,7 +497,7 @@ function matchEvidenceFromFragments() {
     }
 
     // Persist state
-    const now = new Date().toISOString();
+    const now = sqlNow();
     db.prepare("INSERT OR REPLACE INTO user_settings (setting_key, setting_value) VALUES (?, ?)")
         .run(lastRunKey, now);
 
@@ -2388,7 +2389,7 @@ action: extend=旧便签还够用，只续命。create=状态变了或上次判�
             try {
                 const { encryption } = require('../encryption');
                 const encNarrative = encryption.encrypt(narrative);
-                const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+                const now = sqlNow();
                 db.prepare(`INSERT INTO chat_summaries (chat_id, summary_text, round_start, round_end, created_at, is_enabled)
                     VALUES (?, ?, 0, 0, ?, 1)`).run(1, encNarrative, now);
                 console.log(`[UserModel] 📝 叙事已归档 (${narrative.length}字)`);
@@ -2988,7 +2989,7 @@ ${cs ? `{{user.pronoun}}当前的状态：${cs.content}` : ''}
 
         await setUserSetting('user_core_insight', insight);
         await setUserSetting('user_core_insight_history', JSON.stringify(history));
-        await setUserSetting('user_core_insight_updated_at', new Date().toISOString());
+        await setUserSetting('user_core_insight_updated_at', sqlNow());
 
         console.log(`[UserModel] 💡 核心洞察已更新 (${insight.length}字): ${insight.slice(0, 80)}...`);
         return { synthesized: true, insight, length: insight.length };
@@ -3046,7 +3047,7 @@ function _computeExpiresAt(category, ttlCategory) {
     const catMap = STATE_TTL_MAP[category] || STATE_TTL_MAP.emotional;
     const hours = catMap[ttlCategory] || DEFAULT_TTL_HOURS;
     if (hours === Infinity) return null;
-    return new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+    return sqlTimeAhead(hours * 60 * 60 * 1000);
 }
 
 /**
@@ -3075,7 +3076,7 @@ function manageCurrentState(content, opts = {}) {
 
     const expiresAt = _computeExpiresAt(category, ttl_category);
     const now = new Date();
-    const nowISO = now.toISOString();
+    const nowISO = sqlNow();
 
     // ── Step 1: Find existing active current_state entries ──
     const activeStates = db.prepare(

@@ -4,6 +4,7 @@
 
 const Database = require('better-sqlite3');
 const { encryption } = require('./encryption');
+const { sqlNow } = require('./utils/time');
 
 let db;
 let _initialized = false;
@@ -16,14 +17,14 @@ function runMigration(version, name, sql, options = {}) {
     try {
         db.exec(sql);
         db.prepare('INSERT OR IGNORE INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)')
-          .run(version, name, new Date().toISOString());
+          .run(version, name, sqlNow());
         if (!options.silent) console.log(`[DB] v${version} ${name} ✓`);
     } catch (e) {
         // "已存在"类错误 = 旧版已手动执行过，记录版本号后跳过
         const isAlreadyExists = /duplicate column|already exists|duplicate key/i.test(e.message);
         if (isAlreadyExists) {
             db.prepare('INSERT OR IGNORE INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)')
-              .run(version, name, new Date().toISOString());
+              .run(version, name, sqlNow());
             if (!options.silent) console.log(`[DB] v${version} ${name} (已存在，标记跳过)`);
         } else {
             console.error(`[DB] v${version} ${name} 失败:`, e.message);
@@ -160,6 +161,29 @@ function initDatabase() {
             request_type TEXT DEFAULT 'message',
             FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE SET NULL
         )`,
+        // memory_fragments 必须在迁移 10-14 之前就存在——
+        // 那几条是给「比迁移 44 更老的库」补字段的 ALTER，新库上应该走「已存在」分支，
+        // 否则会以 no such table 报错、且因为没记录版本号而每次启动都重报一遍。
+        // 这里建的和迁移 44 里的是同一张表（含 v10-v14 追加的全部字段）。
+        `CREATE TABLE IF NOT EXISTS memory_fragments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type TEXT NOT NULL,
+            entity TEXT NOT NULL,
+            content TEXT NOT NULL,
+            emotional_weight REAL DEFAULT 0.5,
+            source TEXT DEFAULT 'chat',
+            source_date TEXT,
+            status TEXT DEFAULT 'active',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            read_count INTEGER DEFAULT 0,
+            last_accessed_at DATETIME,
+            chroma_id TEXT,
+            source_msg_ids TEXT DEFAULT '[]',
+            layer TEXT DEFAULT 'event',
+            lifecycle_updated_at DATETIME,
+            entity_id INTEGER
+        )`,
+
         `CREATE TABLE IF NOT EXISTS user_settings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             setting_key TEXT UNIQUE NOT NULL,
@@ -251,13 +275,9 @@ function initDatabase() {
         db.prepare("INSERT OR IGNORE INTO user_settings (setting_key, setting_value) VALUES ('summary-context-limit', '5')").run();
     } catch (e) { console.error('[DB] 默认设置失败:', e.message); }
 
-    try {
-        const botChannel = db.prepare('SELECT id FROM chats WHERE id = 2').get();
-        if (!botChannel) {
-            db.prepare('INSERT INTO chats (id, name, type) VALUES (2, \'有求必应屋\', \'bot\')').run();
-            console.log('[DB] 已创建Bot频道');
-        }
-    } catch (e) { console.error('[DB] Bot频道创建失败:', e.message); }
+    // 注：原先这里会建一个 chat_id=2 的「Bot 频道」，但 chats 表并没有 type 列，
+    // INSERT 每次都失败并打一行报错；而且本仓库没有任何地方读 chat_id=2
+    // （ingest 的默认频道是 1）。已移除。
 
     // ── CJK 函数（每次注册，幂等） ──
     db.function('splitCJK', (text) => {
@@ -1080,6 +1100,41 @@ function initDatabase() {
 
     // v5.15 命名统一：实际重命名逻辑在 initDatabase 开头执行（必须早于建表），这里只登记版本号
     runMigration(101, 'v5.15: 命名统一', 'SELECT 1');
+
+    // v5.17: 时间格式归一——把历史遗留的 ISO 格式（2026-09-15T13:00:00.000Z）
+    // 统一成 SQLite 的 datetime('now') 格式（2026-09-15 13:00:00）。
+    // 两种格式混在同一列里，字符串比较会在第 11 位按 'T'(0x54) vs ' '(0x20) 分胜负，
+    // 于是同一天的时间被静默当成"更晚"（误差最多一天，且一句报错都没有）。
+    // 写入口已统一走 utils/time.js 的 sqlNow()，这里负责把存量洗一遍。
+    try {
+        const ISO_COLS = [
+            ['user_model', 'expires_at'], ['user_model', 'last_evidence_at'],
+            ['user_model', 'resolved_at'], ['user_model', 'last_contradiction_at'],
+            ['user_model', 'last_triggered_at'], ['user_model', 'created_at'], ['user_model', 'updated_at'],
+            ['memories', 'created_at'], ['memories', 'updated_at'], ['memories', 'last_accessed_at'],
+            ['memory_fragments', 'created_at'], ['memory_fragments', 'lifecycle_updated_at'],
+            ['memory_fragments', 'last_accessed_at'],
+            ['entity_profiles', 'created_at'], ['entity_profiles', 'updated_at'],
+            ['entity_profiles', 'overview_updated_at'], ['entity_profiles', 'last_accessed_at'],
+            ['entity_profiles', 'last_evaluated_at'],
+            ['fragment_entities', 'created_at'],
+            ['companion_inner_log', 'timestamp'],
+            ['schema_version', 'applied_at'],
+        ];
+        let fixed = 0;
+        for (const [t, c] of ISO_COLS) {
+            if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(t)) continue;
+            try {
+                const r = db.prepare(
+                    `UPDATE ${t} SET ${c} = replace(substr(${c}, 1, 19), 'T', ' ') WHERE ${c} LIKE '____-__-__T%'`
+                ).run();
+                fixed += r.changes;
+            } catch (_) { /* 列不存在就跳过 */ }
+        }
+        if (fixed) console.log(`[migration] 时间格式归一: 修正 ${fixed} 处 ISO 格式`);
+    } catch (e) {
+        console.warn('[migration] 时间格式归一非致命错误:', e.message);
+    }
 
     // v5.16: FTS 触发器修正——老库的裸 DELETE/UPDATE 触发器让索引「只增不减」，
     // 搜旧词还能命中已删/已改的碎片。换成 external content 的正确形式。

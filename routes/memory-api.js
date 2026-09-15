@@ -8,6 +8,7 @@ const { encryption } = require('../encryption');
 const { requireAuth } = require('./auth');
 const { getEmbedding, getEmbeddingAPIKey } = require('../services/llm');
 const { chromaDBOperation } = require('../services/memory');
+const { sqlNow } = require('../utils/time');
 
 const router = express.Router();
 
@@ -715,7 +716,7 @@ router.post('/api/memory/core-insight', requireAuth, async (req, res) => {
         }
         await setUserSetting('user_core_insight', insight);
         await setUserSetting('user_core_insight_history', JSON.stringify(history));
-        await setUserSetting('user_core_insight_updated_at', new Date().toISOString());
+        await setUserSetting('user_core_insight_updated_at', sqlNow());
         res.json({ ok: true });
     } catch (e) {
         res.status(500).json({ error: e.message });

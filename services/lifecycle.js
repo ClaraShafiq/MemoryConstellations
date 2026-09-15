@@ -9,6 +9,7 @@ const { getDb } = require('../database');
 const { chromaDBOperation } = require('./memory');
 const { callLLM } = require('./llm');
 const { USER, AI } = require('./nameResolver');
+const { sqlNow, sqlDaysAgo } = require('../utils/time');
 
 const CONFIG = {
     FRAGMENT_COOLING_DAYS: 14,     // 14天无人访问 → 冷却
@@ -27,11 +28,11 @@ const CONFIG = {
 
 async function runFragmentGC() {
     const db = getDb();
-    const now = new Date().toISOString();
+    const now = sqlNow();
     const stats = { cooled: 0, resurrected: 0, frozen: 0, tombstoned: 0 };
 
     // 1. 活跃 → 冷却：14天以上没人看过
-    const coolingCutoff = new Date(Date.now() - CONFIG.FRAGMENT_COOLING_DAYS * 24 * 3600 * 1000).toISOString();
+    const coolingCutoff = sqlDaysAgo(CONFIG.FRAGMENT_COOLING_DAYS);
     const toCool = db.prepare(`
         SELECT id, chroma_id FROM memory_fragments
         WHERE status = 'active'
@@ -59,7 +60,7 @@ async function runFragmentGC() {
     stats.resurrected = resurrected.length;
 
     // 3. 冷却 → 冻结：冷却30天以上 → 删除ChromaDB向量
-    const frozenCutoff = new Date(Date.now() - CONFIG.FRAGMENT_FROZEN_DAYS * 24 * 3600 * 1000).toISOString();
+    const frozenCutoff = sqlDaysAgo(CONFIG.FRAGMENT_FROZEN_DAYS);
     const toFreeze = db.prepare(`
         SELECT id, chroma_id FROM memory_fragments
         WHERE status = 'cooling'
@@ -80,7 +81,7 @@ async function runFragmentGC() {
     stats.frozen = toFreeze.length;
 
     // 4. 冻结 → 墓碑：冻结90天 → 清空内容，仅保留证据链
-    const tombstoneCutoff = new Date(Date.now() - CONFIG.FRAGMENT_TOMBSTONE_DAYS * 24 * 3600 * 1000).toISOString();
+    const tombstoneCutoff = sqlDaysAgo(CONFIG.FRAGMENT_TOMBSTONE_DAYS);
     const toTombstone = db.prepare(`
         SELECT id FROM memory_fragments
         WHERE status = 'frozen'
@@ -107,12 +108,12 @@ async function runFragmentGC() {
 
 async function runEpisodeDecay() {
     const db = getDb();
-    const now = new Date().toISOString();
+    const now = sqlNow();
     const stats = { matured: 0, archived: 0 };
 
     // permanent → mature: 6个月（标准）/ 12个月（flash）
-    const matureCutoff = new Date(Date.now() - CONFIG.EPISODE_MATURE_MONTHS * 30 * 24 * 3600 * 1000).toISOString();
-    const matureFlashCutoff = new Date(Date.now() - CONFIG.EPISODE_MATURE_MONTHS * 2 * 30 * 24 * 3600 * 1000).toISOString();
+    const matureCutoff = sqlDaysAgo((CONFIG.EPISODE_MATURE_MONTHS) * 30);
+    const matureFlashCutoff = sqlDaysAgo(CONFIG.EPISODE_MATURE_MONTHS * 2 * 30);
 
     // 标准 episode
     const toMatureStandard = db.prepare(`
@@ -143,8 +144,8 @@ async function runEpisodeDecay() {
     stats.matured = toMature.length;
 
     // mature → archived: 12个月（标准）/ 24个月（flash）
-    const archiveCutoff = new Date(Date.now() - CONFIG.EPISODE_ARCHIVE_MONTHS * 30 * 24 * 3600 * 1000).toISOString();
-    const archiveFlashCutoff = new Date(Date.now() - CONFIG.EPISODE_ARCHIVE_MONTHS * 2 * 30 * 24 * 3600 * 1000).toISOString();
+    const archiveCutoff = sqlDaysAgo((CONFIG.EPISODE_ARCHIVE_MONTHS) * 30);
+    const archiveFlashCutoff = sqlDaysAgo(CONFIG.EPISODE_ARCHIVE_MONTHS * 2 * 30);
 
     const toArchiveStandard = db.prepare(`
         SELECT id FROM memories
@@ -198,7 +199,7 @@ async function runEntityExtraction() {
     const stats = { extracted: 0, skipped: 0, unchanged: 0 };
 
     // 拿到最近7天的活跃碎片，按实体分组
-    const cutoffDate = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
+    const cutoffDate = sqlDaysAgo(7);
     const frags = db.prepare(`
         SELECT id, entity, content, type, emotional_weight, source_date
         FROM memory_fragments
@@ -263,7 +264,7 @@ async function runEntityExtraction() {
                     stats.unchanged++;
                     continue;
                 }
-                const now = new Date().toISOString();
+                const now = sqlNow();
                 const sourceFragIds = JSON.stringify(fragList.map(f => f.id));
 
                 db.prepare(`
@@ -300,7 +301,7 @@ async function runCorrectionFeedback() {
     const stats = { processed: 0, cascaded: 0 };
 
     // 拿到最近7天内新增的纠正记录
-    const cutoffDate = new Date(Date.now() - CONFIG.CORRECTION_DAYS_LOOKBACK * 24 * 3600 * 1000).toISOString();
+    const cutoffDate = sqlDaysAgo(CONFIG.CORRECTION_DAYS_LOOKBACK);
     const corrections = db.prepare(`
         SELECT * FROM correction_log
         WHERE status = 'active'
@@ -421,7 +422,7 @@ function trackMemoryInjection(chatId, messageId, memoryIds, fragmentIds) {
             message_id: messageId,
             memory_ids: memoryIds || [],
             fragment_ids: fragmentIds || [],
-            injected_at: new Date().toISOString(),
+            injected_at: sqlNow(),
         });
         // 存到 message 的 metadata 或单独表。简便做法：存到 correction_log 边上的一个轻量表
         // 这里先不做独立的 injection 表，避免复杂化。需要时再建。

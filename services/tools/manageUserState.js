@@ -11,6 +11,7 @@
 // 与 recall_memory / browse_memories 共享同一个设置开关
 
 const { getDb } = require('../../database');
+const { sqlNow, sqlTimeAhead, DAY_MS } = require('../../utils/time');
 
 const SETTINGS_KEY = 'tool-memory-search-enabled';
 
@@ -94,7 +95,7 @@ const manageUserState = {
         const db = getDb();
         const action = args.action;
         const now = new Date();
-        const nowISO = now.toISOString();
+        const nowISO = sqlNow();
 
         try {
             // ── set ──
@@ -115,7 +116,7 @@ const manageUserState = {
                 // Hard cap: 90 days from now
                 const maxExpiry = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
                 if (expiresDate > maxExpiry) {
-                    expiresAt = maxExpiry.toISOString();
+                    expiresAt = sqlTimeAhead(90 * DAY_MS);
                 }
 
                 // Don't allow expiry in the past
@@ -212,7 +213,7 @@ const manageUserState = {
                         return { success: false, formatted: 'expires_at 格式不对。' };
                     }
                     const maxExpiry = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
-                    updates.expires_at = expiresDate > maxExpiry ? maxExpiry.toISOString() : args.expires_at;
+                    updates.expires_at = expiresDate > maxExpiry ? sqlTimeAhead(90 * DAY_MS) : args.expires_at;
                 }
 
                 const { updateEntry } = require('../cognitiveModel');
