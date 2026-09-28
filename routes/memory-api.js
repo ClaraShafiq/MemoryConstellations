@@ -9,6 +9,7 @@ const { requireAuth } = require('./auth');
 const { getEmbedding, getEmbeddingAPIKey } = require('../services/llm');
 const { chromaDBOperation } = require('../services/memory');
 const { sqlNow } = require('../utils/time');
+const { validateEndpoint, buildSafeUrl } = require('../utils/ssrf-guard');
 
 const router = express.Router();
 
@@ -983,57 +984,64 @@ router.post('/api/test-embedding', requireAuth, async (req, res) => {
 });
 
 // 保存embedding配置
-router.post('/api/save-embedding-config', requireAuth, (req, res) => {
+router.post('/api/save-embedding-config', requireAuth, async (req, res) => {
     const db = getDb();
     const { api_key, model_name, provider, endpoint } = req.body;
-    
+
     if (!api_key || !model_name) {
-        return res.status(400).json({ 
+        return res.status(400).json({
             success: false,
-            error: '缺少必需参数: api_key 和 model_name' 
+            error: '缺少必需参数: api_key 和 model_name'
         });
     }
-    
+
+    const resolvedEndpoint = endpoint || 'https://generativelanguage.googleapis.com/v1beta';
+    try {
+        await validateEndpoint(resolvedEndpoint);
+    } catch (e) {
+        return res.status(400).json({ success: false, error: e.message });
+    }
+
     try {
         const encryptedKey = encryption.encrypt(api_key);
-        
+
         const existing = db.prepare(`
-            SELECT id FROM api_configs 
+            SELECT id FROM api_configs
             WHERE model_name LIKE '%embedding%'
             AND (provider = 'gemini' OR provider = 'openai_compatible')
             LIMIT 1
         `).get();
-        
+
         if (existing) {
             db.prepare(`
-                UPDATE api_configs 
+                UPDATE api_configs
                 SET api_key = ?, model_name = ?, provider = ?, endpoint = ?
                 WHERE id = ?
             `).run(
-                encryptedKey, model_name, 
-                provider || 'gemini', 
-                endpoint || 'https://generativelanguage.googleapis.com/v1beta',
+                encryptedKey, model_name,
+                provider || 'gemini',
+                resolvedEndpoint,
                 existing.id
             );
             console.log(`已更新embedding配置 (ID: ${existing.id})`);
         } else {
             const result = db.prepare(`
-                INSERT INTO api_configs 
+                INSERT INTO api_configs
                 (name, provider, endpoint, api_key, model_name, is_default, supports_tools)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             `).run(
                 'Embedding API',
                 provider || 'gemini',
-                endpoint || 'https://generativelanguage.googleapis.com/v1beta',
+                resolvedEndpoint,
                 encryptedKey,
                 model_name,
                 0, 0
             );
             console.log(`已创建embedding配置 (ID: ${result.lastInsertRowid})`);
         }
-        
+
         res.json({ success: true, message: '配置保存成功' });
-        
+
     } catch (error) {
         console.error('保存embedding配置失败:', error);
         res.status(500).json({ success: false, error: error.message });
@@ -1081,17 +1089,31 @@ router.post('/api/test-llm', requireAuth, async (req, res) => {
     
     try {
         const testEndpoint = endpoint || 'https://generativelanguage.googleapis.com/v1beta';
-        const url = `${testEndpoint}/models/${model_name}:generateContent?key=${api_key}`;
-        
+
+        let parsedEndpoint;
+        try {
+            parsedEndpoint = await validateEndpoint(testEndpoint);
+        } catch (e) {
+            return res.status(400).json({ success: false, error: e.message });
+        }
+
+        const url = buildSafeUrl(parsedEndpoint, 'models', `${encodeURIComponent(model_name)}:generateContent`);
+        url.searchParams.set('key', api_key);
+
         const response = await fetch(url, {
             method: 'POST',
+            redirect: 'manual',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 contents: [{ parts: [{ text: '测试连接' }] }],
                 generationConfig: { maxOutputTokens: 10 }
             })
         });
-        
+
+        if (response.status >= 300 && response.status < 400) {
+            return res.json({ success: false, error: '检测到跳转，已阻止（不允许重定向到其他地址）' });
+        }
+
         if (response.ok) {
             const data = await response.json();
             if (data.candidates && data.candidates.length > 0) {
@@ -1141,7 +1163,9 @@ router.post('/api/extract-tags', requireAuth, async (req, res) => {
         if (!apiKey) {
             return res.status(500).json({ success: false, error: 'API Key未配置' });
         }
-        
+
+        const validatedEndpoint = await validateEndpoint(endpoint);
+
         const prompt = `从以下文本中提取3-8个关键标签，要求：
 1. 优先提取专有名词、人名、地点、特定概念
 2. 避免虚词和泛化概念（如"重要"、"讨论"、"记忆"）
@@ -1151,18 +1175,24 @@ router.post('/api/extract-tags', requireAuth, async (req, res) => {
 ${title ? `标题: ${title}\n` : ''}内容: ${content}
 
 标签列表：`;
-        
-        const url = `${endpoint}/models/${modelName}:generateContent?key=${apiKey}`;
-        
+
+        const url = buildSafeUrl(validatedEndpoint, 'models', `${encodeURIComponent(modelName)}:generateContent`);
+        url.searchParams.set('key', apiKey);
+
         const response = await fetch(url, {
             method: 'POST',
+            redirect: 'manual',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: { temperature: 0.3, maxOutputTokens: 100 }
             })
         });
-        
+
+        if (response.status >= 300 && response.status < 400) {
+            throw new Error('检测到跳转，已阻止（不允许重定向到其他地址）');
+        }
+
         if (!response.ok) {
             const errorText = await response.text();
             throw new Error(`LLM调用失败: ${response.status} ${errorText}`);
@@ -1189,57 +1219,67 @@ ${title ? `标题: ${title}\n` : ''}内容: ${content}
 });
 
 // 保存记忆库完整配置（Embedding + LLM）
-router.post('/api/save-memory-config', requireAuth, (req, res) => {
+router.post('/api/save-memory-config', requireAuth, async (req, res) => {
     const db = getDb();
     const { api_key, embedding, llm } = req.body;
-    
+
     if (!api_key || !embedding || !llm) {
         return res.status(400).json({ success: false, error: '缺少必需参数' });
     }
-    
+
+    const embeddingEndpoint = embedding.endpoint || 'https://generativelanguage.googleapis.com/v1beta';
+    const llmEndpoint = llm.endpoint || 'https://generativelanguage.googleapis.com/v1beta';
+
+    try {
+        await validateEndpoint(embeddingEndpoint);
+        await validateEndpoint(llmEndpoint);
+    } catch (e) {
+        return res.status(400).json({ success: false, error: e.message });
+    }
+
     try {
         const encryptedKey = encryption.encrypt(api_key);
-        
+
         // 保存Embedding配置
         const existingEmb = db.prepare(`
-            SELECT id FROM api_configs 
+            SELECT id FROM api_configs
             WHERE model_name LIKE '%embedding%'
             LIMIT 1
         `).get();
-        
+
         if (existingEmb) {
             db.prepare(`
                 UPDATE api_configs SET api_key = ?, model_name = ?, endpoint = ? WHERE id = ?
-            `).run(encryptedKey, embedding.model_name, embedding.endpoint || 'https://generativelanguage.googleapis.com/v1beta', existingEmb.id);
+            `).run(encryptedKey, embedding.model_name, embeddingEndpoint, existingEmb.id);
             console.log(`✅ 更新Embedding配置 (ID: ${existingEmb.id})`);
         } else {
             const result = db.prepare(`
                 INSERT INTO api_configs (name, provider, endpoint, api_key, model_name, is_default, supports_tools)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            `).run('Embedding API', 'gemini', embedding.endpoint || 'https://generativelanguage.googleapis.com/v1beta', encryptedKey, embedding.model_name, 0, 0);
+            `).run('Embedding API', 'gemini', embeddingEndpoint, encryptedKey, embedding.model_name, 0, 0);
             console.log(`✅ 创建Embedding配置 (ID: ${result.lastInsertRowid})`);
         }
-        
+
         // 保存LLM配置
         const existingLLM = db.prepare(`
             SELECT id FROM api_configs WHERE name = 'Memory LLM' LIMIT 1
         `).get();
-        
+
         if (existingLLM) {
             db.prepare(`
                 UPDATE api_configs SET api_key = ?, model_name = ?, endpoint = ? WHERE id = ?
-            `).run(encryptedKey, llm.model_name, llm.endpoint || 'https://generativelanguage.googleapis.com/v1beta', existingLLM.id);
+            `).run(encryptedKey, llm.model_name, llmEndpoint, existingLLM.id);
             console.log(`✅ 更新LLM配置 (ID: ${existingLLM.id})`);
         } else {
             const result = db.prepare(`
                 INSERT INTO api_configs (name, provider, endpoint, api_key, model_name, is_default, supports_tools)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            `).run('Memory LLM', 'gemini', llm.endpoint || 'https://generativelanguage.googleapis.com/v1beta', encryptedKey, llm.model_name, 0, 0);
+            `).run('Memory LLM', 'gemini', llmEndpoint, encryptedKey, llm.model_name, 0, 0);
             console.log(`✅ 创建LLM配置 (ID: ${result.lastInsertRowid})`);
         }
-        
+
         res.json({ success: true, message: '配置保存成功' });
-        
+
     } catch (error) {
         console.error('保存配置失败:', error);
         res.status(500).json({ success: false, error: error.message });

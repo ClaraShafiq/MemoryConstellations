@@ -263,7 +263,7 @@ function initDatabase() {
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             `).run(
                 'Gemini官方', 'gemini',
-                'https://generativelanguage.googleapis.com/v1beta/models/',
+                'https://generativelanguage.googleapis.com/v1beta',
                 process.env.GEMINI_API_KEY || '',
                 'gemini-2.0-flash-exp', 1, 1
             );
