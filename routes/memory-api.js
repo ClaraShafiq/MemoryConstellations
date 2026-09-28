@@ -275,6 +275,18 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
         // 映射到一个不存在的 id，星座就永远不会被画出来（项目/术语类曾因此整批消失）。
         const GALAXY_LABELS = { person:'社交', pet:'社交', organization:'社交', place:'地点', event:'事件', project:'创作', work:'创作', term:'创作', hobby:'爱好', consumed:'爱好', object:'爱好', music_aggregate:'爱好', book_aggregate:'爱好', movie_aggregate:'爱好' };
 
+        // 聚合星座（按值标路由的那几颗）的类别/星系是**配置驱动**的：
+        // 定义在 services/tagRouting.js，用户挑哪几颗写在 memory_config.json 的 tag_routing。
+        // 这里动态接进星图的两个映射表——加一个新标不用回来改这个文件。
+        try {
+            for (const def of require('../services/tagRouting').getTagRouting()) {
+                GALAXY_COLORS[def.category] = def.color || GALAXY_COLORS[def.category] || '#9aa7c7';
+                GALAXY_LABELS[def.category] = def.galaxy;
+            }
+        } catch (e) {
+            console.warn('[memory-api] 聚合星座映射注入失败:', e.message);
+        }
+
         // ⚠️ 取 facts/judgment，不取 overview：v5.9 起 overview 列已退役（写入侧只写
         // facts + current_status + judgment），前端面板读的也是 facts/judgment。
         // 之前这里只 SELECT overview，前端拿不到内容，所有星座面板正文恒为空。

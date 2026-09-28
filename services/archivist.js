@@ -15,6 +15,7 @@ const { getDb } = require('../database');
 const { callLLM } = require('./llm');
 const { chromaDBOperation } = require('./memory');
 const { WORLD_CONTEXT } = require('./worldContext');
+const { getTagRouting } = require('./tagRouting');
 const { SKIP_NAMES, USER, AI } = require('./memoryConfig');
 const SKIP_PH = SKIP_NAMES.map(() => '?').join(', '); // SQL placeholder string for NOT IN clauses
 const { runUserModelCycle, matchEvidenceFromFragments, harvestFacts, processModelDecay, resolveExpiredStates, MIN_GAP_USER_MODEL } = require('./cognitiveModel');
@@ -504,6 +505,9 @@ async function agentTick() {
         // a home. Linked to aggregate entities (音乐/共读) in 爱好 galaxy.
         await runTaskIfDue('aggregateLink', () => {
             try {
+                // 按值标路由的那几颗也跟着补链（正常情况下提取时已经链好了，
+                // 这里兜住"星座后建/当初写库失败"的尾巴以及存量）
+                linkTaggedFragments(db);
                 return linkAggregateFragments();
             } catch (e) {
                 console.error('[Archivist] aggregateLink 失败:', e.message);
@@ -918,7 +922,7 @@ function autoLinkLiteralMentions() {
         FROM entity_profiles ep
         WHERE ep.status IN ('seed', 'active')
           AND ep.name NOT IN (${SKIP_PH})
-          AND ep.category NOT IN ('music_aggregate', 'book_aggregate', 'movie_aggregate')
+          AND ep.category NOT LIKE '%aggregate%'
           AND length(ep.name) >= 2
         ORDER BY ep.fragment_count ASC
     `).all(...SKIP_NAMES);
@@ -993,6 +997,100 @@ const AGGREGATE_MAP = (() => {
     } catch (_) {}
     return {};
 })();
+
+// ── 按值标路由的聚合星座（2026-09-28 做成配置驱动）────────────────
+//
+// ⚠️ 这类星座的形状（一个"行为/状态类别"）**正是涌现判据要拒的那一类**。它们能成立，
+//    是因为走的是**代码路由**：Scribe 提取时打一个值标，代码按标直连——
+//    **不是涌现检测 LLM 拍脑袋起的名字**。两者别混，看到它们别当漏网之鱼删了。
+//
+// 有哪些标、各自默认叫什么名字、放哪个星系：**唯一定义在 services/tagRouting.js**。
+// 用户要哪几颗、叫什么，写在 memory_config.json 的 `tag_routing` 里。
+//
+// ⚠️ **为什么必须"入库即建链"、不能等分类管线：** 分类管线的入口要求
+//    `status = 'active'`，而整合（Consolidator）把跑过的碎片改成 `consolidated`——
+//    两条管线抢同一批碎片，谁先到谁说了算。实测（2026-09-28）：consolidated 的碎片
+//    2030 条里 **1078 条没有任何星座链接**（active 里只有 33 条）。也就是说**碎片一旦
+//    被写成 episode 就永久退出分类管线**，而先被整合的恰恰是"一条完整的故事"。
+//    链接只能在写入那一刻就打——`services/scribe.js` 的插入循环里调 linkTaggedFragment。
+
+function ensureTagEntity(db, def) {
+    const e = db.prepare(`SELECT id FROM entity_profiles WHERE name = ?`).get(def.name);
+    if (e) return e.id;
+    // ⚠️ 不给短词别名：聚合星座的 aliases 会被 autoLinkLiteralMentions 之外的路径读到，
+    //    而给一个像「亲密」「身体」这样的短词，`LIKE '%身体%'` 会把全库相关描述都吸进来
+    //    （同「日晚」那次：一个词性的实体名吸了 198 条碎片）。名字本身够用了。
+    const r = db.prepare(`
+        INSERT INTO entity_profiles (name, category, status, tags)
+        VALUES (?, ?, 'active', ?)
+    `).run(def.name, def.category, JSON.stringify([def.label || def.tag, 'aggregate']));
+    console.log(`[Archivist] 💠 建聚合星座「${def.name}」(${def.tag}, id=${r.lastInsertRowid})`);
+    return r.lastInsertRowid;
+}
+
+// 建齐配置里声明的那几颗（启动时/补漏时调，幂等）
+function ensureTagEntities(db) {
+    const out = {};
+    for (const def of getTagRouting()) {
+        try { out[def.tag] = ensureTagEntity(db, def); }
+        catch (e) { console.warn(`[Archivist] 建「${def.name}」失败: ${e.message}`); }
+    }
+    return out;
+}
+
+// 把一条碎片按它的值标链到对应星座。**Scribe 写完碎片立刻调**（不等分类、不等整合）。
+function linkTaggedFragment(db, fragmentId, valueTags) {
+    const defs = getTagRouting();
+    if (defs.length === 0) return 0;
+    const tags = Array.isArray(valueTags) ? valueTags : [];
+    let linked = 0;
+    for (const def of defs) {
+        if (!tags.includes(def.tag)) continue;
+        try {
+            const eid = ensureTagEntity(db, def);
+            const r = db.prepare(`
+                INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, confidence, classified_by)
+                VALUES (?, ?, 0.85, 'tag_routing')
+            `).run(fragmentId, eid);
+            if (r.changes > 0) linked++;
+        } catch (e) {
+            console.warn(`[Archivist] 标路由链接失败 frag#${fragmentId} (${def.tag}): ${e.message}`);
+        }
+    }
+    return linked;
+}
+
+// 补漏：把历史上打过这些标、但还没链上的碎片补上（星座是后建的、或当初写库失败）。
+// 与 linkAggregateFragments 同一个位置被调用。**不看 status** —— consolidated 的也要补，
+// 否则"入库即建"上线之前的存量永远进不来。
+function linkTaggedFragments(db) {
+    const defs = getTagRouting();
+    if (defs.length === 0) return { linked: 0 };
+    let total = 0;
+    for (const def of defs) {
+        try {
+            const eid = ensureTagEntity(db, def);
+            const rows = db.prepare(`
+                SELECT mf.id FROM memory_fragments mf
+                WHERE mf.value_tags LIKE ?
+                  AND mf.status IN ('active', 'consolidated', 'cooling')
+                  AND mf.id NOT IN (SELECT fragment_id FROM fragment_entities WHERE entity_id = ?)
+                LIMIT 200
+            `).all(`%"${def.tag}"%`, eid);
+            const ins = db.prepare(`INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, confidence, classified_by) VALUES (?, ?, 0.85, 'tag_routing')`);
+            let n = 0;
+            for (const r of rows) if (ins.run(r.id, eid).changes > 0) n++;
+            if (n > 0) {
+                db.prepare(`UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ?) WHERE id = ?`).run(eid, eid);
+                console.log(`[Archivist] 💠 ${def.name} 补链: ${n} 条`);
+            }
+            total += n;
+        } catch (e) {
+            console.warn(`[Archivist] 标路由补链失败 (${def.tag}):`, e.message);
+        }
+    }
+    return { linked: total };
+}
 
 function linkAggregateFragments() {
     const db = getDb();
@@ -1672,7 +1770,7 @@ async function rematchFragmentsForSeeds() {
             FROM entity_profiles ep
             WHERE ep.status IN ('seed', 'active')
               AND ep.name NOT IN (${SKIP_PH})
-              AND ep.category NOT IN ('music_aggregate', 'book_aggregate', 'movie_aggregate')
+              AND ep.category NOT LIKE '%aggregate%'
         )
         WHERE unlinked > 0
         ORDER BY unlinked DESC
@@ -1953,7 +2051,7 @@ async function mergeDuplicateSeeds() {
         SELECT id, name, category, fragment_count, aliases, overview
         FROM entity_profiles
         WHERE status IN ('seed', 'active') AND name NOT IN (${SKIP_PH})
-          AND category NOT IN ('music_aggregate', 'book_aggregate', 'movie_aggregate')
+          AND category NOT LIKE '%aggregate%'
     `).all(...SKIP_NAMES);
 
     // 泛指词检测：被 ≥2 个其他实体名包含的短名（「办公室」⊂ 公司A+公司B）
@@ -5296,6 +5394,10 @@ ${examplesBlock}
 // ═══════════════════════════════════════════════════════
 
 module.exports = {
+    // 按值标路由的聚合星座（测试/脚本要用）
+    ensureTagEntities,
+    linkTaggedFragment,
+    linkTaggedFragments,
     // 守卫规则（导出供回归测试复用；改名单/哨兵词表时先看 archivistGuards.test.js）
     isTimePhraseName,
     isPeriodPhraseName,

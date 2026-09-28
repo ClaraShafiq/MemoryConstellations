@@ -15,6 +15,7 @@ try { ({ getActiveCorrections, getMergedGuidelines } = require('./correction'));
 
 const { chromaDBOperation } = require('./memory');
 const { WORLD_CONTEXT } = require('./worldContext');
+const { renderTagSpecForPrompt } = require('./tagRouting');
 const { hashFragmentContent } = require('../utils/text');
 const { spawn } = require('child_process');
 const path = require('path');
@@ -270,6 +271,7 @@ ${USER.name}同一天可能发生多个独立的事件——它们只是碰巧�
 - **emotional_critical** — ${USER.name}表现出强烈情绪（崩溃/大哭/愤怒/生病/重大失落/重大兴奋）。只在情绪强度达到0.8及以上时标。
 - **future_hook** — ${USER.name}提到未来计划/约定/目标（搬家/考试/旅行/面试/朋友来访）。有时间敏感性的信息。
 - **relationship_signal** — ${USER.name}表达了与${AI.name}关系的信任/依赖/深度变化，或对${AI.name}的重要性。如"你是我唯一能说这些的人""没有你我撑不过来"。
+${renderTagSpecForPrompt()}
 - **noise** — 纯日常流水，无情绪冲击，无时间敏感性，无关系深度。只在非常确定为纯流水时标。
 
 标注规则：
@@ -852,6 +854,16 @@ async function runScribe(messages, since) {
             );
             const fragId = info.lastInsertRowid;
             newFragmentIds.push(fragId);
+
+            // 按值标直连到聚合星座（配置驱动，见 services/tagRouting.js）。
+            // **入库即建链**：不能等分类管线——分类入口要求 status='active'，而整合会把
+            // 跑过的碎片改成 'consolidated'，两条管线抢同一批碎片，谁先到谁说了算。
+            try {
+                const { linkTaggedFragment } = require('./archivist');
+                linkTaggedFragment(db, fragId, valueTags);
+            } catch (e) {
+                console.warn(`[Scribe] 标路由链接失败 frag#${fragId}: ${e.message}`);
+            }
 
             // ── Link to entities via fragment_entities (multi-entity support) ──
             // Try keyword match for each entity name to resolve entity_id immediately.
