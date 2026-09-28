@@ -130,6 +130,16 @@ canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
     cursor: pointer; transition: background .2s, border-color .2s;
 }
 .p-bridge-link:hover { background: rgba(255, 255, 255, 0.06); border-color: rgba(120, 140, 255, 0.25); }
+/* 桥那头的最新近况——缩进在桥下面，弱一档，明确是"别人的近况" */
+.p-bridge { margin-bottom: 3px; }
+.p-bridge .p-bridge-link { margin-bottom: 0; }
+.p-bridge-status {
+    position: relative; margin: 0 0 0 10px; padding: 3px 8px 3px 9px;
+    border-left: 1px solid rgba(120, 140, 255, 0.14);
+    font-size: 9px; line-height: 1.5; letter-spacing: .02em;
+    color: rgba(150, 168, 205, 0.42);
+}
+.p-bridge-status::before { content: '对面 '; color: rgba(120, 140, 200, 0.34); }
 
 /* v5.3: Tab 切换栏 — 关联星座 / 叙事片段 */
 .p-tab-bar { display: flex; gap: 2px; margin: 8px 0 4px; background: rgba(255,255,255,0.02); border-radius: 7px; padding: 2px; }

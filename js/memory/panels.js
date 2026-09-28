@@ -230,6 +230,9 @@ export function showConPanel(con) {
             bridges.sort((a, b) => b.weight - a.weight).slice(0, 6).forEach(br => {
                 const other = conById(br.otherId);
                 if (!other) return;
+                const wrap = document.createElement('div');
+                wrap.className = 'p-bridge';
+
                 const a = document.createElement('button');
                 a.className = 'p-bridge-link';
                 a.style.color = other.color;
@@ -237,7 +240,20 @@ export function showConPanel(con) {
                     ? `${other.label} — ${br.relation}`
                     : `${other.label} · ${br.weight}条共享记忆`;
                 a.addEventListener('click', () => gotoConstellation(other.id));
-                linksDiv.appendChild(a);
+                wrap.appendChild(a);
+
+                // 桥那头的最新一条近况，**并排显示**——站在这颗星上也看得见对面的动静。
+                // 注意是**并排**不是合并：两边的近况各写各的，谁都不冒充谁的事实。
+                // （写进去会烂：那边的事一旦过去，这一头就永远挂着别人的旧闻。）
+                const otherLatest = _bridgeLatestStatus(other);
+                if (otherLatest) {
+                    const s = document.createElement('div');
+                    s.className = 'p-bridge-status';
+                    s.textContent = otherLatest;
+                    wrap.appendChild(s);
+                }
+
+                linksDiv.appendChild(wrap);
             });
             tabContent.appendChild(linksDiv);
         }
@@ -283,6 +299,18 @@ export function showConPanel(con) {
     addMeta('记忆碎片', Math.min(100, con.stars.length / 40 * 100),
         coolingN > 0 ? `${con.stars.length} 颗 · ${coolingN} 冷却` : con.stars.length + ' 颗');
     $('p-date').textContent = con.updatedAt ? '更新于 ' + (con.updatedAt || '').slice(0, 10) : '';
+}
+
+// 桥那头的最新一条近况（近况是倒序的日志，第一行最新）。
+// 取不到就返回空串——不占位、不写"暂无"（面板里已经够多"暂无"了）。
+// 自己判一下哨兵，不引别的模块的 helper：这里只需要"这行字值不值得显示"。
+function _bridgeLatestStatus(con) {
+    const raw = (con.currentStatus || '').replace(/\r/g, '');
+    if (!raw || !raw.trim()) return '';
+    const first = raw.split('\n').map(l => l.trim()).filter(Boolean)[0] || '';
+    if (first.length < 3) return '';
+    if (/^(无|暂无|无明显变化|无变化|没有明显变化|无新动态|近期无新动态)[。.，,、\s]*$/.test(first)) return '';
+    return first.length > 96 ? first.slice(0, 96) + '…' : first;
 }
 
 function _renderConBody(con) {
