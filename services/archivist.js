@@ -911,14 +911,65 @@ async function runTask(name, fn) {
 const AUTO_LINK_CONFIDENCE = 0.40;
 const AUTO_LINK_CLASSIFIER = 'auto_literal';
 const AUTO_LINK_MAX_PER_ENTITY = 5;  // max new links per entity per run (prevent flooding)
+// Aliases go through three gates before they're allowed to literal-match.
+// Without them an alias list is a vacuum cleaner: LLM-written alias lists reliably
+// contain generic words (a common noun for the user's profession, a district name,
+// a topic word) that would each pull in dozens or hundreds of fragments.
+const AUTO_LINK_ALIAS_MIN_WEIGHT = 3; // minimum "information weight" of an alias (CJK char 1, latin 0.5)
+const AUTO_LINK_ALIAS_MAX_HITS = 8;   // more hits than this = a generic term, not a proper name
 
-function autoLinkLiteralMentions() {
+// Information weight: three latin letters carry about as much as one CJK character,
+// so don't cut on raw character count. A 3-letter given name scores 2 (rejected);
+// a 4-CJK-character title scores 4 (allowed).
+function _mentionWeight(s) {
+    let w = 0;
+    for (const ch of String(s)) {
+        if (/[぀-ヿ㐀-䶿一-鿿豈-﫿]/.test(ch)) w += 1;
+        else if (/\s/.test(ch)) continue;
+        else w += 0.5;
+    }
+    return w;
+}
+
+// Every name and alias in the library (lowercased) → the set of entities that own it.
+// Used to decide whether an alias is ambiguous.
+function _entityMentionOwners(db) {
+    const rows = db.prepare(`SELECT id, name, aliases FROM entity_profiles WHERE status IN ('seed','active')`).all();
+    const owners = new Map();
+    const put = (k, id) => {
+        const s = String(k || '').toLowerCase().trim();
+        if (s.length < 2) return;
+        if (!owners.has(s)) owners.set(s, new Set());
+        owners.get(s).add(id);
+    };
+    for (const r of rows) {
+        put(r.name, r.id);
+        try { for (const a of JSON.parse(r.aliases || '[]')) put(a, r.id); } catch (_) {}
+    }
+    return owners;
+}
+
+// Is this alias mutually contained with some *other* entity's name/alias?
+// e.g. a district alias inside another entity's "district + venue" name → ambiguous
+// reference, unusable. Containment within its own entity's callings doesn't count.
+function _aliasAmbiguous(entId, alias, owners) {
+    const key = String(alias).toLowerCase().trim();
+    for (const [k, ids] of owners) {
+        if (k === key) continue;
+        if (k.includes(key) || key.includes(k)) {
+            for (const id of ids) if (id !== entId) return true;
+        }
+    }
+    return false;
+}
+
+function autoLinkLiteralMentions({ dryRun = false } = {}) {
     const db = getDb();
 
     // Find fragments that literally contain an entity name but aren't linked yet
     // Exclude music/book (data exhaust) and SKIP_NAMES (User/Companion handled separately)
     const seeds = db.prepare(`
-        SELECT ep.id, ep.name, ep.category, ep.fragment_count
+        SELECT ep.id, ep.name, ep.category, ep.aliases, ep.fragment_count
         FROM entity_profiles ep
         WHERE ep.status IN ('seed', 'active')
           AND ep.name NOT IN (${SKIP_PH})
@@ -929,31 +980,69 @@ function autoLinkLiteralMentions() {
 
     if (seeds.length === 0) return { linked: 0 };
 
-    let totalLinked = 0;
+    // Match terms = the name (as before) + aliases that pass the gates.
+    // An alias exists for exactly one reason: "another way of calling the same thing".
+    // If the linker only ever looks at `name`, every alias is dead weight — the
+    // library says "call it X or Y" and the linker only ever matches X.
+    const owners = _entityMentionOwners(db);
+    const countHits = db.prepare(`
+        SELECT COUNT(*) n FROM memory_fragments mf
+        WHERE mf.content LIKE ? AND mf.status = 'active'
+          AND mf.source NOT IN ('music', 'book')
+          AND mf.id NOT IN (SELECT fragment_id FROM fragment_entities WHERE entity_id = ?)
+    `);
+    const rejected = { short: [], ambiguous: [], magnet: [] };
+    const candidates = [];
+    for (const s of seeds) {
+        const terms = [s.name];
+        let aliases = [];
+        try { aliases = JSON.parse(s.aliases || '[]'); } catch (_) {}
+        for (const raw of aliases) {
+            const t = String(raw || '').trim();
+            if (!t || t.toLowerCase() === s.name.toLowerCase()) continue;
+            if (_mentionWeight(t) < AUTO_LINK_ALIAS_MIN_WEIGHT) { rejected.short.push(`${s.name}←${t}`); continue; }
+            if (_aliasAmbiguous(s.id, t, owners)) { rejected.ambiguous.push(`${s.name}←${t}`); continue; }
+            const hits = countHits.get('%' + t + '%', s.id).n;
+            if (hits === 0) continue;
+            if (hits > AUTO_LINK_ALIAS_MAX_HITS) { rejected.magnet.push(`${s.name}←${t}(${hits})`); continue; }
+            terms.push(t);
+        }
+        candidates.push({ id: s.id, name: s.name, terms });
+    }
+
+    let totalLinked = 0, aliasLinked = 0;
     const insertFe = db.prepare('INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, relation, confidence, classified_by) VALUES (?, ?, NULL, ?, ?)');
     const updateFc = db.prepare('UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ?) WHERE id = ?');
+    const findFrags = db.prepare(`
+        SELECT mf.id FROM memory_fragments mf
+        WHERE mf.content LIKE ? AND mf.status = 'active'
+          AND mf.source NOT IN ('music', 'book')
+          AND mf.id NOT IN (SELECT fragment_id FROM fragment_entities WHERE entity_id = ?)
+        ORDER BY mf.id DESC
+        LIMIT ?
+    `);
 
     const writeAll = db.transaction(() => {
-        for (const s of seeds) {
-            const frags = db.prepare(`
-                SELECT mf.id FROM memory_fragments mf
-                WHERE mf.content LIKE ? AND mf.status = 'active'
-                  AND mf.source NOT IN ('music', 'book')
-                  AND mf.id NOT IN (SELECT fragment_id FROM fragment_entities WHERE entity_id = ?)
-                ORDER BY mf.id DESC
-                LIMIT ?
-            `).all('%' + s.name + '%', s.id, AUTO_LINK_MAX_PER_ENTITY);
-
-            if (frags.length === 0) continue;
-
-            for (const f of frags) {
-                const r = insertFe.run(f.id, s.id, AUTO_LINK_CONFIDENCE, AUTO_LINK_CLASSIFIER);
-                if (r.changes > 0) totalLinked++;
+        for (const s of candidates) {
+            // Name and aliases share one budget — otherwise an entity gets 5 more
+            // links for free just by having aliases.
+            let budget = AUTO_LINK_MAX_PER_ENTITY;
+            let touched = false;
+            for (let ti = 0; ti < s.terms.length && budget > 0; ti++) {
+                const frags = findFrags.all('%' + s.terms[ti] + '%', s.id, budget);
+                if (frags.length === 0) continue;
+                touched = true;
+                for (const f of frags) {
+                    if (dryRun) {
+                        totalLinked++; budget--; if (ti > 0) aliasLinked++;
+                        console.log(`[Archivist] 🔗 (dry) ${ti > 0 ? `alias「${s.terms[ti]}」` : 'name'} → ${s.name}: fragment #${f.id}`);
+                        continue;
+                    }
+                    const r = insertFe.run(f.id, s.id, AUTO_LINK_CONFIDENCE, AUTO_LINK_CLASSIFIER);
+                    if (r.changes > 0) { totalLinked++; budget--; if (ti > 0) aliasLinked++; }
+                }
             }
-
-            if (frags.length > 0) {
-                updateFc.run(s.id, s.id);
-            }
+            if (touched && !dryRun) updateFc.run(s.id, s.id);
         }
     });
 
@@ -965,9 +1054,13 @@ function autoLinkLiteralMentions() {
     }
 
     if (totalLinked > 0) {
-        console.log(`[Archivist] 🔗 字面自动链接: ${totalLinked} 条 (${AUTO_LINK_CONFIDENCE} conf, 零LLM)`);
+        console.log(`[Archivist] 🔗 字面自动链接: ${totalLinked} 条 (${AUTO_LINK_CONFIDENCE} conf, 零LLM；其中靠别名 ${aliasLinked} 条)`);
     }
-    return { linked: totalLinked };
+    if (rejected.magnet.length || rejected.ambiguous.length) {
+        // Log what was turned away — otherwise nobody can tell how many aliases are dead weight.
+        console.log(`[Archivist] 🧲 别名挡在门外：泛称 ${rejected.magnet.length} 个 [${rejected.magnet.slice(0, 5).join(' ')}] · 指代不明 ${rejected.ambiguous.length} 个 [${rejected.ambiguous.slice(0, 5).join(' ')}] · 太短 ${rejected.short.length} 个`);
+    }
+    return { linked: totalLinked, aliasLinked };
 }
 
 // ═══════════════════════════════════════════════════════
@@ -5405,6 +5498,11 @@ module.exports = {
     // 涌现判据（导出供回归探针复用，别另抄一份会走样的）
     buildEmergentJudgePrompt,
     screenEmergentVerdict,
+    // 别名的三道门（字面链接器用它决定哪些别名敢拿去 LIKE 匹配）。
+    // 导出供回归测试复用——改判据时先看 archivistGuards.test.js 的第 4 节。
+    _mentionWeight,
+    _aliasAmbiguous,
+    _entityMentionOwners,
     // Agent lifecycle
     start,
     stop,
