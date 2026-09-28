@@ -2963,20 +2963,250 @@ async function detectEmergentPlacesAndEvents() {
 // ═══════════════════════════════════════════════════════
 
 // 写实体关系到双方 related_entities（新增或更新）
-function _writeEntityRelation(a, b, relation, sharedCount) {
+// opts.reviewed = 'YYYY-MM-DD' stamps `last_reviewed` — for relations that have no
+// co-occurring fragments by construction (tag-derived ones). Without the stamp they'd
+// be re-judged as dead by reviewEntityRelations() on the very next run.
+function _writeEntityRelation(a, b, relation, sharedCount, opts = {}) {
     const db = getDb();
     let relsA = [];
     try { relsA = JSON.parse(a.related_entities || '[]'); } catch (_) {}
     const existingA = relsA.findIndex(r => r.id === b.id);
-    const entry = { id: b.id, name: b.name, relation, shared_count: sharedCount };
+    // `since` is only stamped on new entries: it means "when this relation started
+    // being remembered" and survives later description updates.
+    const prev = existingA >= 0 ? relsA[existingA] : null;
+    const since = (prev && prev.since) ? prev.since : new Date().toISOString().slice(0, 10);
+    const entry = { id: b.id, name: b.name, relation, shared_count: sharedCount, since };
+    if (opts.reviewed) entry.last_reviewed = opts.reviewed;
+    else if (prev && prev.last_reviewed) entry.last_reviewed = prev.last_reviewed;
     if (existingA >= 0) relsA[existingA] = entry; else relsA.push(entry);
     db.prepare('UPDATE entity_profiles SET related_entities = ? WHERE id = ?')
         .run(JSON.stringify(relsA), a.id);
 }
 
+// ── read/write helpers for the relation list (used by reviewEntityRelations) ──
+function _parseRelations(ent) {
+    try { const r = JSON.parse(ent.related_entities || '[]'); return Array.isArray(r) ? r : []; }
+    catch (_) { return []; }
+}
+
+function _writeRelations(entId, rels) {
+    getDb().prepare('UPDATE entity_profiles SET related_entities = ? WHERE id = ?')
+        .run(JSON.stringify(rels), entId);
+}
+
+// Drop the entry pointing at otherId from entId's list; true if something was removed.
+function _dropEntityRelation(entId, otherId) {
+    const db = getDb();
+    const ent = db.prepare('SELECT id, related_entities FROM entity_profiles WHERE id = ?').get(entId);
+    if (!ent) return false;
+    const rels = _parseRelations(ent);
+    const next = rels.filter(r => r.id !== otherId);
+    if (next.length === rels.length) return false;
+    _writeRelations(entId, next);
+    return true;
+}
+
+// ═══════════════════════════════════════════════════════
+// v5.3: reviewEntityRelations — the relation table has to be able to LOSE entries
+//
+// `related_entities` had a write path and no cleanup path — once a bridge was written
+// it stayed forever. That produced three kinds of rot:
+//   · dead pointers — when an entity is merged/superseded, nothing went back and fixed
+//     the relation lists that point at it. The consumer (memoryTools.formatRelatedLine,
+//     entityProfile) injects related constellations straight into the model's context,
+//     so this isn't just an ugly star map: it feeds the model entities that don't exist.
+//   · zero co-occurrence — the pair shared fragments when the bridge was written and
+//     shares none now (fragment links were removed since), yet the bridge lingers.
+//   · false relations — two things that merely appeared in the same sentence got
+//     recorded as a relation. The prompt criterion for that is fixed at the write side;
+//     this cleans the backlog.
+//
+// The criterion for "is this bridge still real" (kept deliberately narrow):
+//   **If these two constellations stopped being related, would it change how either
+//   one's current-status gets updated?** Yes → keep. No → cut.
+//   So "two stops on the same trip" survives, while "went to X on the way to Y once"
+//   gets cut once it's stale.
+//
+// ⚠️ Cutting is self-healing: if a real relation co-occurs again (≥2 shared fragments),
+//    discoverRelatedEntities() simply re-creates it (a cut entry is no longer filtered
+//    out by `fresh`).
+// ⚠️ A relation judged "keep" gets a `last_reviewed` stamp so it isn't re-asked every
+//    cycle; it comes back up after maxAgeDays.
+// ═══════════════════════════════════════════════════════
+
+const RELATION_MAX_AGE_DAYS = 90;    // how long a co-occurrence may go quiet before review
+const RELATION_REVIEW_PER_RUN = 3;   // max pairs re-judged per run (= 3 LLM calls)
+
+async function reviewEntityRelations({ dryRun = false, maxAgeDays = RELATION_MAX_AGE_DAYS, maxReview = RELATION_REVIEW_PER_RUN } = {}) {
+    const db = getDb();
+    const today = new Date();
+    const dayOf = (d) => new Date(`${String(d).slice(0, 10)}T00:00:00+08:00`);
+    const ageInDays = (d) => Math.floor((today - dayOf(d)) / 86400000);
+
+    const ents = db.prepare(`
+        SELECT id, name, status, related_entities FROM entity_profiles
+        WHERE related_entities IS NOT NULL AND related_entities != '[]'
+    `).all();
+    const peerOf = db.prepare(`
+        SELECT id, name, category, status, current_status, updated_at FROM entity_profiles WHERE id = ?
+    `);
+    // How many fragments this pair shares *now*, and the most recent one.
+    // source_date can be an empty string, so fall back to created_at — otherwise those
+    // rows would be misread as "zero co-occurrence".
+    const lastSharedOf = db.prepare(`
+        SELECT MAX(COALESCE(NULLIF(mf.source_date, ''), substr(mf.created_at, 1, 10))) AS d,
+               COUNT(*) AS n
+        FROM memory_fragments mf
+        JOIN fragment_entities f1 ON f1.fragment_id = mf.id AND f1.entity_id = ?
+        JOIN fragment_entities f2 ON f2.fragment_id = mf.id AND f2.entity_id = ?
+    `);
+
+    // Statuses that can actually surface: the star map queries `active`, the chat
+    // context injects `active`+`seed`. `dormant` is "asleep, not dead" and is kept clean
+    // so it wakes up tidy. merged/superseded are skipped for review — the peer is gone.
+    const LIVE_STATUS = new Set(['active', 'seed', 'dormant']);
+
+    const deadPtrs = [], stale = [], alive = [];
+    let total = 0, totalLive = 0;
+    for (const e of ents) {
+        for (const r of _parseRelations(e)) {
+            total++;
+            if (LIVE_STATUS.has(e.status)) totalLive++;
+            const peer = peerOf.get(r.id);
+            if (!peer || peer.status === 'merged' || peer.status === 'superseded') {
+                // Dead pointers are free to remove and are removed for EVERY status:
+                // archived entities do get revived (a tombstone can be set back to
+                // active), and a relation list full of ghosts would come back with it.
+                deadPtrs.push({ ent: e, rel: r, peerStatus: peer ? peer.status : '不存在' });
+                continue;
+            }
+            // Only queue pairs where both sides can surface — spending LLM calls on
+            // relations between dormant/seed entities isn't worth it.
+            if (!LIVE_STATUS.has(e.status) || !LIVE_STATUS.has(peer.status)) continue;
+            const ls = lastSharedOf.get(e.id, r.id) || {};
+            const days = ls.d ? ageInDays(ls.d) : null;
+            const reviewed = r.last_reviewed ? ageInDays(r.last_reviewed) : null;
+            const fresh = (ls.n > 0 && days != null && days <= maxAgeDays)
+                || (reviewed != null && reviewed <= maxAgeDays);
+            (fresh ? alive : stale).push({ ent: e, peer, rel: r, sharedNow: ls.n || 0, days });
+        }
+    }
+
+    // ── ① dead pointers: free, remove directly ──
+    let dropped = 0;
+    for (const d of deadPtrs) {
+        if (dryRun) { dropped++; console.log(`[Archivist] ✂️ (dry) 断桥（对端${d.peerStatus}）: ${d.ent.name} ↔ ${d.rel.name}`); continue; }
+        if (_dropEntityRelation(d.ent.id, d.rel.id)) dropped++;
+        console.log(`[Archivist] ✂️ 断桥（对端${d.peerStatus}）: ${d.ent.name} ↔ ${d.rel.name} — 「${(d.rel.relation || '').slice(0, 30)}」`);
+    }
+
+    // ── ② review queue, deduped by pair (A→B and B→A are one judgement, not two) ──
+    const byPair = new Map();
+    for (const s of stale) {
+        const key = `${Math.min(s.ent.id, s.rel.id)}-${Math.max(s.ent.id, s.rel.id)}`;
+        if (!byPair.has(key)) byPair.set(key, s);
+    }
+    const queue = [...byPair.values()];
+    // dryRun means "don't write", not "don't judge" — a probe needs to see the verdicts.
+    const willReview = _canCallLLM(1) ? queue.slice(0, maxReview) : [];
+    let kept = 0, cut = 0;
+
+    const stamp = today.toISOString().slice(0, 10);
+    for (const q of willReview) {
+        const a = db.prepare('SELECT id, name, category, current_status FROM entity_profiles WHERE id = ?').get(q.ent.id);
+        const b = db.prepare('SELECT id, name, category, current_status FROM entity_profiles WHERE id = ?').get(q.rel.id);
+        if (!a || !b) continue;
+
+        // Evidence: a few recent fragments from each side. Judging a relation without
+        // showing the material means the model can only invent a plausible-sounding one.
+        const sideFrags = db.prepare(`
+            SELECT mf.source_date, mf.content FROM memory_fragments mf
+            JOIN fragment_entities fe ON fe.fragment_id = mf.id AND fe.entity_id = ?
+            ORDER BY COALESCE(NULLIF(mf.source_date, ''), mf.created_at) DESC LIMIT 3
+        `);
+        const fmtSide = (ent) => {
+            const st = (ent.current_status || '').replace(/\n/g, ' / ').slice(0, 160) || '（空）';
+            const frags = sideFrags.all(ent.id)
+                .map(f => `      · [${String(f.source_date || '').slice(5, 10)}] ${(f.content || '').slice(0, 80)}`)
+                .join('\n');
+            return `【${ent.name}】(${ent.category})\n    近况：${st}\n    最近素材：\n${frags || '      （无）'}`;
+        };
+
+        const prompt = `有两个"记忆星座"，它们之间记着一条关系。请复审这条关系**现在还成不成立**。
+
+${fmtSide(a)}
+
+${fmtSide(b)}
+
+记录的关系：「${q.rel.relation}」（当初共享 ${q.rel.shared_count || 0} 条记忆，最近一次共现：${q.days != null ? q.days + ' 天前' : '已经没有共现'}）
+
+⚠️ 判据只有一条：**如果这两个星座从此不再关联，会影响其中一方「近况」的更新吗？**
+  · **会影响** → 留着（同一位房东与住处、同一个项目的两个环节、天天在一起的人）
+  · **不影响** → 断掉（某天顺路去过一次的地方、某句话里顺口提到的两只猫、一次性的活动参与）
+    ——那类关系记在过去就够了，不需要一直挂在星座上
+
+只输出JSON: {"keep":true|false,"why":"十个字以内"}`;
+
+        try {
+            const raw = await callLLM(
+                [{ role: 'user', parts: [{ text: prompt }] }],
+                WORLD_CONTEXT, null,
+                { temperature: 0.1, maxOutputTokens: 200, thinkingConfig: { thinkingBudget: 0 } },
+                ARCHIVIST_LLM_CONFIG_ID
+            );
+            agentState.tickLLMCalls++; agentState.dailyLLMCalls++;
+            const m = (raw?.reply || raw?.text || raw?.content || '').match(/\{[\s\S]*\}/);
+            if (!m) continue;
+            const v = JSON.parse(m[0]);
+            if (v.keep) {
+                // Stamp both sides (keep `since`, only touch `last_reviewed`).
+                if (!dryRun) for (const [self, other] of [[a, b], [b, a]]) {
+                    const ent = db.prepare('SELECT id, related_entities FROM entity_profiles WHERE id = ?').get(self.id);
+                    const rels = _parseRelations(ent);
+                    const i = rels.findIndex(r => r.id === other.id);
+                    if (i >= 0) { rels[i] = { ...rels[i], last_reviewed: stamp }; _writeRelations(self.id, rels); }
+                }
+                kept++;
+                console.log(`[Archivist] 🌉 复审判留${dryRun ? '(dry)' : ''}: ${a.name} ↔ ${b.name} — ${v.why || ''}`);
+            } else {
+                if (!dryRun) { _dropEntityRelation(a.id, b.id); _dropEntityRelation(b.id, a.id); }
+                cut++;
+                console.log(`[Archivist] ✂️ 断桥（复审）${dryRun ? '(dry)' : ''}: ${a.name} ↔ ${b.name} — ${v.why || ''}（原关系：「${(q.rel.relation || '').slice(0, 30)}」）`);
+            }
+        } catch (err) {
+            console.error('[Archivist] 关系复审 LLM 失败:', err.message);
+        }
+    }
+
+    // ── ③ whatever didn't fit in this run is only counted, not touched.
+    //      Anything written into the DB needs something that eventually looks back at
+    //      it; logging the backlog is the cheapest way to keep that visible. ──
+    const backlog = queue.length - willReview.length;
+    if (dropped || cut || kept || backlog) {
+        console.log(`[Archivist] 🌉 关系表体检：露得出来的 ${totalLive} 条（含归档共 ${total}）→ 死指针摘 ${dropped} → 待复审 ${queue.length}（本轮判留 ${kept} / 断 ${cut}，还剩 ${backlog} 条排队）→ 共现还活的 ${alive.length} 条`);
+    }
+    if (dropped && !dryRun) {
+        try {
+            db.prepare(`INSERT INTO ontology_changelog (action, category_path, detail) VALUES ('entity_bridges_review', NULL, ?)`)
+                .run(JSON.stringify({ dead_pointers: dropped, reviewed: willReview.length, kept, cut, backlog, total, total_live: totalLive }));
+        } catch (_) {}
+    }
+    return { total, totalLive, deadPointers: dropped, stale: queue.length, reviewed: willReview.length, kept, cut, backlog, alive: alive.length };
+}
+
 async function discoverRelatedEntities() {
     const db = getDb();
     let discovered = 0;
+
+    // Health-check the relation table before writing new bridges: dead pointers get
+    // removed and quiet relations get re-judged (see reviewEntityRelations). It runs
+    // first on purpose — otherwise "just removed" and "about to write" fight each other
+    // within the same cycle.
+    try {
+        await reviewEntityRelations();
+    } catch (e) {
+        console.error('[Archivist] 关系表体检失败:', e.message);
+    }
 
     const pairs = db.prepare(`
         SELECT f1.entity_id AS a_id, f2.entity_id AS b_id, COUNT(*) AS shared
@@ -5503,6 +5733,8 @@ module.exports = {
     _mentionWeight,
     _aliasAmbiguous,
     _entityMentionOwners,
+    // 关系表体检（导出供一次性清理脚本 + 探针复用）
+    reviewEntityRelations,
     // Agent lifecycle
     start,
     stop,
