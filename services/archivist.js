@@ -3437,9 +3437,29 @@ async function discoverRelatedEntities() {
 
         for (const cand of semanticCandidates.slice(0, 2)) {
             const sp = cand.a;
-            const prompt = `记忆星系中有两个星座，它们的时间线有交集（日期：${cand.days}），但记忆碎片互不重叠。请判断它们之间是否存在关系（如：旅行包含地点、事件发生在该地点、人物参与事件等）。
 
-${sp.a_name} (${sp.a_cat}): ${sp.b_name} (${sp.b_cat})
+            // ⚠️ 给它**证据**。原来这个 prompt 只给"两个名字 + 日期交集"，一条素材都不给
+            //    ——于是模型只能**编一句听起来合理的**。判关系不给证据 = 让它猜。
+            const evi = db.prepare(`
+                SELECT ep.name, mf.source_date, mf.content FROM (
+                    SELECT fe.entity_id, mf.source_date, mf.content FROM fragment_entities fe
+                    JOIN memory_fragments mf ON mf.id = fe.fragment_id
+                    WHERE fe.entity_id IN (?, ?)
+                    ORDER BY mf.source_date DESC LIMIT 6
+                ) mf JOIN entity_profiles ep ON ep.id = mf.entity_id
+            `).all(sp.a_id, sp.b_id);
+            const evidence = evi.map(e => `  · [${String(e.source_date || '').slice(5)}][${e.name}] ${(e.content || '').slice(0, 90)}`).join('\n');
+
+            const prompt = `记忆星系中有两个星座，它们的时间线有交集（日期：${cand.days}），但记忆碎片互不重叠。
+
+${sp.a_name} (${sp.a_cat}) ↔ ${sp.b_name} (${sp.b_cat})
+
+它俩各自的近期素材（**这是给你判断用的证据，不是让你概括它**）：
+${evidence || '  （没有可用的素材）'}
+
+⚠️ 判断标准（关键）：**有没有哪一件事，是同时涉及它俩的？**
+· 「同一趟行程里的两个地点」「同一件事的当事人与其代理人」「同一场活动的场地与主办方」→ 是同一件事 ✓
+· 只是**日期凑巧重叠、各说各的** → 那不是关系，填 null
 
 有关系吗？一句话描述或填 null。只输出JSON: {"related":true|false,"relation":"一句话关系描述"}`;
 
@@ -3511,10 +3531,19 @@ ${sp.a_name} (${sp.a_cat}): ${sp.b_name} (${sp.b_cat})
         if (bName.length <= 3 && aName.length > bName.length && aName.includes(bName)) suspiciousPairs.add(batch.indexOf(p));
     }
 
-    const prompt = `以下实体对在 user 的记忆中共同出现。对每对，先判断共享碎片里的名字是否真的指的是同一个实体（警惕同名异物——
-短名字可能是更长名字的一部分，如"甲" vs"甲乙(某类店铺)"不是同一回事）。
+    const prompt = `以下实体对在 user 的记忆中共同出现。对每对，按顺序做三件事：
 
-确认是同一实体后，写一句话关系描述（≤30字，陈述事实）。看不出实质关系、或判定为同名异物，填 null。
+**① 同名异物检查**（警惕短名字是长名字的一部分，如"甲" vs "甲乙(某类店铺)"不是一回事）。
+
+**② ⚠️「同一件事」检查（最关键的一步）**：这条共享碎片里的**那件事**，是不是**同时涉及它俩**？
+  · **是同一件事把两者绑在一起** → 真关系 ✓
+    例：同一趟行程的两个地点、同一件事的当事人与其代理人、同一场活动的场地与主办方
+  · **只是一句话里顺口都提到了** → **那是一次共现，不是关系** → 填 null
+    例：「在某个地方吃饭时提到某个人」「聊某个话题时扯到另一件事」——拿掉其中一个，
+    这件事照样成立，说明它只是被顺口带出来的
+  **自检一句话**：把这一个从这件事里拿掉，这件事还成立吗？成立 → 填 null。
+
+**③ 都过了**，写一句话关系描述（≤30字，**陈述事实**）。看不出实质关系填 null。
 
 ${pairBlocks}
 
