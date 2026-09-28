@@ -3194,6 +3194,174 @@ ${fmtSide(b)}
     return { total, totalLive, deadPointers: dropped, stale: queue.length, reviewed: willReview.length, kept, cut, backlog, alive: alive.length };
 }
 
+// ═══════════════════════════════════════════════════════
+// v5.4: discoverTagRelations — 第三条建关系的路（标签桥）
+//
+// 星座的 `tags` 是模型写的「这个星座是什么」。当某个 tag 正好是另一个星座的名字时，
+// 那就是**这个星座自己认的关系**——而没有任何东西读它。
+// 为什么需要它：另外两条路都会漏掉同一类结构——
+//   · 共现路要求 shared >= 2。一个「作品与其出品方/平台」式的对子，素材里未必
+//     有两条同时提到两者，于是永远够不到门槛。
+//   · 语义兜底路的 category 白名单是 event/place/person，`consumed`/`project` 那侧
+//     进不了候选池。
+//
+// ⚠️ 它**继承模型写 tags 时的毛病**，所以候选词要过跟别名链接器**同一套门**
+//    （`_mentionWeight` / `_aliasAmbiguous` —— 同一个定义处，不另抄一份）。
+//    真实数据上跑过一轮：19 条候选放行 12 / 挡掉 7，挡掉的正好包含一个错标签
+//    （把一次跟某机构无关的事，标成了那个机构）——因为它只有两个字，跟泛称一个待遇。
+//    **门比 prompt 有用：那条连 LLM 都没走到。**
+// ⚠️ 写出来的关系要**盖 last_reviewed 章**：标签桥天然没有共现碎片，
+//    reviewEntityRelations 判枯的判据是「现在一条都不共享」——不盖章的话，
+//    下一轮刚建的桥就会被当枯桥重审然后断掉，**等于白建**。
+// ⚠️ 不直接写库，仍然交给 LLM 写那一句话——它有权填 null（标签打错了就填 null）。
+// ═══════════════════════════════════════════════════════
+
+const TAG_RELATION_MAX_PER_RUN = 10;
+
+async function discoverTagRelations({ dryRun = false, maxPerRun = TAG_RELATION_MAX_PER_RUN } = {}) {
+    const db = getDb();
+    const LIVE_STATUS = new Set(['active', 'seed']);
+
+    const ents = db.prepare(`
+        SELECT id, name, category, status, tags, aliases, related_entities
+        FROM entity_profiles WHERE status IN ('active', 'seed')
+          AND name NOT IN (${SKIP_PH})
+    `).all(...SKIP_NAMES);
+    if (ents.length === 0) return { discovered: 0 };
+
+    const owners = _entityMentionOwners(db);
+    const byName = new Map(), byAlias = new Map();
+    for (const e of ents) {
+        byName.set(e.name.toLowerCase().trim(), e);
+        try {
+            for (const a of JSON.parse(e.aliases || '[]')) {
+                const k = String(a || '').toLowerCase().trim();
+                if (k && !byAlias.has(k)) byAlias.set(k, e);
+            }
+        } catch (_) {}
+    }
+
+    // ── candidates: A's tag == B's name (exact) or B's alias (must pass the gates) ──
+    const cands = [], blocked = [];
+    for (const e of ents) {
+        let tags = [];
+        try { tags = JSON.parse(e.tags || '[]'); } catch (_) {}
+        const have = new Set(_parseRelations(e).map(r => r.id));
+        for (const raw of tags) {
+            const t = String(raw || '').trim();
+            if (!t) continue;
+            const k = t.toLowerCase();
+            const byExact = byName.get(k);
+            const other = byExact || byAlias.get(k);
+            if (!other || other.id === e.id) continue;
+            if (!LIVE_STATUS.has(other.status)) continue;
+            if (have.has(other.id)) continue;
+            if (!byExact) {
+                if (_mentionWeight(t) < AUTO_LINK_ALIAS_MIN_WEIGHT) { blocked.push(`${e.name}←「${t}」(太短)`); continue; }
+                // ⚠️ 已知的过度保守：`_aliasAmbiguous` 问的是「这个词跟*别的*实体的叫法
+                //    互相包含吗」。这里 tag 已经解析到了 other，但守卫不知道 other 是
+                //    "自己人"——所以当 other 自己另有一个短别名是它的子串时会误判。
+                //    实数据上没咬到（19 条里 0 条），代价也只是"少建一条真桥"，
+                //    按「宁可少一条真的，不要多一条假的」先留着。要修的话是给它加一个
+                //    ignoreIds 参数，把 other.id 一起忽略掉。
+                if (_aliasAmbiguous(e.id, t, owners)) { blocked.push(`${e.name}←「${t}」(指代不明)`); continue; }
+            }
+            cands.push({ a: e, b: other, tag: t, exact: !!byExact });
+        }
+    }
+
+    // one judgement per pair (A→B and B→A are the same question)
+    const seen = new Set(), queue = [];
+    for (const c of cands) {
+        const key = `${Math.min(c.a.id, c.b.id)}-${Math.max(c.a.id, c.b.id)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        queue.push(c);
+    }
+
+    if (blocked.length) {
+        console.log(`[Archivist] 🏷️ 标签桥挡在门外 ${blocked.length} 个（跟别名链接器同一套门）：[${blocked.slice(0, 5).join(' ')}]`);
+    }
+    if (queue.length === 0) return { discovered: 0, blocked: blocked.length };
+    if (!_canCallLLM(1)) return { discovered: 0, pending: queue.length, blocked: blocked.length };
+
+    const batch = queue.slice(0, maxPerRun);
+    const sideFrags = db.prepare(`
+        SELECT mf.source_date, mf.content FROM memory_fragments mf
+        JOIN fragment_entities fe ON fe.fragment_id = mf.id AND fe.entity_id = ?
+        ORDER BY COALESCE(NULLIF(mf.source_date, ''), mf.created_at) DESC LIMIT 2
+    `);
+    const fmtSide = (ent) => {
+        const st = (ent.current_status || '').replace(/\n/g, ' / ').slice(0, 100);
+        const fr = sideFrags.all(ent.id).map(f => `      · ${(f.content || '').slice(0, 70)}`).join('\n');
+        return `「${ent.name}」(${ent.category})${st ? `\n    近况：${st}` : ''}${fr ? `\n    素材：\n${fr}` : ''}`;
+    };
+    const pairBlocks = batch.map((c, i) =>
+        `[${i}] ${fmtSide(c.a)}\n    它的标签里写着 →「${c.tag}」\n${fmtSide(c.b)}`
+    ).join('\n\n');
+
+    const prompt = `下面每一对星座，是**其中一个的标签里写着另一个的名字**。标签是自动打的，
+可能打错。请判断这个标签是不是真的指向某种关系，写一句话说明。
+
+⚠️ 关系必须是**能一句话验证的事实**（同一个项目与其出品方、同一个人与其常住地、
+同一件事与其发生场所）。写不出一句能验证的事实，就说明它其实没关系 → 填 null。
+⚠️ **宁可空着，不要编一句听起来合理的。** 标签打错的情况真实存在（比如某家机构被
+打上了"某次活动"的标签，而那次活动其实不在那家机构办的）——那种要填 null。
+
+${pairBlocks}
+
+只输出JSON数组: [{"pair":0,"relation":"一句话描述或null"}, ...]`;
+
+    let items;
+    try {
+        const raw = await callLLM(
+            [{ role: 'user', parts: [{ text: prompt }] }],
+            WORLD_CONTEXT, null,
+            { temperature: 0.2, maxOutputTokens: 1200, thinkingConfig: { thinkingBudget: 0 } },
+            ARCHIVIST_LLM_CONFIG_ID
+        );
+        agentState.tickLLMCalls++; agentState.dailyLLMCalls++;
+        const m = (raw?.reply || raw?.text || raw?.content || '').match(/\[[\s\S]*\]/);
+        if (!m) return { discovered: 0, pending: queue.length - batch.length, blocked: blocked.length };
+        items = JSON.parse(m[0]);
+    } catch (e) {
+        console.error('[Archivist] 标签桥 LLM 失败:', e.message);
+        return { discovered: 0, blocked: blocked.length };
+    }
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    let discovered = 0;
+    for (const item of items) {
+        const c = batch[item.pair];
+        if (!c) continue;
+        if (!item.relation || item.relation === 'null') {
+            console.log(`[Archivist] ⏭️ 标签桥不成关系: ${c.a.name} --「${c.tag}」--> ${c.b.name}`);
+            continue;
+        }
+        const rel = String(item.relation).slice(0, 60);
+        if (dryRun) {
+            console.log(`[Archivist] 🏷️ (dry) 标签桥: ${c.a.name} ↔ ${c.b.name} — ${rel}`);
+            discovered++;
+            continue;
+        }
+        try {
+            _writeEntityRelation(c.a, c.b, rel, 0, { reviewed: stamp });
+            _writeEntityRelation(c.b, c.a, rel, 0, { reviewed: stamp });
+            discovered++;
+            console.log(`[Archivist] 🏷️ 标签桥: ${c.a.name} ↔ ${c.b.name} — ${rel}`);
+        } catch (e) {
+            console.error('[Archivist] 标签桥写入失败:', e.message);
+        }
+    }
+    if (discovered > 0 && !dryRun) {
+        try {
+            db.prepare(`INSERT INTO ontology_changelog (action, category_path, detail) VALUES ('entity_bridges_tag', NULL, ?)`)
+                .run(JSON.stringify({ count: discovered, blocked: blocked.length, pending: queue.length - batch.length }));
+        } catch (_) {}
+    }
+    return { discovered, blocked: blocked.length, pending: queue.length - batch.length };
+}
+
 async function discoverRelatedEntities() {
     const db = getDb();
     let discovered = 0;
@@ -3206,6 +3374,17 @@ async function discoverRelatedEntities() {
         await reviewEntityRelations();
     } catch (e) {
         console.error('[Archivist] 关系表体检失败:', e.message);
+    }
+
+    // Tag bridges are an INDEPENDENT path, so they're called here — the co-occurrence
+    // section below has several early returns (`pairs.length === 0`, `fresh.length === 0`,
+    // LLM failure), and anything hung off its tail never runs on cycles where
+    // co-occurrence comes up empty.
+    try {
+        const tagRes = await discoverTagRelations();
+        discovered += (tagRes?.discovered || 0);
+    } catch (e) {
+        console.error('[Archivist] 标签桥失败:', e.message);
     }
 
     const pairs = db.prepare(`
@@ -5733,8 +5912,9 @@ module.exports = {
     _mentionWeight,
     _aliasAmbiguous,
     _entityMentionOwners,
-    // 关系表体检（导出供一次性清理脚本 + 探针复用）
+    // 关系表体检 + 标签桥（导出供一次性清理脚本 + 探针复用）
     reviewEntityRelations,
+    discoverTagRelations,
     // Agent lifecycle
     start,
     stop,
