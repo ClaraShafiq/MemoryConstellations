@@ -1233,7 +1233,11 @@ async function classifyFragments(opts = {}) {
     const unclassified = db.prepare(`
         SELECT mf.id, mf.content, mf.emotional_weight, mf.created_at
         FROM memory_fragments mf
-        WHERE mf.status = 'active'
+        // ⚠️ 入口含 consolidated/cooling：整合跑完会把碎片改成 'consolidated'，
+        // 而另一条管线也在抢同一批碎片——谁先到谁说了算。碎片一旦被写成 episode
+        // 就永久退出分类，fragment_entities 的链接再也不会建立。
+        // 配套是通的：实体概述读碎片时本来就认这三个状态。
+        WHERE mf.status IN ('active', 'consolidated', 'cooling')
           AND mf.source NOT IN ('music', 'book')
           AND mf.id NOT IN (SELECT DISTINCT fragment_id FROM fragment_entities)
         ORDER BY mf.created_at DESC
@@ -1371,6 +1375,16 @@ async function classifyFragments(opts = {}) {
                             || seedName.trim().length < 2
                             || /^\d+$/.test(seedName.trim())) {
                             console.log(`[Archivist] ⏭ 种子名不合格，跳过: "${seedName}"`);
+                            continue;
+                        }
+                        // 纯日期/时间短语不是实体（上午/日下午/三点半/9月3日…）
+                        if (isTimePhraseName(seedName.trim())) {
+                            console.log(`[Archivist] ⏭ 种子名是时间短语，跳过: "${seedName}"`);
+                            continue;
+                        }
+                        // 以期间词收尾的名字也不是实体（XX告别季/XX购置季/XX倦怠期…）
+                        if (isPeriodPhraseName(seedName.trim())) {
+                            console.log(`[Archivist] ⏭ 种子名是期间短语，跳过: "${seedName}"`);
                             continue;
                         }
                         const existing = db.prepare('SELECT id, name, aliases FROM entity_profiles WHERE LOWER(name) = LOWER(?)').get(seed.name);
@@ -1880,6 +1894,57 @@ function _nameBigrams(name) {
     for (let i = 0; i < s.length - 1; i++) grams.add(s.slice(i, i + 2));
     return grams;
 }
+
+// ═══════════════════════════════════════════════════════
+// 种子名守卫：纯日期/时间短语不是实体
+//
+// LLM 会把 Scribe 每日状态里「9月3日上午抵达…」的「日上午」「日下午」
+// 当成有名字的 term 实体播种，污染星图 + autoLinkLiteralMentions 再
+// 用 LIKE '%上午%' 把它们喂到 65/108 条碎片。铁证规则：名字的每一个
+// 字符都落在日期/时间字符集内 → 拒绝（不靠 LLM 自觉，不进人工队列）。
+// 「阿日斯兰」「下午茶」这类混了非时间字的正常名字不受影响。
+// ═══════════════════════════════════════════════════════
+const TIME_PHRASE_NAME_RE = /^[\d零一二三四五六七八九十百千万两〇年月日号周星期礼拜天时分秒点上下中早晚午晨夜凌傍黄晌今明昨天后天前个半初末旬几更]+$/;
+function isTimePhraseName(name) {
+    if (typeof name !== 'string') return true;
+    const s = name.trim();
+    if (s.length < 2) return true;
+    return TIME_PHRASE_NAME_RE.test(s);
+}
+
+// ── 种子名守卫（二）：以「期间词」收尾的名字不是实体 ──────────────
+//
+// 上一条只拦"全是日期/时间字"的名字，拦不住「XX告别季」「XX购置季」
+// 「XX倦怠期」这类——它们是模型把**一段反复出现的行为/状态**包装成
+// "独立事件"来绕开判据的产物（涌现检测的 prompt 要求"必须是独立的具体
+// 地点或事件"，起名就成了它的解法）。
+//
+// 判据：**专有名词不会以期间词收尾**。季/期/历程/过程/日常/阶段 收尾
+// 一律拒。刻意不含「计划」「系列」「记录」——「曼哈顿计划」「某作品系列」
+// 这类可能是正经项目/作品名，误杀代价比放过一条大。
+const PERIOD_PHRASE_NAME_RE = /(季|期|历程|过程|日常|阶段)$/;
+function isPeriodPhraseName(name) {
+    if (typeof name !== 'string') return true;
+    const s = name.trim();
+    if (s.length < 2) return true;
+    return PERIOD_PHRASE_NAME_RE.test(s);
+}
+
+// ── 近况哨兵：「无明显变化」是"没有新动态"，不是一条动态 ───────────
+//
+// 写 current_status 的地方都是**替换**语义，收到哨兵照样 UPDATE，就会把
+// 上一次的有效近况整个擦掉。哨兵一律不落库，旧值留着。
+//
+// ⚠️ 只用于 current_status，**不要拿去判 judgment**：judgment 的「无」是
+// 合法值（没话可说就不硬编），不是哨兵。
+const NO_CHANGE_SENTINEL_RE = /^(无|暂无|无明显变化|无变化|没有明显变化|无新动态|近期无新动态|无明显动态)[。.，,、\s]*$/;
+function isNoChangeSentinel(text) {
+    if (typeof text !== 'string') return true;
+    const s = text.trim();
+    if (!s) return true;
+    return NO_CHANGE_SENTINEL_RE.test(s);
+}
+
 
 async function mergeDuplicateSeeds() {
     const db = getDb();
@@ -2438,6 +2503,88 @@ ${(ep.content || '').slice(0, 500)}
 // 仅深循环调用（ChromaDB依赖）。每轮≤3个候选团。
 // ═══════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════
+// 涌现判据（2026-09-28 重写）
+//
+// 旧判据是「这些碎片是否指向一个**独立的具体地点或事件**（与已有实体都不同）」。
+// 它有个致命的结构问题：**"与已有实体都不同"这句话是在教模型找理由分裂**——
+// 只要它能说出"我和那个不一样"，就算过关。于是它学会了给一段**反复出现的行为**
+// 起个「XX季」的名字——换个名字，那就不再是"行为模式"，而是"一段事件"了。
+//
+// 新判据把门槛下在**专有名词**上：判据要硬（有没有出现一个具体的人名/店名/地名/
+// 机构名/作品名，或者是不是某一天真的出了某件事），不要软（像不像事件）——
+// "像不像"正是模型最擅长绕的东西。配套还有两道确定性守卫：
+// `isTimePhraseName`（全是日期时间字）与 `isPeriodPhraseName`（以期间词收尾）。
+//
+// ⚠️ 改这个 prompt 之后**必须双向回归**：既要确认它拒掉该拒的，也要确认它
+//    **没把该建的也拒掉**（过度收紧 = 涌现功能停摆，比原来更糟）。
+// ═══════════════════════════════════════════════════════
+function buildEmergentJudgePrompt(sampleText, memberCount, existingBlock) {
+    return `下面是一组来自聊天记录的碎片，它们在语义上高度相似，可能指向同一个地点或事件，但尚未被识别为独立的记忆星座。
+
+碎片样本（${memberCount}条中的若干条）：
+${sampleText.slice(0, 2500)}
+
+记忆库已有实体（新建前先对照这个列表）：
+${existingBlock}
+
+判断标准（**按顺序过，前一条不过就不要再往后想**）：
+
+1. ⚠️ **先找那样东西——这是硬门槛。** 满足下面**任一条**才继续；两条都不满足 → is_entity=false，到此为止：
+
+   **a. 一个新的专有名词**——具体的人名 / 店名 / 地名 / 机构名 / 作品名。
+
+   **b. 某一天真的出了某件事**——崩溃、大吵一架、出事、第一次做某事、某个决定。
+   ⚠️ 判 b 的铁律：**它是「那一天发生的」，不是「那段时间在做的」。**
+   拿一句话自检：这件事能用**一个具体日期**说完吗？
+   · 「X月X日${USER.pronoun || 'TA'}崩溃了」✓ 是事件
+   · 「X月${USER.pronoun || 'TA'}在读某本书」「X月${USER.pronoun || 'TA'}一直在买东西」✗ 是持续行为，不是事件
+   · 有的碎片里确实出现了某天的日期，但整簇讲的是**跨了几周几个月的同一类事** → 判 false。
+     出现日期不等于发生在一天。
+
+   下面这些**两条都不满足**，一律判 false：
+   · 行为：怎么做的描述（什么时候去哪、干了什么、买了什么）
+   · 持续过程：跨越一段时间的同一件事（在做什么、一直在做什么）
+   · 习惯/日常：重复发生的程序
+   · 状态/心情：身心状况与感受
+   · 时间段：某段时间、某个周期
+   ⚠️ **把它们包装成「XX季」「XX期」「XX历程」不会让它变成事件**——换个名字还是那件事。
+
+2. **它是不是已经被上面某个已有实体占了？**（走 a 的比对名字/别名；走 b 的看那个事件是不是已经有星座了）占了 → is_entity=false，归过去，不要另起炉灶。
+
+3. **它是不是某个已有实体的子话题/细节？** 碎片如果讲的只是某个已有实体的一个**环节/细节**（大实体已经存在），那就是子话题 → is_entity=false，不独立建星座。
+
+4. 都过了才建，注明 place 或 event：
+   · 走 a 的：**名字用那个专有名词本身**（2-8 字，可以是它的直接变体）。
+   · 走 b 的：名字**带上日期和那件事**，让人一眼看出是哪天出了什么事；**不要起成「XX期」「XX季」**——那样又变成行为包装了。
+
+只输出JSON:
+{"is_entity":true|false,"name":"名称","category":"place|event","reason":"一句话理由（指认那个专有名词 / 指认那个一次性事件 / 归属已有实体 / 既没有专有名词也不是一次性事件）"}`;
+}
+
+// 涌现判定的**代码侧闸门**（LLM 判完之后、建实体之前）。
+//
+// ⚠️ 抽成函数是为了让回归探针量到的是「**生产最终会怎么判**」，而不是裸的模型输出。
+//    分开写的话，探针会把**已经被这几道铁证拦掉**的误判报成"漏判"。
+//
+// 三道闸各自拦什么：
+//   · 名字是纯日期/时间短语（`isTimePhraseName`）
+//   · 名字以期间词收尾（`isPeriodPhraseName`）
+//   · **理由自相矛盾**：说了"已被占用/归入已有/不另起炉灶"，flag 却是 true。
+//     名字/别名去重拦不住它（同一个东西换个说法，bigram 重叠到不了
+//     阈值），所以看理由下判断——理由里明说了"有主"，就当 false，别信 flag。
+function screenEmergentVerdict(verdict) {
+    if (!verdict || !verdict.is_entity) return { accept: false, reason: 'not_entity' };
+    const name = String(verdict.name || '').trim();
+    if (name.length < 2 || /^\d+$/.test(name)) return { accept: false, reason: 'name_invalid' };
+    if (isTimePhraseName(name)) return { accept: false, reason: 'time_phrase_name' };
+    if (isPeriodPhraseName(name)) return { accept: false, reason: 'period_phrase_name' };
+    if (/已被?.*(占用|覆盖|占据)|归入已有|归过去|不另起炉灶/.test(String(verdict.reason || ''))) {
+        return { accept: false, reason: 'self_contradictory' };
+    }
+    return { accept: true, name };
+}
+
 async function detectEmergentPlacesAndEvents() {
     const db = getDb();
     const { searchMemoriesByVector } = require('./memory');
@@ -2520,18 +2667,17 @@ async function detectEmergentPlacesAndEvents() {
             return `[${date}] ${(f.content || '').slice(0, 200)}`;
         }).join('\n');
 
-        const prompt = `下面是一组来自聊天记录的碎片，它们在语义上高度相似，可能指向同一个地点或事件，但尚未被识别为独立的记忆星座。
+        // 已有实体索引——让 LLM 判断新话题是否归属已有实体，而非盲目新建
+        const existingEnts = db.prepare(`
+            SELECT name, category FROM entity_profiles
+            WHERE status IN ('active','seed') AND category IN ('place','event','project','term')
+            ORDER BY fragment_count DESC LIMIT 60
+        `).all();
+        const existingBlock = existingEnts.length > 0
+            ? existingEnts.map(e => `· ${e.name}（${e.category}）`).join('\n')
+            : '（暂无）';
 
-碎片样本（${cluster.member_ids.length}条中的${samples.length}条）：
-${sampleText.slice(0, 2500)}
-
-请判断：
-1. 这些碎片是否指向一个**具体的地点或事件**（有明确的时间/空间锚点，如某次旅行、某个常去的地方、某天的活动）？
-2. ⚠️ 以下情况必须判 false：User的行为模式、情绪状态、心理特征、生活习惯、对某事的看法。这些不是地点也不是事件。
-3. 如果判 true，起简短名称（2-8个字，不要太泛）并注明 place 或 event。
-
-只输出JSON:
-{"is_entity":true|false,"name":"名称","category":"place|event","reason":"一句话理由"}`;
+        const prompt = buildEmergentJudgePrompt(sampleText, cluster.member_ids.length, existingBlock);
 
         try {
             const raw = await callLLM(
@@ -2546,10 +2692,18 @@ ${sampleText.slice(0, 2500)}
             if (!jsonMatch) continue;
             const verdict = JSON.parse(jsonMatch[0]);
 
-            if (verdict.is_entity && verdict.name && verdict.name.trim().length >= 2) {
-                // 种子名质量过滤
-                const name = verdict.name.trim();
-                if (/^\d+$/.test(name) || name.length < 2) continue;
+            // 代码侧闸门（铁证走规则）——闸门定义在 screenEmergentVerdict()，
+            // 生产和回归探针共用同一份，免得探针量到的是裸的模型输出。
+            const screened = screenEmergentVerdict(verdict);
+            if (!screened.accept) {
+                if (verdict?.is_entity) {
+                    console.log(`[Archivist] ⏭ 涌现判定被代码闸门拦下(${screened.reason}): "${verdict.name || ''}"`);
+                }
+                continue;
+            }
+
+            {
+                const name = screened.name;
 
                 let existing = db.prepare('SELECT id, name, aliases FROM entity_profiles WHERE LOWER(name) = LOWER(?)').get(name);
                 if (!existing) {
@@ -4064,6 +4218,9 @@ JSON格式：
                             const newStatus = statusText + '\n' + oldLines.slice(0, 9).join('\n');
                             updateCols.push('current_status = ?'); updateVals.push(newStatus);
                         }
+                    } else if (isNoChangeSentinel(statusText)) {
+                        // 哨兵（"无明显变化"）不落库——保住上一次的有效近况
+                        console.log(`[Archivist] ⏭️ ${ent.name}: 近况无变化，保留旧值`);
                     } else {
                         updateCols.push('current_status = ?'); updateVals.push(statusText);
                     }
@@ -5139,6 +5296,13 @@ ${examplesBlock}
 // ═══════════════════════════════════════════════════════
 
 module.exports = {
+    // 守卫规则（导出供回归测试复用；改名单/哨兵词表时先看 archivistGuards.test.js）
+    isTimePhraseName,
+    isPeriodPhraseName,
+    isNoChangeSentinel,
+    // 涌现判据（导出供回归探针复用，别另抄一份会走样的）
+    buildEmergentJudgePrompt,
+    screenEmergentVerdict,
     // Agent lifecycle
     start,
     stop,

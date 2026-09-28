@@ -264,6 +264,17 @@ async function runEntityExtraction() {
                     stats.unchanged++;
                     continue;
                 }
+                // ⚠️ 哨兵（"无明显变化"）不落库：这里是**整段替换**语义，实体不存在时
+                // 还会直接 INSERT 建一个。懒加载避免把整个 archivist 拖进来。
+                try {
+                    const { isNoChangeSentinel } = require('./archivist');
+                    if (isNoChangeSentinel(result.current_status)) {
+                        stats.unchanged++;
+                        continue;
+                    }
+                } catch (e) {
+                    console.warn('[Lifecycle] 哨兵闸加载失败（按旧行为继续）:', e.message);
+                }
                 const now = sqlNow();
                 const sourceFragIds = JSON.stringify(fragList.map(f => f.id));
 

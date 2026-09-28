@@ -84,6 +84,18 @@ async function updateEntityProfiles(newEpisodes) {
             continue;
         }
 
+        // ⚠️ 哨兵（"无明显变化"）不落库——跟 archivist 那边同一条规矩。
+        // 这里是**整段替换**语义，且实体不存在时会直接 INSERT 建一个。
+        try {
+            const { isNoChangeSentinel } = require('./archivist');
+            if (isNoChangeSentinel(u.new_status)) {
+                console.log(`[EntityProfile] ${u.entity} 跳过（近况是哨兵值，保留旧值）`);
+                continue;
+            }
+        } catch (e) {
+            console.warn('[EntityProfile] 哨兵闸加载失败（按旧行为继续）:', e.message);
+        }
+
         // 时间校验：新 status_since 不比旧的新 → 跳过（防止过期信息覆盖新信息）
         const newSince = u.status_since || '';
         const oldSince = existingMap.get(u.entity) || '';
