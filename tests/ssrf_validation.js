@@ -56,6 +56,14 @@ async function main() {
     test('192.168.1.1 -> 私有', () => { if (!isPrivateIP('192.168.1.1')) throw new Error('应判定为私有'); });
     test('100.64.0.1 CGNAT -> 私有', () => { if (!isPrivateIP('100.64.0.1')) throw new Error('应判定为私有'); });
     test('0.0.0.0 -> 私有', () => { if (!isPrivateIP('0.0.0.0')) throw new Error('应判定为私有'); });
+    test('192.0.0.1 IETF协议保留段 -> 私有', () => { if (!isPrivateIP('192.0.0.1')) throw new Error('应判定为私有'); });
+    test('192.0.2.1 TEST-NET-1 -> 私有', () => { if (!isPrivateIP('192.0.2.1')) throw new Error('应判定为私有'); });
+    test('198.18.0.1 benchmarking -> 私有', () => { if (!isPrivateIP('198.18.0.1')) throw new Error('应判定为私有'); });
+    test('198.51.100.1 TEST-NET-2 -> 私有', () => { if (!isPrivateIP('198.51.100.1')) throw new Error('应判定为私有'); });
+    test('203.0.113.1 TEST-NET-3 -> 私有', () => { if (!isPrivateIP('203.0.113.1')) throw new Error('应判定为私有'); });
+    test('224.0.0.1 多播 -> 私有', () => { if (!isPrivateIP('224.0.0.1')) throw new Error('应判定为私有'); });
+    test('240.0.0.1 保留段 -> 私有', () => { if (!isPrivateIP('240.0.0.1')) throw new Error('应判定为私有'); });
+    test('255.255.255.255 广播 -> 私有', () => { if (!isPrivateIP('255.255.255.255')) throw new Error('应判定为私有'); });
     test('8.8.8.8 -> 公网', () => { if (isPrivateIP('8.8.8.8')) throw new Error('不应判定为私有'); });
 
     console.log('\n── 2. isPrivateIP: IPv6 ──');

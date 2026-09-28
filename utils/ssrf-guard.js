@@ -15,14 +15,20 @@ function isPrivateIPv4(input) {
         return true; // 格式异常，安全起见按"私有"处理（fail closed）
     }
     const [a, b, c, d] = octets;
-    if (a === 0) return true;                             // 0.0.0.0/8
-    if (a === 10) return true;                             // 10.0.0.0/8
-    if (a === 127) return true;                            // 127.0.0.0/8 loopback
-    if (a === 100 && b >= 64 && b <= 127) return true;      // 100.64.0.0/10 CGNAT
-    if (a === 169 && b === 254) return true;                // 169.254.0.0/16（含云元数据 169.254.169.254）
-    if (a === 172 && b >= 16 && b <= 31) return true;        // 172.16.0.0/12
-    if (a === 192 && b === 168) return true;                // 192.168.0.0/16
-    if (a === 255 && b === 255 && c === 255 && d === 255) return true; // 广播地址
+    if (a === 0) return true;                                // 0.0.0.0/8
+    if (a === 10) return true;                               // 10.0.0.0/8
+    if (a === 127) return true;                              // 127.0.0.0/8 loopback
+    if (a === 100 && b >= 64 && b <= 127) return true;        // 100.64.0.0/10 CGNAT
+    if (a === 169 && b === 254) return true;                 // 169.254.0.0/16（含云元数据 169.254.169.254）
+    if (a === 172 && b >= 16 && b <= 31) return true;         // 172.16.0.0/12
+    if (a === 192 && b === 0 && c === 0) return true;         // 192.0.0.0/24 IETF Protocol Assignments
+    if (a === 192 && b === 0 && c === 2) return true;         // 192.0.2.0/24 TEST-NET-1
+    if (a === 192 && b === 168) return true;                  // 192.168.0.0/16
+    if (a === 198 && b >= 18 && b <= 19) return true;         // 198.18.0.0/15 benchmarking
+    if (a === 198 && b === 51 && c === 100) return true;      // 198.51.100.0/24 TEST-NET-2
+    if (a === 203 && b === 0 && c === 113) return true;       // 203.0.113.0/24 TEST-NET-3
+    if (a >= 224 && a <= 239) return true;                    // 224.0.0.0/4 multicast
+    if (a >= 240) return true;                                // 240.0.0.0/4 保留 + 255.255.255.255 广播
     return false;
 }
 
