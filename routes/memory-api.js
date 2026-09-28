@@ -1081,6 +1081,28 @@ router.post('/api/test-llm', requireAuth, async (req, res) => {
     
     try {
         const testEndpoint = endpoint || 'https://generativelanguage.googleapis.com/v1beta';
+
+        let parsedEndpoint;
+        try {
+            parsedEndpoint = new URL(testEndpoint);
+        } catch (e) {
+            return res.status(400).json({ success: false, error: '无效的endpoint地址' });
+        }
+        const hostname = parsedEndpoint.hostname.toLowerCase();
+        const isBlockedHost = parsedEndpoint.protocol !== 'https:' ||
+            hostname === 'localhost' ||
+            hostname === '169.254.169.254' ||
+            /^127\./.test(hostname) ||
+            /^10\./.test(hostname) ||
+            /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname) ||
+            /^192\.168\./.test(hostname) ||
+            hostname === '::1' ||
+            hostname.startsWith('fd') ||
+            hostname.startsWith('fe80');
+        if (isBlockedHost) {
+            return res.status(400).json({ success: false, error: '不允许访问该endpoint地址' });
+        }
+
         const url = `${testEndpoint}/models/${model_name}:generateContent?key=${api_key}`;
         
         const response = await fetch(url, {
