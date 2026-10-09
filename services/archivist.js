@@ -1,3 +1,13 @@
+function completeSentences(text,limit) {
+    if(typeof text!=='string') return '';
+    const trimmed=text.trim();if(trimmed.length<=limit) return trimmed;
+    const chunks=trimmed.match(/[^。！？.!?\n]+[。！？.!?\n]+/g)||[];
+    let result='';for(const sentence of chunks) {if(result.length+sentence.length>limit) break;result+=sentence;}
+    return result.trim();
+}
+const { prepareEpisodeBatch,persistEpisode,version:episodeVersion } = require('./episodeWriter');
+const { sourceFor,revision,commitReview } = require('./memoryIntegrity');
+const { linkWriter } = require('./memoryLinks');
 // =================================================================
 // Archivist Agent — 记忆认知核心
 //
@@ -326,7 +336,7 @@ function maybeTriggerFlashConsolidation(newFragmentIds, sourceMsgIds) {
     const placeholders = newFragmentIds.map(() => '?').join(',');
 
     const highEW = db.prepare(`
-        SELECT id, content, emotional_weight, source_msg_ids FROM memory_fragments
+        SELECT id, content, emotional_weight, source_msg_ids FROM memory_visible_fragments AS memory_fragments
         WHERE id IN (${placeholders}) AND emotional_weight >= ?
         ORDER BY emotional_weight DESC
     `).all(...newFragmentIds, FLASH_EW_THRESHOLD);
@@ -453,7 +463,7 @@ async function agentTick() {
         // Matches new fragments against user_model entries via keyword overlap
         if (newFragCount > 0) {
             try {
-                matchEvidenceFromFragments();
+                // Evidence judgments run in the awaited deep cycle, never as an unobserved light-tick promise.
                 // harvestFacts v4.8 退役：User 客观事实走 entity_profiles 档案，不再产 immutable_fact
                 // harvestFacts();
             } catch (e) {
@@ -575,7 +585,7 @@ async function agentTick() {
                 classify: async () => {
                     let classifyRounds = 0;
                     while (classifyRounds < MAX_CLASSIFY_ROUNDS && _canCallLLM(LLM_RESERVE_PER_ROUND + 25)) {
-                        const rem = db.prepare(`SELECT COUNT(*) as c FROM memory_fragments WHERE status = 'active' AND id NOT IN (SELECT DISTINCT fragment_id FROM fragment_entities)`).get()?.c || 0;
+                        const rem = db.prepare(`SELECT COUNT(*) as c FROM memory_visible_fragments AS memory_fragments WHERE status = 'active' AND id NOT IN (SELECT DISTINCT fragment_id FROM memory_entity_associations AS fragment_entities)`).get()?.c || 0;
                         if (rem < 1) break;  // 即使1条也跑LLM分类(碎片少时LLM调用也小)
                         if (!_checkMemoryGate(MEMORY_CHECK_GRACE_MB, `分类第${classifyRounds + 1}轮`)) break;
                         const result = await runTask('classify', () => classifyFragments({ lightweight: false }));
@@ -649,8 +659,8 @@ async function agentTick() {
             // Always write a deep cycle summary to 观星手记
             try {
                 const db2 = getDb();
-                const unclassifiedNow = db2.prepare(`SELECT COUNT(*) as c FROM memory_fragments WHERE status='active' AND id NOT IN (SELECT DISTINCT fragment_id FROM fragment_entities)`).get()?.c || 0;
-                const seedsNow = db2.prepare(`SELECT COUNT(*) as c FROM entity_profiles WHERE status='seed'`).get()?.c || 0;
+                const unclassifiedNow = db2.prepare(`SELECT COUNT(*) as c FROM memory_visible_fragments AS memory_fragments WHERE status='active' AND id NOT IN (SELECT DISTINCT fragment_id FROM memory_entity_associations AS fragment_entities)`).get()?.c || 0;
+                const seedsNow = db2.prepare(`SELECT COUNT(*) as c FROM memory_visible_profiles AS entity_profiles WHERE status='seed'`).get()?.c || 0;
                 db2.prepare(`INSERT INTO ontology_changelog (action, category_path, detail, confidence, status)
                     VALUES ('deep_cycle', ?, ?, 0.80, 'completed')`)
                     .run('深循环完成', JSON.stringify({
@@ -721,30 +731,30 @@ async function assessTreeHealth() {
     const db = getDb();
 
     // v4.7: categoryCount = active entity_profiles (constellations), not memory_ontology
-    const categoryCount = (db.prepare("SELECT COUNT(*) as c FROM entity_profiles WHERE status = 'active'").get()?.c || 0);
+    const categoryCount = (db.prepare("SELECT COUNT(*) as c FROM memory_visible_profiles AS entity_profiles WHERE status = 'active'").get()?.c || 0);
 
     // Unclassified fragments — those not yet in fragment_entities
     // Music/book fragments are intentionally excluded: they're data exhaust
     // (listening/reading logs), not memory fragments about people/places/events.
     // They're harvested by musicMemoryExtractor/bookMemoryExtractor separately.
     const unclassified = db.prepare(`
-        SELECT COUNT(*) as c FROM memory_fragments
+        SELECT COUNT(*) as c FROM memory_visible_fragments AS memory_fragments
         WHERE status = 'active'
           AND source NOT IN ('music', 'book')
-          AND id NOT IN (SELECT DISTINCT fragment_id FROM fragment_entities)
+          AND id NOT IN (SELECT DISTINCT fragment_id FROM memory_entity_associations AS fragment_entities)
     `).get()?.c || 0;
 
     // Unclassified by source type
     const unclassifiedBySource = db.prepare(`
-        SELECT source, COUNT(*) as c FROM memory_fragments
+        SELECT source, COUNT(*) as c FROM memory_visible_fragments AS memory_fragments
         WHERE status = 'active'
-          AND id NOT IN (SELECT DISTINCT fragment_id FROM fragment_entities)
+          AND id NOT IN (SELECT DISTINCT fragment_id FROM memory_entity_associations AS fragment_entities)
         GROUP BY source ORDER BY c DESC
     `).all();
 
     // Fragments needing insights
     const needsInsight = db.prepare(`
-        SELECT COUNT(*) as c FROM memory_fragments
+        SELECT COUNT(*) as c FROM memory_visible_fragments AS memory_fragments
         WHERE insight IS NULL AND status = 'active'
           AND content IS NOT NULL AND length(content) > 10
     `).get()?.c || 0;
@@ -754,23 +764,23 @@ async function assessTreeHealth() {
 
     // Missing relationships (entities without relationship_to_user, with enough fragments)
     const missingRelations = db.prepare(`
-        SELECT COUNT(*) as c FROM entity_profiles ep
+        SELECT COUNT(*) as c FROM memory_visible_profiles ep
         WHERE ep.category = 'person'
           AND ep.name NOT IN (${SKIP_PH})
           AND (ep.relationship_to_user IS NULL OR ep.relationship_to_user = '')
-          AND (SELECT COUNT(*) FROM memory_fragments WHERE entity_id = ep.id AND status = 'active') >= ?
+          AND (SELECT COUNT(*) FROM memory_visible_fragments AS memory_fragments WHERE entity_id = ep.id AND status = 'active') >= ?
     `).get(...SKIP_NAMES, ENTITY_DISCOVERY_MIN_FRAGS)?.c || 0;
 
     // Stale relationships (low-confidence or 30-day-old high-confidence)
     const staleRelations = db.prepare(`
-        SELECT COUNT(*) as c FROM entity_profiles ep
+        SELECT COUNT(*) as c FROM memory_visible_profiles ep
         WHERE ep.category = 'person'
           AND ep.name NOT IN (${SKIP_PH})
           AND (
             (ep.relationship_confidence IN ('low', 'medium') AND (ep.last_evaluated_at IS NULL OR ep.last_evaluated_at < datetime('now', '-1 day')))
             OR (ep.relationship_confidence = 'high' AND ep.last_evaluated_at < datetime('now', '-30 days'))
           )
-          AND (SELECT COUNT(*) FROM memory_fragments WHERE entity_id = ep.id AND status = 'active') >= 3
+          AND (SELECT COUNT(*) FROM memory_visible_fragments AS memory_fragments WHERE entity_id = ep.id AND status = 'active') >= 3
     `).get(...SKIP_NAMES)?.c || 0;
 
     // Pending high-confidence proposals
@@ -795,7 +805,7 @@ function _countStaleEntityOverviews(db) {
     const entities = db.prepare(`
         SELECT ep.id, ep.name, ep.overview, ep.overview_updated_at,
                ep.last_eval_frag_count, ep.aliases, ep.tags
-        FROM entity_profiles ep
+        FROM memory_visible_profiles ep
         WHERE ep.status = 'active'
           AND ep.name NOT IN (${SKIP_PH})
     `).all(...SKIP_NAMES);
@@ -805,7 +815,7 @@ function _countStaleEntityOverviews(db) {
     let count = 0;
     for (const ent of entities) {
         const currentCount = db.prepare(
-            "SELECT COUNT(*) as c FROM fragment_entities WHERE entity_id = ?"
+            "SELECT COUNT(*) as c FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?"
         ).get(ent.id)?.c || 0;
 
         if (currentCount === 0) continue;
@@ -934,7 +944,7 @@ function _mentionWeight(s) {
 // Every name and alias in the library (lowercased) → the set of entities that own it.
 // Used to decide whether an alias is ambiguous.
 function _entityMentionOwners(db) {
-    const rows = db.prepare(`SELECT id, name, aliases FROM entity_profiles WHERE status IN ('seed','active')`).all();
+    const rows = db.prepare(`SELECT id, name, aliases FROM memory_visible_profiles AS entity_profiles WHERE status IN ('seed','active')`).all();
     const owners = new Map();
     const put = (k, id) => {
         const s = String(k || '').toLowerCase().trim();
@@ -970,7 +980,7 @@ function autoLinkLiteralMentions({ dryRun = false } = {}) {
     // Exclude music/book (data exhaust) and SKIP_NAMES (User/Companion handled separately)
     const seeds = db.prepare(`
         SELECT ep.id, ep.name, ep.category, ep.aliases, ep.fragment_count
-        FROM entity_profiles ep
+        FROM memory_visible_profiles ep
         WHERE ep.status IN ('seed', 'active')
           AND ep.name NOT IN (${SKIP_PH})
           AND ep.category NOT LIKE '%aggregate%'
@@ -986,10 +996,10 @@ function autoLinkLiteralMentions({ dryRun = false } = {}) {
     // library says "call it X or Y" and the linker only ever matches X.
     const owners = _entityMentionOwners(db);
     const countHits = db.prepare(`
-        SELECT COUNT(*) n FROM memory_fragments mf
+        SELECT COUNT(*) n FROM memory_visible_fragments mf
         WHERE mf.content LIKE ? AND mf.status = 'active'
           AND mf.source NOT IN ('music', 'book')
-          AND mf.id NOT IN (SELECT fragment_id FROM fragment_entities WHERE entity_id = ?)
+          AND mf.id NOT IN (SELECT fragment_id FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?)
     `);
     const rejected = { short: [], ambiguous: [], magnet: [] };
     const candidates = [];
@@ -1011,13 +1021,13 @@ function autoLinkLiteralMentions({ dryRun = false } = {}) {
     }
 
     let totalLinked = 0, aliasLinked = 0;
-    const insertFe = db.prepare('INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, relation, confidence, classified_by) VALUES (?, ?, NULL, ?, ?)');
-    const updateFc = db.prepare('UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ?) WHERE id = ?');
+    const insertFe = linkWriter(db,["fragment_id", "entity_id", "confidence", "classified_by"],{"relation": null});
+    const updateFc = db.prepare('UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?) WHERE id = ?');
     const findFrags = db.prepare(`
-        SELECT mf.id FROM memory_fragments mf
+        SELECT mf.id FROM memory_visible_fragments mf
         WHERE mf.content LIKE ? AND mf.status = 'active'
           AND mf.source NOT IN ('music', 'book')
-          AND mf.id NOT IN (SELECT fragment_id FROM fragment_entities WHERE entity_id = ?)
+          AND mf.id NOT IN (SELECT fragment_id FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?)
         ORDER BY mf.id DESC
         LIMIT ?
     `);
@@ -1108,7 +1118,7 @@ const AGGREGATE_MAP = (() => {
 //    链接只能在写入那一刻就打——`services/scribe.js` 的插入循环里调 linkTaggedFragment。
 
 function ensureTagEntity(db, def) {
-    const e = db.prepare(`SELECT id FROM entity_profiles WHERE name = ?`).get(def.name);
+    const e = db.prepare(`SELECT id FROM memory_visible_profiles AS entity_profiles WHERE name = ?`).get(def.name);
     if (e) return e.id;
     // ⚠️ 不给短词别名：聚合星座的 aliases 会被 autoLinkLiteralMentions 之外的路径读到，
     //    而给一个像「亲密」「身体」这样的短词，`LIKE '%身体%'` 会把全库相关描述都吸进来
@@ -1141,10 +1151,7 @@ function linkTaggedFragment(db, fragmentId, valueTags) {
         if (!tags.includes(def.tag)) continue;
         try {
             const eid = ensureTagEntity(db, def);
-            const r = db.prepare(`
-                INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, confidence, classified_by)
-                VALUES (?, ?, 0.85, 'tag_routing')
-            `).run(fragmentId, eid);
+            const r = linkWriter(db,["fragment_id", "entity_id"],{"confidence": 0.85, "classified_by": "tag_routing"}).run(fragmentId, eid);
             if (r.changes > 0) linked++;
         } catch (e) {
             console.warn(`[Archivist] 标路由链接失败 frag#${fragmentId} (${def.tag}): ${e.message}`);
@@ -1164,17 +1171,17 @@ function linkTaggedFragments(db) {
         try {
             const eid = ensureTagEntity(db, def);
             const rows = db.prepare(`
-                SELECT mf.id FROM memory_fragments mf
+                SELECT mf.id FROM memory_visible_fragments mf
                 WHERE mf.value_tags LIKE ?
                   AND mf.status IN ('active', 'consolidated', 'cooling')
-                  AND mf.id NOT IN (SELECT fragment_id FROM fragment_entities WHERE entity_id = ?)
+                  AND mf.id NOT IN (SELECT fragment_id FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?)
                 LIMIT 200
             `).all(`%"${def.tag}"%`, eid);
-            const ins = db.prepare(`INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, confidence, classified_by) VALUES (?, ?, 0.85, 'tag_routing')`);
+            const ins = linkWriter(db,["fragment_id", "entity_id"],{"confidence": 0.85, "classified_by": "tag_routing"});
             let n = 0;
             for (const r of rows) if (ins.run(r.id, eid).changes > 0) n++;
             if (n > 0) {
-                db.prepare(`UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ?) WHERE id = ?`).run(eid, eid);
+                db.prepare(`UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?) WHERE id = ?`).run(eid, eid);
                 console.log(`[Archivist] 💠 ${def.name} 补链: ${n} 条`);
             }
             total += n;
@@ -1189,18 +1196,18 @@ function linkAggregateFragments() {
     const db = getDb();
     let totalLinked = 0;
 
-    const insertFe = db.prepare('INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, confidence, classified_by) VALUES (?, ?, 0.60, ?)');
-    const updateFc = db.prepare('UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ?) WHERE id = ?');
+    const insertFe = linkWriter(db,["fragment_id", "entity_id", "classified_by"],{"confidence": 0.6});
+    const updateFc = db.prepare('UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?) WHERE id = ?');
 
     const writeAll = db.transaction(() => {
         for (const [source, entityName] of Object.entries(AGGREGATE_MAP)) {
-            const entity = db.prepare("SELECT id FROM entity_profiles WHERE name = ? AND status = 'active'").get(entityName);
+            const entity = db.prepare("SELECT id FROM memory_visible_profiles AS entity_profiles WHERE name = ? AND status = 'active'").get(entityName);
             if (!entity) continue;
 
             const frags = db.prepare(`
-                SELECT mf.id FROM memory_fragments mf
+                SELECT mf.id FROM memory_visible_fragments mf
                 WHERE mf.source = ? AND mf.status = 'active'
-                  AND mf.id NOT IN (SELECT fragment_id FROM fragment_entities WHERE entity_id = ?)
+                  AND mf.id NOT IN (SELECT fragment_id FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?)
                 LIMIT 50
             `).all(source, entity.id);
 
@@ -1367,7 +1374,7 @@ function buildLandscapeIndex() {
     // v5.x: 星图从 entity_profiles 星座读取（替代已退役的 memory_ontology 话题树）
     const cats = db.prepare(`
         SELECT id, name AS path, category AS label, facts AS description, fragment_count
-        FROM entity_profiles
+        FROM memory_visible_profiles AS entity_profiles
         WHERE status = 'active'
         ORDER BY fragment_count DESC
         LIMIT 40
@@ -1423,14 +1430,14 @@ async function classifyFragments(opts = {}) {
     // by musicMemoryExtractor / bookMemoryExtractor. Not classified into entity graph.
     const unclassified = db.prepare(`
         SELECT mf.id, mf.content, mf.emotional_weight, mf.created_at
-        FROM memory_fragments mf
+        FROM memory_visible_fragments mf
         // ⚠️ 入口含 consolidated/cooling：整合跑完会把碎片改成 'consolidated'，
         // 而另一条管线也在抢同一批碎片——谁先到谁说了算。碎片一旦被写成 episode
         // 就永久退出分类，fragment_entities 的链接再也不会建立。
         // 配套是通的：实体概述读碎片时本来就认这三个状态。
         WHERE mf.status IN ('active', 'consolidated', 'cooling')
           AND mf.source NOT IN ('music', 'book')
-          AND mf.id NOT IN (SELECT DISTINCT fragment_id FROM fragment_entities)
+          AND mf.id NOT IN (SELECT DISTINCT fragment_id FROM memory_entity_associations AS fragment_entities)
         ORDER BY mf.created_at DESC
         LIMIT 200
     `).all();
@@ -1444,7 +1451,7 @@ async function classifyFragments(opts = {}) {
     // Load current constellations (entity_profiles grouped by category)
     const allEntities = db.prepare(`
         SELECT id, name, category, overview, aliases, fragment_count, status
-        FROM entity_profiles
+        FROM memory_visible_profiles AS entity_profiles
         ORDER BY CASE category
             WHEN 'person' THEN 0 WHEN 'pet' THEN 1
             WHEN 'place' THEN 2 WHEN 'event' THEN 3
@@ -1466,10 +1473,7 @@ async function classifyFragments(opts = {}) {
         return { classified: 0 };
     }
 
-    const insertFe = db.prepare(`
-        INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, relation, confidence, classified_by)
-        VALUES (?, ?, ?, ?, ?)
-    `);
+    const insertFe = linkWriter(db,["fragment_id", "entity_id", "relation", "confidence", "classified_by"],{});
 
     let classified = 0;
 
@@ -1477,7 +1481,7 @@ async function classifyFragments(opts = {}) {
         // Lightweight: keyword match against entity names + aliases only, no LLM.
         // Two-tier confidence: exact alias match → 0.55, bigram substring match → 0.35
         const { exactIndex, bigramIndex } = buildEntityNameIndex(constellations);
-        const bigramInsert = db.prepare(`INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, relation, confidence, classified_by) VALUES (?, ?, NULL, 0.35, 'archivist_bigram_light')`);
+        const bigramInsert = linkWriter(db,["fragment_id", "entity_id"],{"relation": null, "confidence": 0.35, "classified_by": "archivist_bigram_light"});
 
         for (const frag of unclassified) {
             const content = frag.content || '';
@@ -1546,7 +1550,7 @@ async function classifyFragments(opts = {}) {
 
                     // Update entity fragment_count
                     db.prepare(`UPDATE entity_profiles SET fragment_count = (
-                        SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ?
+                        SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?
                     ), updated_at = datetime('now') WHERE id = ?`).run(assignment.entity_id, assignment.entity_id);
                 }
                 return { written, seedsMade };
@@ -1578,10 +1582,10 @@ async function classifyFragments(opts = {}) {
                             console.log(`[Archivist] ⏭ 种子名是期间短语，跳过: "${seedName}"`);
                             continue;
                         }
-                        const existing = db.prepare('SELECT id, name, aliases FROM entity_profiles WHERE LOWER(name) = LOWER(?)').get(seed.name);
+                        const existing = db.prepare('SELECT id, name, aliases FROM memory_visible_profiles AS entity_profiles WHERE LOWER(name) = LOWER(?)').get(seed.name);
                         if (!existing) {
                             // 检查种子名是否出现在已有实体的别名中
-                            const allEntities = db.prepare('SELECT id, name, aliases FROM entity_profiles WHERE status IN (\'active\',\'seed\')').all();
+                            const allEntities = db.prepare('SELECT id, name, aliases FROM memory_visible_profiles AS entity_profiles WHERE status IN (\'active\',\'seed\')').all();
                             for (const e of allEntities) {
                                 try {
                                     const aliases = JSON.parse(e.aliases || '[]');
@@ -1594,7 +1598,7 @@ async function classifyFragments(opts = {}) {
                             }
                         }
                         if (!existing) {
-                            const subCheck = db.prepare(`SELECT id, name, aliases FROM entity_profiles
+                            const subCheck = db.prepare(`SELECT id, name, aliases FROM memory_visible_profiles AS entity_profiles
                                 WHERE status IN ('active','seed')
                                 AND (LOWER(name) LIKE '%' || LOWER(?) || '%'
                                      OR LOWER(?) LIKE '%' || LOWER(name) || '%')
@@ -1602,7 +1606,7 @@ async function classifyFragments(opts = {}) {
                             if (subCheck) existing = subCheck;
                         }
                         if (!existing) {
-                            const candidates = db.prepare('SELECT id, name, aliases FROM entity_profiles WHERE status IN (\'active\',\'seed\')').all();
+                            const candidates = db.prepare('SELECT id, name, aliases FROM memory_visible_profiles AS entity_profiles WHERE status IN (\'active\',\'seed\')').all();
                             for (const c of candidates) {
                                 const aGrams = _nameBigrams(seed.name);
                                 const bGrams = _nameBigrams(c.name);
@@ -1804,13 +1808,13 @@ ${fragLines}
             if (!item.frag_id) continue;
 
             // Validate fragment ID
-            const fragExists = db.prepare('SELECT 1 FROM memory_fragments WHERE id = ?').get(item.frag_id);
+            const fragExists = db.prepare('SELECT 1 FROM memory_visible_fragments AS memory_fragments WHERE id = ?').get(item.frag_id);
             if (!fragExists) continue;
 
             if (item.constellations && item.constellations.length > 0) {
                 for (const c of item.constellations) {
                     // Validate entity ID
-                    const entityExists = db.prepare('SELECT 1 FROM entity_profiles WHERE id = ?').get(c.id);
+                    const entityExists = db.prepare('SELECT 1 FROM memory_visible_profiles AS entity_profiles WHERE id = ?').get(c.id);
                     if (!entityExists) continue;
                     assignments.push({
                         frag_id: item.frag_id,
@@ -1854,13 +1858,13 @@ async function rematchFragmentsForSeeds() {
     const seeds = db.prepare(`
         SELECT * FROM (
             SELECT ep.id, ep.name, ep.category, ep.fragment_count,
-                (SELECT COUNT(*) FROM memory_fragments mf
+                (SELECT COUNT(*) FROM memory_visible_fragments mf
                  WHERE mf.content LIKE '%' || ep.name || '%'
                    AND mf.status = 'active'
                    AND mf.source NOT IN ('music', 'book')
-                   AND mf.id NOT IN (SELECT fragment_id FROM fragment_entities WHERE entity_id = ep.id)
+                   AND mf.id NOT IN (SELECT fragment_id FROM memory_entity_associations AS fragment_entities WHERE entity_id = ep.id)
                 ) as unlinked
-            FROM entity_profiles ep
+            FROM memory_visible_profiles ep
             WHERE ep.status IN ('seed', 'active')
               AND ep.name NOT IN (${SKIP_PH})
               AND ep.category NOT LIKE '%aggregate%'
@@ -1888,10 +1892,10 @@ async function rematchFragmentsForSeeds() {
         const seedFragments = [];
         for (const s of batch) {
             const frags = db.prepare(`
-                SELECT id, content, created_at FROM memory_fragments
+                SELECT id, content, created_at FROM memory_visible_fragments AS memory_fragments
                 WHERE content LIKE ? AND status = 'active'
                   AND source NOT IN ('music', 'book')
-                  AND id NOT IN (SELECT fragment_id FROM fragment_entities WHERE entity_id = ?)
+                  AND id NOT IN (SELECT fragment_id FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?)
                 ORDER BY created_at DESC
                 LIMIT 15
             `).all('%' + s.name + '%', s.id);
@@ -1934,8 +1938,8 @@ async function rematchFragmentsForSeeds() {
             }
 
             const items = JSON.parse(jsonMatch[0]);
-            const insertFe = db.prepare('INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, relation, confidence, classified_by) VALUES (?, ?, NULL, 0.60, ?)');
-            const updateFc = db.prepare('UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ?) WHERE id = ?');
+            const insertFe = linkWriter(db,["fragment_id", "entity_id", "classified_by"],{"relation": null, "confidence": 0.6});
+            const updateFc = db.prepare('UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?) WHERE id = ?');
 
             let batchRematched = 0;
             const writeBatch = db.transaction(() => {
@@ -1983,7 +1987,7 @@ async function semanticRematchForSeeds() {
     // 小实体优先：碎片少的星座最需要喂
     const targets = db.prepare(`
         SELECT ep.id, ep.name, ep.category, ep.overview, ep.fragment_count
-        FROM entity_profiles ep
+        FROM memory_visible_profiles ep
         WHERE ep.status IN ('seed', 'active')
           AND ep.name NOT IN (${SKIP_PH})
           AND ep.fragment_count < 5
@@ -1993,10 +1997,9 @@ async function semanticRematchForSeeds() {
 
     if (targets.length === 0) return { rematched: 0 };
 
-    const insertFe = db.prepare(`INSERT OR IGNORE INTO fragment_entities
-        (fragment_id, entity_id, relation, confidence, classified_by) VALUES (?, ?, NULL, 0.55, 'semantic_rematch')`);
+    const insertFe = linkWriter(db,["fragment_id", "entity_id"],{"relation": null, "confidence": 0.55, "classified_by": "semantic_rematch"});
     const updateFc = db.prepare(`UPDATE entity_profiles SET fragment_count =
-        (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ?) WHERE id = ?`);
+        (SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?) WHERE id = ?`);
 
     let total = 0;
     for (const ent of targets) {
@@ -2012,7 +2015,7 @@ async function semanticRematchForSeeds() {
             continue;
         }
 
-        const linked = new Set(db.prepare('SELECT fragment_id FROM fragment_entities WHERE entity_id = ?')
+        const linked = new Set(db.prepare('SELECT fragment_id FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?')
             .all(ent.id).map(r => r.fragment_id));
         const candidates = (hits || []).filter(h =>
             h._table === 'memory_fragments' &&
@@ -2138,353 +2141,53 @@ function isNoChangeSentinel(text) {
 
 
 async function mergeDuplicateSeeds() {
-    const db = getDb();
-
-    const seeds = db.prepare(`
-        SELECT id, name, category, fragment_count, aliases, overview
-        FROM entity_profiles
-        WHERE status IN ('seed', 'active') AND name NOT IN (${SKIP_PH})
-          AND category NOT LIKE '%aggregate%'
-    `).all(...SKIP_NAMES);
-
-    // 泛指词检测：被 ≥2 个其他实体名包含的短名（「办公室」⊂ 公司A+公司B）
-    // 是类目词不是具体实体，与它的包含关系不构成同一性。
-    const genericNames = new Set();
-    for (const s of seeds) {
-        if (typeof s.name !== 'string') continue;
-        const sn = s.name.toLowerCase();
-        let containers = 0;
-        for (const o of seeds) {
-            if (typeof o.name !== 'string') continue;
-            if (o.id !== s.id && o.name.toLowerCase().includes(sn)) containers++;
-        }
-        if (containers >= 2) genericNames.add(s.id);
-    }
-
-    // ── v5.6 确定性别名合并：A.name ∈ B.aliases 或反之 → 零LLM直接合并 ──
-    // 覆盖跨文字系统（中文/拉丁/日文）的别名链路。
-    // aliases 是之前 LLM 运行已认定的等价关系，确定性 100%，不需要再验证。
-    let aliasMerged = 0;
-    const aliasSuperseded = new Set();
-    for (let i = 0; i < seeds.length; i++) {
-        if (aliasSuperseded.has(seeds[i].id)) continue;
-        for (let j = i + 1; j < seeds.length; j++) {
-            if (aliasSuperseded.has(seeds[j].id)) continue;
-            const a = seeds[i], b = seeds[j];
-            if (typeof a.name !== 'string' || typeof b.name !== 'string') continue;
-            if (genericNames.has(a.id) || genericNames.has(b.id)) continue;
-
-            let aAliases = [], bAliases = [];
-            try { aAliases = JSON.parse(a.aliases || '[]'); } catch (_) {}
-            try { bAliases = JSON.parse(b.aliases || '[]'); } catch (_) {}
-
-            const aNameLower = a.name.toLowerCase().trim();
-            const bNameLower = b.name.toLowerCase().trim();
-
-            const aInBAliases = bAliases.some(x => typeof x === 'string' && x.toLowerCase().trim() === aNameLower);
-            const bInAAliases = aAliases.some(x => typeof x === 'string' && x.toLowerCase().trim() === bNameLower);
-
-            if (!aInBAliases && !bInAAliases) continue;
-
-            const [winner, loser] = a.fragment_count >= b.fragment_count ? [a, b] : [b, a];
-            const reason = aInBAliases && bInAAliases ? '双向别名' : (aInBAliases ? `"${a.name}"是"${b.name}"的别名` : `"${b.name}"是"${a.name}"的别名`);
-
-            db.prepare(`UPDATE OR IGNORE fragment_entities SET entity_id = ? WHERE entity_id = ?`)
-                .run(winner.id, loser.id);
-            db.prepare(`DELETE FROM fragment_entities WHERE entity_id = ?`).run(loser.id);
-
-            const wAliases = (() => { try { return JSON.parse(winner.aliases || '[]'); } catch (_) { return []; } })();
-            const lAliases = (() => { try { return JSON.parse(loser.aliases || '[]'); } catch (_) { return []; } })();
-            const wTags = (() => { try { return JSON.parse(winner.tags || '[]'); } catch (_) { return []; } })();
-            const lTags = (() => { try { return JSON.parse(loser.tags || '[]'); } catch (_) { return []; } })();
-            let mergedAliases = [...new Set([...wAliases, ...lAliases, loser.name])];
-            mergedAliases = mergedAliases.filter(a => typeof a === 'string' && a.toLowerCase().trim() !== winner.name.toLowerCase().trim());
-            mergedAliases = mergedAliases.slice(0, 8);
-            const mergedTags = [...new Set([...wTags, ...lTags])].slice(0, 8);
-
-            db.prepare(`UPDATE entity_profiles SET aliases=?, tags=?, fragment_count=(SELECT COUNT(*) FROM fragment_entities WHERE entity_id=?), updated_at=datetime('now') WHERE id=?`)
-                .run(JSON.stringify(mergedAliases), JSON.stringify(mergedTags), winner.id, winner.id);
-            db.prepare(`UPDATE entity_profiles SET status='superseded', updated_at=datetime('now') WHERE id=?`).run(loser.id);
-
-            console.log(`[Archivist] 🔗 别名合并: "${loser.name}" → "${winner.name}" (${reason})`);
-            aliasSuperseded.add(loser.id);
-            aliasMerged++;
-
-            a.fragment_count = winner.id === a.id ? Math.max(a.fragment_count, b.fragment_count) : a.fragment_count;
-            b.fragment_count = winner.id === b.id ? Math.max(a.fragment_count, b.fragment_count) : b.fragment_count;
-        }
-    }
-    if (aliasMerged > 0) return { merged: aliasMerged, reason: 'alias_deterministic' };
-
-    // 候选对：同 category 且名字包含/bigram 相似
-    const pairs = [];
-    for (let i = 0; i < seeds.length; i++) {
-        for (let j = i + 1; j < seeds.length; j++) {
-            const a = seeds[i], b = seeds[j];
-            if (typeof a.name !== 'string' || typeof b.name !== 'string') continue;
-            if (a.category !== b.category) continue;
-            if (genericNames.has(a.id) || genericNames.has(b.id)) continue;
-            // 候选对只由名字关系产生。共享碎片不是同一性证据——
-            // 同一碎片提到两只猫/两个人是跨实体多挂的 feature，那是
-            // discoverRelatedEntities（关系桥）的领域。
-            // 名字互相包含（处理「Alex」vs「Al」这类单字/昵称，bigram 算不出）
-            const an = a.name.toLowerCase(), bn = b.name.toLowerCase();
-            if (an.includes(bn) || bn.includes(an)) { pairs.push({ a, b, nameContained: true, reason: '名字包含' }); continue; }
-            const ga = _nameBigrams(a.name), gb = _nameBigrams(b.name);
-            if (ga.size === 0 || gb.size === 0) continue;
-            let overlap = 0;
-            for (const g of ga) if (gb.has(g)) overlap++;
-            const ratio = overlap / Math.min(ga.size, gb.size);
-            if (ratio >= 0.5) pairs.push({ a, b, nameContained: false, reason: `名字相似${(ratio * 100).toFixed(0)}%` });
-        }
-    }
-
-    // 跨语言/缩写候选：同类别、零文本重叠、但共享碎片 ≥1 →
-    // LLM 判断是否为同一实体的别称（甲=甲的别称, 乙=乙的别称）
-    const crossLangCandidates = [];
-    for (let i = 0; i < seeds.length; i++) {
-        for (let j = i + 1; j < seeds.length; j++) {
-            const a = seeds[i], b = seeds[j];
-            if (a.category !== b.category) continue;
-            if (typeof a.name !== 'string' || typeof b.name !== 'string') continue;
-            if (genericNames.has(a.id) || genericNames.has(b.id)) continue;
-            const an = a.name.toLowerCase(), bn = b.name.toLowerCase();
-            // 跳过已有文本重叠的（已被上面的逻辑覆盖）
-            if (an.includes(bn) || bn.includes(an)) continue;
-            const ga = _nameBigrams(a.name), gb = _nameBigrams(b.name);
-            if (ga.size > 0 && gb.size > 0) {
-                let overlap = 0;
-                for (const g of ga) if (gb.has(g)) overlap++;
-                if (overlap / Math.min(ga.size, gb.size) >= 0.5) continue; // 已有文本匹配
-            }
-            // 零文本重叠 + 同类别 → LLM 别称判断候选
-            crossLangCandidates.push({ a, b });
-        }
-    }
-
-    // ── v5.5 碎片重叠路径: 共享碎片 ≥50% 直接合并（零 LLM）──
-    // 覆盖「甲 vs 乙」名字完全不同 + 「甲乙 vs 甲乙丙」跨category 情况
-    let overlapMerged = 0;
-    for (let i = 0; i < seeds.length; i++) {
-        for (let j = i + 1; j < seeds.length; j++) {
-            const a = seeds[i], b = seeds[j];
-            const crossCategory = a.category !== b.category;
-            const overlapThreshold = crossCategory ? 0.75 : 0.5;
-            if (typeof a.name !== 'string' || typeof b.name !== 'string') continue;
-            if (genericNames.has(a.id) || genericNames.has(b.id)) continue;
-            // Skip pairs already caught by name similarity (same-category only)
-            if (!crossCategory) {
-                const an = a.name.toLowerCase(), bn = b.name.toLowerCase();
-                if (an.includes(bn) || bn.includes(an)) continue;
-                const ga = _nameBigrams(a.name), gb = _nameBigrams(b.name);
-                if (ga.size > 0 && gb.size > 0) {
-                    let nOverlap = 0;
-                    for (const g of ga) if (gb.has(g)) nOverlap++;
-                    if (nOverlap / Math.min(ga.size, gb.size) >= 0.5) continue;
-                }
-            }
-
-            const overlap = db.prepare(`
-                SELECT COUNT(*) as c FROM fragment_entities fe1
-                JOIN fragment_entities fe2 ON fe1.fragment_id = fe2.fragment_id
-                WHERE fe1.entity_id = ? AND fe2.entity_id = ?
-            `).get(a.id, b.id)?.c || 0;
-
-            const minFrags = Math.min(a.fragment_count, b.fragment_count);
-            if (minFrags > 0 && overlap / minFrags >= overlapThreshold) {
-                const [winner, loser] = a.fragment_count >= b.fragment_count ? [a, b] : [b, a];
-                db.prepare(`UPDATE OR IGNORE fragment_entities SET entity_id = ? WHERE entity_id = ?`)
-                    .run(winner.id, loser.id);
-                db.prepare(`DELETE FROM fragment_entities WHERE entity_id = ?`).run(loser.id);
-                const wAliases = (() => { try { return JSON.parse(winner.aliases || '[]'); } catch(_) { return []; } })();
-                const lAliases = (() => { try { return JSON.parse(loser.aliases || '[]'); } catch(_) { return []; } })();
-                const wTags = (() => { try { return JSON.parse(winner.tags || '[]'); } catch(_) { return []; } })();
-                const lTags = (() => { try { return JSON.parse(loser.tags || '[]'); } catch(_) { return []; } })();
-                let mergedAliases = [...new Set([...wAliases, ...lAliases])];
-                if (crossCategory && loser.name && !mergedAliases.some(a => a.toLowerCase().trim() === loser.name.toLowerCase().trim())) {
-                    mergedAliases.unshift(loser.name);
-                }
-                mergedAliases = mergedAliases.slice(0, 8);
-                const mergedTags = [...new Set([...wTags, ...lTags])].slice(0, 8);
-                db.prepare(`UPDATE entity_profiles SET aliases=?, tags=?, fragment_count=(SELECT COUNT(*) FROM fragment_entities WHERE entity_id=?), updated_at=datetime('now') WHERE id=?`)
-                    .run(JSON.stringify(mergedAliases), JSON.stringify(mergedTags), winner.id, winner.id);
-                db.prepare(`UPDATE entity_profiles SET status='superseded', updated_at=datetime('now') WHERE id=?`).run(loser.id);
-                console.log(`[Archivist] 🔗 碎片重叠合并: "${loser.name}" → "${winner.name}" (重叠${overlap}/${minFrags}=${Math.round(overlap/minFrags*100)}%)`);
-                overlapMerged++;
-            }
-        }
-    }
-    if (overlapMerged > 0) return { merged: overlapMerged, reason: 'fragment_overlap' };
-
-    // 每轮最多问 LLM 3 对（控制成本）
-    let llmAliasChecked = 0;
-    for (const cand of crossLangCandidates) {
-        if (llmAliasChecked >= 3) break;
-        if (!_canCallLLM(1)) break;
-
-        const prompt = `记忆星系中有两个同属「${cand.a.category}」类别的星座，名字完全不同。请判断它们是否指同一个实体（只是用了不同的名称/别名/语言）。
-
-A: ${cand.a.name} (${cand.a.category}, ${cand.a.fragment_count}条碎片)
-B: ${cand.b.name} (${cand.b.category}, ${cand.b.fragment_count}条碎片)
-
-它们是同一个实体吗？只输出JSON: {"same":true|false,"reason":"一句话"}`;
-
-        try {
-            const raw = await callLLM(
-                [{ role: 'user', parts: [{ text: prompt }] }],
-                WORLD_CONTEXT, null,
-                { temperature: 0.1, maxOutputTokens: 150, thinkingConfig: { thinkingBudget: 0 } },
-                ARCHIVIST_LLM_CONFIG_ID
-            );
-            agentState.tickLLMCalls++; agentState.dailyLLMCalls++;
-            llmAliasChecked++;
-            const replyText = raw?.reply || raw?.text || raw?.content || '';
-            const jsonMatch = replyText.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) continue;
-            const verdict = JSON.parse(jsonMatch[0]);
-            if (verdict.same) {
-                pairs.push({ a: cand.a, b: cand.b, nameContained: false, reason: `LLM别名: ${verdict.reason}` });
-                console.log(`[Archivist] 🔗 LLM别名检测: ${cand.a.name} = ${cand.b.name} — ${verdict.reason}`);
-            }
-        } catch (e) {
-            console.error('[Archivist] LLM别名检测失败:', e.message);
-        }
-    }
-
-    // 时间线检测：同类别事件/地点，碎片日期高度重叠 → LLM 判断是否同一事件
-    // （「某日展会」和「某日展会活动」名字重叠但共享碎片为零，需日期证据）
-    const getFragDates = db.prepare(`
-        SELECT DISTINCT substr(mf.source_date,1,10) as day
-        FROM memory_fragments mf
-        JOIN fragment_entities fe ON mf.id = fe.fragment_id
-        WHERE fe.entity_id = ?
-        ORDER BY day
-    `);
-    const alreadyPaired = new Set();
-    for (const p of pairs) { alreadyPaired.add(`${p.a.id}-${p.b.id}`); alreadyPaired.add(`${p.b.id}-${p.a.id}`); }
-
-    let timeChecked = 0;
-    for (let i = 0; i < seeds.length && timeChecked < 2; i++) {
-        for (let j = i + 1; j < seeds.length && timeChecked < 2; j++) {
-            const a = seeds[i], b = seeds[j];
-            if (a.category !== b.category) continue;
-            if (a.category !== 'event' && a.category !== 'place') continue; // 只有事件/地点受益于时间证据
-            if (typeof a.name !== 'string' || typeof b.name !== 'string') continue;
-            if (alreadyPaired.has(`${a.id}-${b.id}`)) continue;
-            if (!_canCallLLM(1)) break;
-
-            const daysA = getFragDates.all(a.id).map(r => r.day);
-            const daysB = getFragDates.all(b.id).map(r => r.day);
-            const overlapDays = daysA.filter(d => daysB.includes(d));
-            const unionDays = new Set([...daysA, ...daysB]).size;
-            if (overlapDays.length === 0 || overlapDays.length / unionDays < 0.5) continue;
-            // 日期重叠 ≥50% → 可能是同一事件的不同名字
-
-            const prompt = `记忆星系中有两个「${a.category}」星座，名字不同但碎片日期高度重叠（${overlapDays.length}/${unionDays}天重叠：${overlapDays.slice(0,3).join(',')}${overlapDays.length>3?'...':''}）。
-
-A: ${a.name} (${a.fragment_count}条碎片)
-B: ${b.name} (${b.fragment_count}条碎片)
-
-它们是同一个实体吗（只是起了不同的名字）？只输出JSON: {"same":true|false,"reason":"一句话"}`;
-
-            try {
-                const raw = await callLLM(
-                    [{ role: 'user', parts: [{ text: prompt }] }],
-                    WORLD_CONTEXT, null,
-                    { temperature: 0.1, maxOutputTokens: 150, thinkingConfig: { thinkingBudget: 0 } },
-                    ARCHIVIST_LLM_CONFIG_ID
-                );
-                agentState.tickLLMCalls++; agentState.dailyLLMCalls++;
-                timeChecked++;
-                const replyText = raw?.reply || raw?.text || raw?.content || '';
-                const jsonMatch = replyText.match(/\{[\s\S]*\}/);
-                if (!jsonMatch) continue;
-                const verdict = JSON.parse(jsonMatch[0]);
-                if (verdict.same) {
-                    pairs.push({ a, b, nameContained: false, reason: `时间重叠(${overlapDays.length}/${unionDays}天): ${verdict.reason}` });
-                    console.log(`[Archivist] 🕐 时间线检测: ${a.name} = ${b.name} — ${overlapDays.length}/${unionDays}天重叠`);
-                }
-            } catch (e) {
-                console.error('[Archivist] 时间线检测LLM失败:', e.message);
-            }
-        }
-    }
-
-    if (pairs.length === 0) return { merged: 0 };
-
-    const sharedCount = db.prepare(`
-        SELECT COUNT(*) c FROM fragment_entities f1
-        JOIN fragment_entities f2 ON f1.fragment_id = f2.fragment_id
-        WHERE f1.entity_id = ? AND f2.entity_id = ?`);
-
-    // 确定性快道：名字互相包含 且 共享碎片占小方 ≥80%（≥3条）= 同一实体，不问 LLM。
-    // LLM 会被矛盾的自动生成概述带偏（「Alex」被写成人、「Al」被写成AI），而那矛盾正是要修的污染。
-    // 必须 nameContained——甲/乙 共享 100%（同一段宠物介绍多挂）但是两只猫，名字无关不走快道。
-    const autoSame = [];
-    const llmPairs = [];
-    for (const p of pairs) {
-        const shared = sharedCount.get(p.a.id, p.b.id).c;
-        const minFc = Math.max(1, Math.min(p.a.fragment_count, p.b.fragment_count));
-        if (p.nameContained && shared >= 3 && shared / minFc >= 0.8) autoSame.push(p);
-        else llmPairs.push(p);
-    }
-
-    // 非铁证候选不调 LLM（LLM 分不清「某地点/某商场」这类名字相似的不同实体，
-    // 误合并代价高且修复昂贵）→ 写入待确认队列，星图上由 User 人工裁决。
-    let proposed = 0;
-    const hasProposal = db.prepare(`
-        SELECT COUNT(*) c FROM ontology_changelog
-        WHERE action = 'merge_proposal'
-          AND json_extract(detail, '$.a_id') = ? AND json_extract(detail, '$.b_id') = ?
-          AND status IN ('pending', 'rejected')`);
-    const insProposal = db.prepare(`
-        INSERT INTO ontology_changelog (action, category_path, detail, status) VALUES ('merge_proposal', ?, ?, 'pending')`);
-    for (const p of llmPairs) {
-        // 同一对只提案一次；被拒过的不再提
-        if (hasProposal.get(p.a.id, p.b.id).c > 0 || hasProposal.get(p.b.id, p.a.id).c > 0) continue;
-        const shared = sharedCount.get(p.a.id, p.b.id).c;
-        insProposal.run(`${p.a.name} ↔ ${p.b.name}`, JSON.stringify({
-            a_id: p.a.id, a_name: p.a.name, a_fc: p.a.fragment_count,
-            b_id: p.b.id, b_name: p.b.name, b_fc: p.b.fragment_count,
-            reason: p.reason, shared,
-        }));
+    const db=getDb();
+    const seeds=db.prepare(`SELECT id,name,category,aliases,fragment_count FROM memory_visible_profiles
+        WHERE status IN ('seed','active') AND name NOT IN (${SKIP_PH})
+        AND category NOT LIKE '%aggregate%' ORDER BY fragment_count DESC LIMIT 200`).all(...SKIP_NAMES);
+    const sharedCount=db.prepare(`SELECT COUNT(*) c FROM memory_entity_associations a
+        JOIN memory_entity_associations b ON a.fragment_id=b.fragment_id WHERE a.entity_id=? AND b.entity_id=?`);
+    const existing=db.prepare(`SELECT 1 FROM ontology_changelog WHERE action='merge_proposal'
+        AND json_extract(detail,'$.a_id')=? AND json_extract(detail,'$.b_id')=?
+        AND status IN ('pending','rejected')`);
+    const insert=db.prepare(`INSERT INTO ontology_changelog(action,category_path,detail,status) VALUES('merge_proposal',?,?,'pending')`);
+    const aliases=row=>{try{return JSON.parse(row.aliases||'[]').filter(n=>typeof n==='string').map(n=>n.trim().toLowerCase());}catch{return [];}};
+    let proposed=0;
+    for(let i=0;i<seeds.length;i++) for(let j=i+1;j<seeds.length;j++) {
+        const a=seeds[i],b=seeds[j];
+        if(typeof a.name!=='string'||typeof b.name!=='string') continue;
+        const an=a.name.toLowerCase(),bn=b.name.toLowerCase();
+        const aliasMatch=aliases(a).includes(bn)||aliases(b).includes(an);
+        const shared=sharedCount.get(a.id,b.id).c;
+        const nameMatch=a.category===b.category && (an.includes(bn)||bn.includes(an));
+        // All three signals suggest review; none establishes identity.
+        if(!aliasMatch && !nameMatch && shared<3) continue;
+        if(existing.get(a.id,b.id)||existing.get(b.id,a.id)) continue;
+        insert.run(`${a.name} ↔ ${b.name}`,JSON.stringify({a_id:a.id,b_id:b.id,a_name:a.name,b_name:b.name,
+            a_fc:a.fragment_count,b_fc:b.fragment_count,shared,reason:aliasMatch?'alias_candidate':nameMatch?'name_candidate':'shared_context_candidate'}));
         proposed++;
-        console.log(`[Archivist] 🔍 合并提案入队: "${p.a.name}" ↔ "${p.b.name}" (${p.reason}) — 待 User 确认`);
     }
-
-    let merged = 0;
-    const mergedIds = new Set(); // 防止链式合并同一实体两次
-    for (const p of autoSame) {
-        const { a, b } = p;
-        if (mergedIds.has(a.id) || mergedIds.has(b.id)) continue;
-        // 碎片多者存活；同数则名字短者存活（通常更规范）
-        const [survivor, victim] = (a.fragment_count > b.fragment_count ||
-            (a.fragment_count === b.fragment_count && a.name.length <= b.name.length)) ? [a, b] : [b, a];
-        if (executeEntityMerge(survivor.id, victim.id)) {
-            mergedIds.add(victim.id);
-            merged++;
-        }
-    }
-
-    return { merged, proposed };
+    return {merged:0,proposed};
 }
 
-// 合并执行（事务）：自动快道与人工确认 API 共用。返回 true=成功。
+// 合并执行（事务）：仅人工确认 API 调用。返回 true=成功。
 // 合并时要跟着存活者走的关系列。败者会被标 status='merged'，而 merged 行没有任何
 // 查询会再读，留在那儿等于永久丢失；这三列也不参与 overview 重生成，不会自己长回来。
 const MERGE_CARRY_COLS = ['relationship_to_user', 'relationship_nature', 'emotional_significance'];
 
-function executeEntityMerge(survivorId, victimId) {
+function executeEntityMerge(survivorId, victimId, { identityConfirmed = false } = {}) {
+    if (!identityConfirmed || survivorId===victimId) return false;
     const db = getDb();
-    const survivor = db.prepare(`SELECT id, name, aliases, ${MERGE_CARRY_COLS.join(', ')} FROM entity_profiles WHERE id = ?`).get(survivorId);
-    const victim = db.prepare(`SELECT id, name, ${MERGE_CARRY_COLS.join(', ')} FROM entity_profiles WHERE id = ?`).get(victimId);
+    const survivor = db.prepare(`SELECT id, name, aliases, ${MERGE_CARRY_COLS.join(', ')} FROM memory_visible_profiles AS entity_profiles WHERE id = ?`).get(survivorId);
+    const victim = db.prepare(`SELECT id, name, ${MERGE_CARRY_COLS.join(', ')} FROM memory_visible_profiles AS entity_profiles WHERE id = ?`).get(victimId);
     if (!survivor || !victim) return false;
     try {
         const doMerge = db.transaction(() => {
             // 迁移碎片链接（重复的由 UNIQUE 约束 + OR IGNORE 吸收）
             const victimLinks = db.prepare('SELECT fragment_id, relation, confidence, classified_by FROM fragment_entities WHERE entity_id = ?').all(victim.id);
-            const ins = db.prepare('INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, relation, confidence, classified_by) VALUES (?, ?, ?, ?, ?)');
+            const ins = linkWriter(db,["fragment_id", "entity_id", "relation", "confidence", "classified_by"],{});
             for (const l of victimLinks) ins.run(l.fragment_id, survivor.id, l.relation, l.confidence, l.classified_by);
+            db.prepare('UPDATE memories SET entity_id=? WHERE entity_id=?').run(survivor.id,victim.id);
             db.prepare('DELETE FROM fragment_entities WHERE entity_id = ?').run(victim.id);
             // 败者名字进存活者 aliases（Set 顺带去重，败者名和已有的重复项一起收掉）
             let aliases = [];
@@ -2499,7 +2202,7 @@ function executeEntityMerge(survivorId, victimId) {
             // ⚠️ 置空的是 facts 不是 overview：v5.9 起 overview 列已退役，写入侧重写的是 facts，
             // 置空 overview 等于写进一个没人再读、也不会被重建的列。
             const setCols = ['aliases = ?', 'facts = NULL', ...relCols,
-                'fragment_count = (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ?)',
+                'fragment_count = (SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?)',
                 "updated_at = datetime('now')"];
             db.prepare(`UPDATE entity_profiles SET ${setCols.join(', ')} WHERE id = ?`)
                 .run(JSON.stringify(aliases), ...relVals, survivor.id, survivor.id);
@@ -2599,7 +2302,7 @@ async function auditNewEpisodes() {
     const { encryption } = require('../encryption');
 
     const episodes = db.prepare(`
-        SELECT id, content, source_msg_ids, created_at FROM memories
+        SELECT id, content, source_msg_ids, created_at FROM memory_valid_episodes AS memories
         WHERE layer = 'episode' AND consolidation_type = 'standard'
           AND (audit_status IS NULL OR audit_status = '')
         ORDER BY created_at DESC LIMIT 3
@@ -2783,15 +2486,15 @@ async function detectEmergentPlacesAndEvents() {
     // 取没链接到地点/事件的碎片（但已链接到person/pet）
     const orphanFrags = db.prepare(`
         SELECT DISTINCT mf.id, mf.content, mf.created_at
-        FROM memory_fragments mf
-        JOIN fragment_entities fe_person ON mf.id = fe_person.fragment_id
-        JOIN entity_profiles ep_person ON fe_person.entity_id = ep_person.id
+        FROM memory_visible_fragments mf
+        JOIN memory_entity_associations fe_person ON mf.id = fe_person.fragment_id
+        JOIN memory_visible_profiles ep_person ON fe_person.entity_id = ep_person.id
         WHERE ep_person.category IN ('person', 'pet')
           AND mf.status = 'active'
           AND mf.id NOT IN (
             SELECT DISTINCT fe2.fragment_id
-            FROM fragment_entities fe2
-            JOIN entity_profiles ep2 ON fe2.entity_id = ep2.id
+            FROM memory_entity_associations fe2
+            JOIN memory_visible_profiles ep2 ON fe2.entity_id = ep2.id
             WHERE ep2.category IN ('place', 'event')
           )
         ORDER BY mf.created_at DESC
@@ -2823,8 +2526,8 @@ async function detectEmergentPlacesAndEvents() {
         for (const h of (similar || [])) {
             if (h.similarity < 0.55) continue;
             const linked = db.prepare(`
-                SELECT COUNT(*) as c FROM fragment_entities fe
-                JOIN entity_profiles ep ON fe.entity_id = ep.id
+                SELECT COUNT(*) as c FROM memory_entity_associations fe
+                JOIN memory_visible_profiles ep ON fe.entity_id = ep.id
                 WHERE fe.fragment_id = ? AND ep.category IN ('place', 'event')
             `).get(h.id);
             if (linked.c > 0) continue; // 已有place/event链接，跳过
@@ -2849,7 +2552,7 @@ async function detectEmergentPlacesAndEvents() {
         // 取团内碎片内容（最多8条做样本）
         const placeholders = cluster.member_ids.slice(0, 8).map(() => '?').join(',');
         const samples = db.prepare(`
-            SELECT id, content, created_at FROM memory_fragments
+            SELECT id, content, created_at FROM memory_visible_fragments AS memory_fragments
             WHERE id IN (${placeholders}) ORDER BY created_at ASC
         `).all(...cluster.member_ids.slice(0, 8));
 
@@ -2860,7 +2563,7 @@ async function detectEmergentPlacesAndEvents() {
 
         // 已有实体索引——让 LLM 判断新话题是否归属已有实体，而非盲目新建
         const existingEnts = db.prepare(`
-            SELECT name, category FROM entity_profiles
+            SELECT name, category FROM memory_visible_profiles AS entity_profiles
             WHERE status IN ('active','seed') AND category IN ('place','event','project','term')
             ORDER BY fragment_count DESC LIMIT 60
         `).all();
@@ -2896,9 +2599,9 @@ async function detectEmergentPlacesAndEvents() {
             {
                 const name = screened.name;
 
-                let existing = db.prepare('SELECT id, name, aliases FROM entity_profiles WHERE LOWER(name) = LOWER(?)').get(name);
+                let existing = db.prepare('SELECT id, name, aliases FROM memory_visible_profiles AS entity_profiles WHERE LOWER(name) = LOWER(?)').get(name);
                 if (!existing) {
-                    const allEnts = db.prepare('SELECT id, name, aliases FROM entity_profiles WHERE status IN (\'active\',\'seed\')').all();
+                    const allEnts = db.prepare('SELECT id, name, aliases FROM memory_visible_profiles AS entity_profiles WHERE status IN (\'active\',\'seed\')').all();
                     for (const e of allEnts) {
                         try {
                             const als = JSON.parse(e.aliases || '[]');
@@ -2910,11 +2613,11 @@ async function detectEmergentPlacesAndEvents() {
                     }
                 }
                 if (!existing) {
-                    existing = db.prepare(`SELECT id, name FROM entity_profiles WHERE status IN ('active','seed')
+                    existing = db.prepare(`SELECT id, name FROM memory_visible_profiles AS entity_profiles WHERE status IN ('active','seed')
                         AND (LOWER(name) LIKE '%' || LOWER(?) || '%' OR LOWER(?) LIKE '%' || LOWER(name) || '%') LIMIT 1`).get(name, name);
                 }
                 if (!existing) {
-                    const cands = db.prepare('SELECT id, name FROM entity_profiles WHERE status IN (\'active\',\'seed\')').all();
+                    const cands = db.prepare('SELECT id, name FROM memory_visible_profiles AS entity_profiles WHERE status IN (\'active\',\'seed\')').all();
                     for (const c of cands) {
                         const aG = _nameBigrams(name), bG = _nameBigrams(c.name);
                         if (aG.size === 0 || bG.size === 0) continue;
@@ -2930,8 +2633,7 @@ async function detectEmergentPlacesAndEvents() {
                     VALUES (?, ?, 'seed', ?)`).run(name, category, JSON.stringify([]));
 
                 // 链接团内碎片到新种子
-                const insertFe = db.prepare(`INSERT OR IGNORE INTO fragment_entities
-                    (fragment_id, entity_id, relation, confidence, classified_by) VALUES (?, ?, NULL, 0.55, 'emergence')`);
+                const insertFe = linkWriter(db,["fragment_id", "entity_id"],{"relation": null, "confidence": 0.55, "classified_by": "emergence"});
                 let linked = 0;
                 for (const mid of cluster.member_ids.slice(0, 20)) {
                     const info = insertFe.run(mid, r.lastInsertRowid);
@@ -2997,7 +2699,7 @@ function _writeRelations(entId, rels) {
 // Drop the entry pointing at otherId from entId's list; true if something was removed.
 function _dropEntityRelation(entId, otherId) {
     const db = getDb();
-    const ent = db.prepare('SELECT id, related_entities FROM entity_profiles WHERE id = ?').get(entId);
+    const ent = db.prepare('SELECT id, related_entities FROM memory_visible_profiles AS entity_profiles WHERE id = ?').get(entId);
     if (!ent) return false;
     const rels = _parseRelations(ent);
     const next = rels.filter(r => r.id !== otherId);
@@ -3044,11 +2746,11 @@ async function reviewEntityRelations({ dryRun = false, maxAgeDays = RELATION_MAX
     const ageInDays = (d) => Math.floor((today - dayOf(d)) / 86400000);
 
     const ents = db.prepare(`
-        SELECT id, name, status, related_entities FROM entity_profiles
+        SELECT id, name, status, related_entities FROM memory_visible_profiles AS entity_profiles
         WHERE related_entities IS NOT NULL AND related_entities != '[]'
     `).all();
     const peerOf = db.prepare(`
-        SELECT id, name, category, status, current_status, updated_at FROM entity_profiles WHERE id = ?
+        SELECT id, name, category, status, current_status, updated_at FROM memory_visible_profiles AS entity_profiles WHERE id = ?
     `);
     // How many fragments this pair shares *now*, and the most recent one.
     // source_date can be an empty string, so fall back to created_at — otherwise those
@@ -3056,9 +2758,9 @@ async function reviewEntityRelations({ dryRun = false, maxAgeDays = RELATION_MAX
     const lastSharedOf = db.prepare(`
         SELECT MAX(COALESCE(NULLIF(mf.source_date, ''), substr(mf.created_at, 1, 10))) AS d,
                COUNT(*) AS n
-        FROM memory_fragments mf
-        JOIN fragment_entities f1 ON f1.fragment_id = mf.id AND f1.entity_id = ?
-        JOIN fragment_entities f2 ON f2.fragment_id = mf.id AND f2.entity_id = ?
+        FROM memory_visible_fragments mf
+        JOIN memory_entity_associations f1 ON f1.fragment_id = mf.id AND f1.entity_id = ?
+        JOIN memory_entity_associations f2 ON f2.fragment_id = mf.id AND f2.entity_id = ?
     `);
 
     // Statuses that can actually surface: the star map queries `active`, the chat
@@ -3113,15 +2815,15 @@ async function reviewEntityRelations({ dryRun = false, maxAgeDays = RELATION_MAX
 
     const stamp = today.toISOString().slice(0, 10);
     for (const q of willReview) {
-        const a = db.prepare('SELECT id, name, category, current_status FROM entity_profiles WHERE id = ?').get(q.ent.id);
-        const b = db.prepare('SELECT id, name, category, current_status FROM entity_profiles WHERE id = ?').get(q.rel.id);
+        const a = db.prepare('SELECT id, name, category, current_status FROM memory_visible_profiles AS entity_profiles WHERE id = ?').get(q.ent.id);
+        const b = db.prepare('SELECT id, name, category, current_status FROM memory_visible_profiles AS entity_profiles WHERE id = ?').get(q.rel.id);
         if (!a || !b) continue;
 
         // Evidence: a few recent fragments from each side. Judging a relation without
         // showing the material means the model can only invent a plausible-sounding one.
         const sideFrags = db.prepare(`
-            SELECT mf.source_date, mf.content FROM memory_fragments mf
-            JOIN fragment_entities fe ON fe.fragment_id = mf.id AND fe.entity_id = ?
+            SELECT mf.source_date, mf.content FROM memory_visible_fragments mf
+            JOIN memory_entity_associations fe ON fe.fragment_id = mf.id AND fe.entity_id = ?
             ORDER BY COALESCE(NULLIF(mf.source_date, ''), mf.created_at) DESC LIMIT 3
         `);
         const fmtSide = (ent) => {
@@ -3161,7 +2863,7 @@ ${fmtSide(b)}
             if (v.keep) {
                 // Stamp both sides (keep `since`, only touch `last_reviewed`).
                 if (!dryRun) for (const [self, other] of [[a, b], [b, a]]) {
-                    const ent = db.prepare('SELECT id, related_entities FROM entity_profiles WHERE id = ?').get(self.id);
+                    const ent = db.prepare('SELECT id, related_entities FROM memory_visible_profiles AS entity_profiles WHERE id = ?').get(self.id);
                     const rels = _parseRelations(ent);
                     const i = rels.findIndex(r => r.id === other.id);
                     if (i >= 0) { rels[i] = { ...rels[i], last_reviewed: stamp }; _writeRelations(self.id, rels); }
@@ -3224,7 +2926,7 @@ async function discoverTagRelations({ dryRun = false, maxPerRun = TAG_RELATION_M
 
     const ents = db.prepare(`
         SELECT id, name, category, status, tags, aliases, related_entities
-        FROM entity_profiles WHERE status IN ('active', 'seed')
+        FROM memory_visible_profiles AS entity_profiles WHERE status IN ('active', 'seed')
           AND name NOT IN (${SKIP_PH})
     `).all(...SKIP_NAMES);
     if (ents.length === 0) return { discovered: 0 };
@@ -3287,8 +2989,8 @@ async function discoverTagRelations({ dryRun = false, maxPerRun = TAG_RELATION_M
 
     const batch = queue.slice(0, maxPerRun);
     const sideFrags = db.prepare(`
-        SELECT mf.source_date, mf.content FROM memory_fragments mf
-        JOIN fragment_entities fe ON fe.fragment_id = mf.id AND fe.entity_id = ?
+        SELECT mf.source_date, mf.content FROM memory_visible_fragments mf
+        JOIN memory_entity_associations fe ON fe.fragment_id = mf.id AND fe.entity_id = ?
         ORDER BY COALESCE(NULLIF(mf.source_date, ''), mf.created_at) DESC LIMIT 2
     `);
     const fmtSide = (ent) => {
@@ -3389,10 +3091,10 @@ async function discoverRelatedEntities() {
 
     const pairs = db.prepare(`
         SELECT f1.entity_id AS a_id, f2.entity_id AS b_id, COUNT(*) AS shared
-        FROM fragment_entities f1
-        JOIN fragment_entities f2 ON f1.fragment_id = f2.fragment_id AND f1.entity_id < f2.entity_id
-        JOIN entity_profiles ea ON ea.id = f1.entity_id AND ea.status = 'active' AND ea.name NOT IN (${SKIP_PH})
-        JOIN entity_profiles eb ON eb.id = f2.entity_id AND eb.status = 'active' AND eb.name NOT IN (${SKIP_PH})
+        FROM memory_entity_associations f1
+        JOIN memory_entity_associations f2 ON f1.fragment_id = f2.fragment_id AND f1.entity_id < f2.entity_id
+        JOIN memory_visible_profiles ea ON ea.id = f1.entity_id AND ea.status = 'active' AND ea.name NOT IN (${SKIP_PH})
+        JOIN memory_visible_profiles eb ON eb.id = f2.entity_id AND eb.status = 'active' AND eb.name NOT IN (${SKIP_PH})
         GROUP BY f1.entity_id, f2.entity_id
         HAVING shared >= 2
         ORDER BY shared DESC
@@ -3405,8 +3107,8 @@ async function discoverRelatedEntities() {
         const semanticPairs = db.prepare(`
             SELECT DISTINCT ea.id AS a_id, ea.name AS a_name, ea.category AS a_cat,
                    eb.id AS b_id, eb.name AS b_name, eb.category AS b_cat
-            FROM entity_profiles ea
-            JOIN entity_profiles eb ON ea.id < eb.id
+            FROM memory_visible_profiles ea
+            JOIN memory_visible_profiles eb ON ea.id < eb.id
             WHERE ea.status = 'active' AND eb.status = 'active'
               AND ea.name NOT IN (${SKIP_PH}) AND eb.name NOT IN (${SKIP_PH})
               AND ((ea.category IN ('event','place') AND eb.category IN ('event','place','person'))
@@ -3423,8 +3125,8 @@ async function discoverRelatedEntities() {
 
             // Check date overlap
             const days = db.prepare(`
-                SELECT DISTINCT substr(mf.source_date,1,10) as day FROM memory_fragments mf
-                JOIN fragment_entities fe ON mf.id = fe.fragment_id
+                SELECT DISTINCT substr(mf.source_date,1,10) as day FROM memory_visible_fragments mf
+                JOIN memory_entity_associations fe ON mf.id = fe.fragment_id
                 WHERE fe.entity_id IN (?,?)
             `).all(sp.a_id, sp.b_id).map(r => r.day);
 
@@ -3442,11 +3144,11 @@ async function discoverRelatedEntities() {
             //    ——于是模型只能**编一句听起来合理的**。判关系不给证据 = 让它猜。
             const evi = db.prepare(`
                 SELECT ep.name, mf.source_date, mf.content FROM (
-                    SELECT fe.entity_id, mf.source_date, mf.content FROM fragment_entities fe
-                    JOIN memory_fragments mf ON mf.id = fe.fragment_id
+                    SELECT fe.entity_id, mf.source_date, mf.content FROM memory_entity_associations fe
+                    JOIN memory_visible_fragments mf ON mf.id = fe.fragment_id
                     WHERE fe.entity_id IN (?, ?)
                     ORDER BY mf.source_date DESC LIMIT 6
-                ) mf JOIN entity_profiles ep ON ep.id = mf.entity_id
+                ) mf JOIN memory_visible_profiles ep ON ep.id = mf.entity_id
             `).all(sp.a_id, sp.b_id);
             const evidence = evi.map(e => `  · [${String(e.source_date || '').slice(5)}][${e.name}] ${(e.content || '').slice(0, 90)}`).join('\n');
 
@@ -3476,8 +3178,8 @@ ${evidence || '  （没有可用的素材）'}
                 const verdict = JSON.parse(jsonMatch[0]);
                 if (verdict.related && verdict.relation && verdict.relation !== 'null') {
                     // 直接写入 related_entities（不经过 LLM 批量调用——已有关系描述）
-                    const aEnt = db.prepare('SELECT * FROM entity_profiles WHERE id = ?').get(sp.a_id);
-                    const bEnt = db.prepare('SELECT * FROM entity_profiles WHERE id = ?').get(sp.b_id);
+                    const aEnt = db.prepare('SELECT * FROM memory_visible_profiles AS entity_profiles WHERE id = ?').get(sp.a_id);
+                    const bEnt = db.prepare('SELECT * FROM memory_visible_profiles AS entity_profiles WHERE id = ?').get(sp.b_id);
                     if (aEnt && bEnt) {
                         _writeEntityRelation(aEnt, bEnt, verdict.relation, 0);
                         _writeEntityRelation(bEnt, aEnt, verdict.relation, 0);
@@ -3493,7 +3195,7 @@ ${evidence || '  （没有可用的素材）'}
 
     if (pairs.length === 0) return { discovered };
 
-    const getEnt = db.prepare('SELECT id, name, category, overview, related_entities FROM entity_profiles WHERE id = ?');
+    const getEnt = db.prepare('SELECT id, name, category, overview, related_entities FROM memory_visible_profiles AS entity_profiles WHERE id = ?');
     // 找出还没有关系描述的对
     const fresh = [];
     for (const p of pairs) {
@@ -3514,9 +3216,9 @@ ${evidence || '  （没有可用的素材）'}
     // 给 LLM 每对附 2 条共享碎片做依据
     const pairBlocks = batch.map((p, i) => {
         const sharedFrags = db.prepare(`
-            SELECT mf.content FROM memory_fragments mf
-            JOIN fragment_entities f1 ON f1.fragment_id = mf.id AND f1.entity_id = ?
-            JOIN fragment_entities f2 ON f2.fragment_id = mf.id AND f2.entity_id = ?
+            SELECT mf.content FROM memory_visible_fragments mf
+            JOIN memory_entity_associations f1 ON f1.fragment_id = mf.id AND f1.entity_id = ?
+            JOIN memory_entity_associations f2 ON f2.fragment_id = mf.id AND f2.entity_id = ?
             LIMIT 2
         `).all(p.a.id, p.b.id);
         const evidence = sharedFrags.map(f => '  · ' + (f.content || '').slice(0, 100)).join('\n');
@@ -3611,15 +3313,15 @@ async function graduateSeedsAndPrune() {
     // Graduate: seeds with ≥3 fragments spanning ≥1 distinct date
     const graduates = db.prepare(`
         SELECT ep.id, ep.name, ep.category,
-            (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ep.id) as fc,
+            (SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ep.id) as fc,
             (SELECT COUNT(DISTINCT date(mf.created_at))
-             FROM fragment_entities fe JOIN memory_fragments mf ON mf.id = fe.fragment_id
+             FROM memory_entity_associations fe JOIN memory_visible_fragments mf ON mf.id = fe.fragment_id
              WHERE fe.entity_id = ep.id) as distinct_days
-        FROM entity_profiles ep
+        FROM memory_visible_profiles ep
         WHERE ep.status = 'seed'
-          AND (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ep.id) >= 3
+          AND (SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ep.id) >= 3
           AND (SELECT COUNT(DISTINCT date(mf.created_at))
-               FROM fragment_entities fe JOIN memory_fragments mf ON mf.id = fe.fragment_id
+               FROM memory_entity_associations fe JOIN memory_visible_fragments mf ON mf.id = fe.fragment_id
                WHERE fe.entity_id = ep.id) >= 1
     `).all();
 
@@ -3628,8 +3330,8 @@ async function graduateSeedsAndPrune() {
         let promoted = 0;
         for (const g of graduates) {
             try {
-                const frags = db.prepare(`SELECT mf.id, mf.content FROM memory_fragments mf
-                    JOIN fragment_entities fe ON fe.fragment_id = mf.id
+                const frags = db.prepare(`SELECT mf.id, mf.content FROM memory_visible_fragments mf
+                    JOIN memory_entity_associations fe ON fe.fragment_id = mf.id
                     WHERE fe.entity_id = ? ORDER BY mf.id LIMIT 10`).all(g.id);
 
                 if (frags.length < 3) continue;
@@ -3657,14 +3359,14 @@ ${frags.map((f,i) => `[${i}] ${f.content.slice(0, 150).replace(/\n/g, ' ')}`).jo
                 if (verdict.wrong_indices && verdict.wrong_indices.length > 0) {
                     for (const idx of verdict.wrong_indices) {
                         if (frags[idx]) {
-                            db.prepare('DELETE FROM fragment_entities WHERE entity_id=? AND fragment_id=?').run(g.id, frags[idx].id);
+                            db.prepare("UPDATE fragment_entities SET relation='rejected',confidence=0,classified_by='spotcheck_reclassify' WHERE entity_id=? AND fragment_id=? AND COALESCE(classified_by,'') NOT LIKE 'manual_%'").run(g.id, frags[idx].id);
                             console.log(`[Archivist] 🧹 移除错链碎片 #${frags[idx].id} ← ${g.name}`);
                         }
                     }
                 }
 
                 // Verify remaining count still meets threshold
-                const remaining = db.prepare('SELECT COUNT(*) as c FROM fragment_entities WHERE entity_id=?').get(g.id)?.c || 0;
+                const remaining = db.prepare('SELECT COUNT(*) as c FROM memory_entity_associations AS fragment_entities WHERE entity_id=?').get(g.id)?.c || 0;
                 if (!verdict.valid || remaining < 3) {
                     console.log(`[Archivist] ⏭️ 种子"${g.name}"验证未通过 — valid=${verdict.valid}, remaining=${remaining}`);
                     continue;
@@ -3695,10 +3397,10 @@ ${frags.map((f,i) => `[${i}] ${f.content.slice(0, 150).replace(/\n/g, ' ')}`).jo
 
     // Prune: seeds older than 14 days with <3 fragments
     const pruned = db.prepare(`
-        SELECT ep.id, ep.name FROM entity_profiles ep
+        SELECT ep.id, ep.name FROM memory_visible_profiles ep
         WHERE ep.status = 'seed'
           AND ep.created_at < datetime('now', '-14 days')
-          AND (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ep.id) < 3
+          AND (SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ep.id) < 3
     `).all();
 
     if (pruned.length > 0) {
@@ -3717,11 +3419,11 @@ ${frags.map((f,i) => `[${i}] ${f.content.slice(0, 150).replace(/\n/g, ' ')}`).jo
 
     // Dormant: active entities with no new fragments in 30 days
     const dormant = db.prepare(`
-        SELECT ep.id, ep.name FROM entity_profiles ep
+        SELECT ep.id, ep.name FROM memory_visible_profiles ep
         WHERE ep.status = 'active'
           AND ep.name NOT IN (${SKIP_PH})
           AND ep.updated_at < datetime('now', '-30 days')
-          AND (SELECT MAX(fe.created_at) FROM fragment_entities fe WHERE fe.entity_id = ep.id) < datetime('now', '-30 days')
+          AND (SELECT MAX(fe.created_at) FROM memory_entity_associations fe WHERE fe.entity_id = ep.id) < datetime('now', '-30 days')
     `).all(...SKIP_NAMES);
 
     if (dormant.length > 0) {
@@ -3737,9 +3439,9 @@ ${frags.map((f,i) => `[${i}] ${f.content.slice(0, 150).replace(/\n/g, ' ')}`).jo
 
     // Reactivate: dormant entities with new fragments
     const revived = db.prepare(`
-        SELECT ep.id, ep.name FROM entity_profiles ep
+        SELECT ep.id, ep.name FROM memory_visible_profiles ep
         WHERE ep.status = 'dormant'
-          AND EXISTS (SELECT 1 FROM fragment_entities fe WHERE fe.entity_id = ep.id AND fe.created_at > ep.updated_at)
+          AND EXISTS (SELECT 1 FROM memory_entity_associations fe WHERE fe.entity_id = ep.id AND fe.created_at > ep.updated_at)
     `).all();
 
     if (revived.length > 0) {
@@ -3765,9 +3467,9 @@ async function spotCheckClassifications() {
     if (!_canCallLLM(1)) return { checked: 0, reason: 'no LLM quota' };
 
     const lowConf = db.prepare(`SELECT fe.fragment_id, fe.entity_id, fe.confidence,
-        mf.content, ep.name FROM fragment_entities fe
-        JOIN memory_fragments mf ON mf.id = fe.fragment_id
-        JOIN entity_profiles ep ON ep.id = fe.entity_id
+        mf.content, ep.name FROM memory_entity_associations fe
+        JOIN memory_visible_fragments mf ON mf.id = fe.fragment_id
+        JOIN memory_visible_profiles ep ON ep.id = fe.entity_id
         WHERE fe.confidence < 0.75
         ORDER BY fe.created_at DESC LIMIT 5`).all();
 
@@ -3791,7 +3493,7 @@ async function spotCheckClassifications() {
             const v = JSON.parse(jsonMatch[0]);
 
             if (v.belongs === false) {
-                db.prepare('DELETE FROM fragment_entities WHERE entity_id=? AND fragment_id=?').run(lc.entity_id, lc.fragment_id);
+                db.prepare("UPDATE fragment_entities SET relation='rejected',confidence=0,classified_by='spotcheck_reclassify' WHERE entity_id=? AND fragment_id=? AND COALESCE(classified_by,'') NOT LIKE 'manual_%'").run(lc.entity_id, lc.fragment_id);
                 console.log(`[Archivist] 🧹 抽查解除: #${lc.fragment_id} ← ${lc.name} — ${v.reason}`);
                 fixed++;
             }
@@ -3813,8 +3515,8 @@ async function reviewConstellationAfterClassification(entityId) {
     const db = getDb();
 
     const entity = db.prepare(`
-        SELECT ep.*, (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ep.id) as current_frag_count
-        FROM entity_profiles ep WHERE ep.id = ?
+        SELECT ep.*, (SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ep.id) as current_frag_count
+        FROM memory_visible_profiles ep WHERE ep.id = ?
     `).get(entityId);
 
     if (!entity || entity.status !== 'active') return null;
@@ -3922,7 +3624,7 @@ function _bigramOverlap(textA, textB) {
 // ── Freshness-based状态刷新（每2min）──
 function refreshPatternStates() {
     const db = getDb();
-    const allPatterns = db.prepare("SELECT * FROM user_patterns WHERE status IN ('active','dormant','superseded')").all();
+    const allPatterns = db.prepare("SELECT * FROM memory_valid_patterns AS user_patterns WHERE status IN ('active','dormant','superseded')").all();
     let changed = 0, dormantCount = 0, archivedCount = 0;
 
     for (const p of allPatterns) {
@@ -3961,13 +3663,13 @@ async function maintainPatterns() {
     const db = getDb();
 
     // 1. 获取最近 observation + preference 碎片
-    const userEntityId = db.prepare("SELECT id FROM entity_profiles WHERE name = ?").get(USER.name)?.id;
+    const userEntityId = db.prepare("SELECT id FROM memory_visible_profiles AS entity_profiles WHERE name = ?").get(USER.name)?.id;
     if (!userEntityId) return { matched: 0, reason: 'user entity not found' };
 
     const recentFrags = db.prepare(`
         SELECT mf.id, mf.content, mf.type, mf.emotional_weight, mf.source_date
-        FROM memory_fragments mf
-        JOIN fragment_entities fe ON fe.fragment_id = mf.id
+        FROM memory_visible_fragments mf
+        JOIN memory_entity_associations fe ON fe.fragment_id = mf.id
         WHERE mf.status = 'active'
           AND mf.type IN ('observation', 'preference', 'reflection')
           AND fe.entity_id = ?
@@ -3981,14 +3683,14 @@ async function maintainPatterns() {
 
     // 收集已有pattern的碎片ID（含dormant和superseded，含archived）
     const existingFragIds = new Set();
-    db.prepare("SELECT source_fragment_ids FROM user_patterns WHERE status IN ('active','dormant','superseded')").all()
+    db.prepare("SELECT source_fragment_ids FROM memory_valid_patterns AS user_patterns WHERE status IN ('active','dormant','superseded')").all()
         .forEach(p => { try { JSON.parse(p.source_fragment_ids || '[]').forEach(id => existingFragIds.add(id)); } catch(_) {} });
 
     const newFrags = recentFrags.filter(f => !existingFragIds.has(f.id));
     if (newFrags.length < MIN_PATTERN_FRAGS) return { matched: 0, reason: `only ${newFrags.length} unmatched` };
 
     // 2. 匹配到所有非archived pattern（含 dormant + superseded）
-    const existingPatterns = db.prepare("SELECT * FROM user_patterns WHERE status != 'archived' ORDER BY evidence_count DESC").all();
+    const existingPatterns = db.prepare("SELECT * FROM memory_valid_patterns AS user_patterns WHERE status != 'archived' ORDER BY evidence_count DESC").all();
     let matchedCount = 0, revivedCount = 0, supersededCount = 0;
     const mergeCandidates = []; // {patternA_id, patternB_id, overlap}
 
@@ -4078,7 +3780,7 @@ async function _mergePatterns(db, candidates) {
     // 加载pattern内容
     const allIds = [...new Set(unique.flatMap(c => [c.patternA_id, c.patternB_id]))];
     const patternMap = new Map();
-    db.prepare(`SELECT id, content, evidence_count, first_seen, last_seen, source_fragment_ids FROM user_patterns WHERE id IN (${allIds.map(()=>'?').join(',')})`).all(...allIds)
+    db.prepare(`SELECT id, content, evidence_count, first_seen, last_seen, source_fragment_ids FROM memory_valid_patterns AS user_patterns WHERE id IN (${allIds.map(()=>'?').join(',')})`).all(...allIds)
         .forEach(p => patternMap.set(p.id, p));
 
     const prompt = `判断每对行为模式是否在描述同一个底层特质。是 → merge=true。不是 → merge=false。
@@ -4113,7 +3815,7 @@ ${unique.map((c, i) => {
                 ...JSON.parse(sub.source_fragment_ids || '[]')
             ])];
             const dates = mergedIds.map(id => {
-                const f = db.prepare('SELECT source_date FROM memory_fragments WHERE id=?').get(id);
+                const f = db.prepare('SELECT source_date FROM memory_visible_fragments AS memory_fragments WHERE id=?').get(id);
                 return f?.source_date || null;
             }).filter(Boolean);
             const newFirst = dates.reduce((a,b) => a<b?a:b, dates[0]);
@@ -4150,10 +3852,10 @@ async function consolidateCategory() {
     const candidates = db.prepare(`
         SELECT ep.id, ep.name as path, ep.name as label, ep.facts as description, ep.fragment_count,
                ep.category,
-               (SELECT COUNT(*) FROM memory_fragments mf
-                JOIN fragment_entities fe ON fe.fragment_id = mf.id
+               (SELECT COUNT(*) FROM memory_visible_fragments mf
+                JOIN memory_entity_associations fe ON fe.fragment_id = mf.id
                 WHERE fe.entity_id = ep.id AND mf.status = 'active') as active_count
-        FROM entity_profiles ep
+        FROM memory_visible_profiles ep
         WHERE ep.status = 'active'
           AND ep.fragment_count >= ?
           AND ep.name NOT IN (${CONSOLIDATE_SKIP_PH})
@@ -4176,8 +3878,8 @@ async function consolidateCategory() {
         const fragments = db.prepare(`
             SELECT mf.id, mf.content, mf.emotional_weight, mf.source, mf.source_date,
                    mf.source_msg_ids, mf.entity, mf.created_at
-            FROM memory_fragments mf
-            JOIN fragment_entities fe ON fe.fragment_id = mf.id
+            FROM memory_visible_fragments mf
+            JOIN memory_entity_associations fe ON fe.fragment_id = mf.id
             WHERE fe.entity_id = ? AND mf.status = 'active'
             ORDER BY mf.created_at DESC
             LIMIT ?
@@ -4186,10 +3888,12 @@ async function consolidateCategory() {
         if (fragments.length < 3) continue;
 
         // Build prompt
+        for(const f of fragments) f._source_version=episodeVersion(f,sourceFor(db,f.id));
         const fragmentsBlock = fragments.map((f, i) => {
             const ew = (f.emotional_weight || 0).toFixed(2);
             const src = f.source || 'chat';
-            return `[${i}] src=${src} date=${f.source_date || '?'} ew=${ew}\n  ${f.content}`;
+            const provenance=sourceFor(db,f.id);
+            return `[${i}] kind=${provenance?.kind || 'unverified'} state=${provenance?.state || 'pending'} src=${src} date=${f.source_date || '?'} ew=${ew}\n  ${f.content}`;
         }).join('\n\n');
 
         const prompt = `${WORLD_CONTEXT}
@@ -4205,7 +3909,8 @@ ${buildLandscapeIndex()}
 1. **审视所有碎片**，判断哪些碎片是"同一事件的多个侧面"（语义高度相关、讲的是同一个具体的事件或关系），将它们分组。
    - 注意：不是所有话题相同的就是同一事件——"妈妈做饭"和"妈妈打电话"虽然都涉及妈妈，但是两个独立事件
    - 只有真正讲述同一个具体事件的碎片才应该被合并
-   - 每组至少3条碎片才值得合并
+   - 合并至少3条；一条混杂碎片可以拆成多个独立事件，operation=split。
+   - covered_fragment_indices 只列本条叙事完整覆盖的来源；仅使用部分内容不能消耗整条。不同说话者、角色语境、记忆性质须分开，不补写隐含事实。
 
 2. **对每个可合并的组**，将碎片合并为一条规范episode记忆（第三人称，不超过150字）。
 
@@ -4221,7 +3926,9 @@ ${buildLandscapeIndex()}
 {
   "clusters": [
     {
+      "operation": "merge或split",
       "fragment_indices": [0, 3, 7],
+      "covered_fragment_indices": [0, 3],
       "merged_memory": "第三人称规范记忆，150字以内",
       "corrected_date": "YYYY-MM-DD 或空字符串",
       "significance": 1-10,
@@ -4251,129 +3958,19 @@ ${buildLandscapeIndex()}
             const result = JSON.parse(match[0]);
             const clusters = result.clusters || [];
 
-            // Process each mergeable cluster
-            for (const cluster of clusters) {
-                const indices = cluster.fragment_indices || [];
-                if (indices.length < 3) continue;
-                if (!cluster.merged_memory) continue;
-
-                const sig = typeof cluster.significance === 'number' ? cluster.significance : 5;
-                if (sig < 4) {
-                    console.log(`[Archivist] 星座整合跳过(分量不足 sig=${sig}): ${cat.path}`);
-                    continue;
-                }
-
-                // Collect merged fragment IDs
-                const mergedIds = [];
-                for (const idx of indices) {
-                    if (fragments[idx]) mergedIds.push(fragments[idx].id);
-                }
-                if (mergedIds.length < 3) continue;
-
-                // Collect source_msg_ids
-                const allMsgIds = new Set();
-                for (const idx of indices) {
-                    const f = fragments[idx];
-                    if (!f) continue;
+            for (const {output:cluster,episode} of prepareEpisodeBatch(clusters,fragments,{db})) {
+                const rows=persistEpisode(db,episode,{entityId:cat.id,share:true});
+                for(const row of rows) {
+                    episodesWritten++;
+                    newEpisodes.push({memoryId:row.memoryId,memoryContent:episode.content,
+                        fragmentIds:episode.selected.map(f=>f.id),correctedDate:episode.date,
+                        significance:cluster.significance,entityId:row.entity_id,confidence:cluster.confidence || 'medium'});
                     try {
-                        const ids = JSON.parse(f.source_msg_ids || '[]');
-                        for (const mid of ids) allMsgIds.add(mid);
-                    } catch (_) {}
+                        const {chromaDBOperation}=require('./memory');
+                        const indexed=await chromaDBOperation('index_batch',{items:[{id:`memory_${row.memoryId}`,text:episode.content,metadata:{source:'archivist_consolidate',entity_id:row.entity_id}}]});
+                        if(indexed.indexed>0) db.prepare('UPDATE memories SET chroma_id=? WHERE id=?').run(`memory_${row.memoryId}`,row.memoryId);
+                    } catch { console.warn('[Archivist] episode_vector_pending'); }
                 }
-
-                // Average emotional weight
-                const avgEW = indices.reduce((s, i) => s + (fragments[i]?.emotional_weight || 0.5), 0) / indices.length;
-                const mergedWeight = Math.min(10, Math.round(sig * 0.7 + (5 + avgEW * 3) * 0.3));
-
-                const finalDate = cluster.corrected_date || fragments[indices[0]]?.source_date || '';
-
-                // Write to memories table
-                const title = cluster.merged_memory.slice(0, 50);
-                const insert = db.prepare(`
-                    INSERT INTO memories (title, content, weight, valid_from, status, source_msg_ids, entity_id, layer, consolidation_type, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, 'permanent', ?, ?, 'episode', 'standard', datetime('now'), datetime('now'))
-                `);
-                const info = insert.run(
-                    title,
-                    cluster.merged_memory,
-                    mergedWeight,
-                    finalDate,
-                    JSON.stringify([...allMsgIds]),
-                    cat.id
-                );
-                const memoryId = info.lastInsertRowid;
-
-                // Index to ChromaDB (v5.3: re-enabled for Librarian retrieval)
-                try {
-                    const { chromaDBOperation } = require('./memory');
-                    const idxResult = await chromaDBOperation('index_batch', {
-                        items: [{ id: `memory_${memoryId}`, text: cluster.merged_memory, metadata: { source: 'archivist_consolidate', entity_id: cat.id } }]
-                    });
-                    const chromaId = idxResult.indexed > 0 ? `memory_${memoryId}`
-                        : (idxResult.duplicates?.length > 0 ? `dup_of_${idxResult.duplicates[0].existing_id}` : null);
-                    if (chromaId) {
-                        db.prepare('UPDATE memories SET chroma_id = ? WHERE id = ?').run(chromaId, memoryId);
-                    }
-                } catch (e) {
-                    console.error(`[Archivist] consolidateCategory ChromaDB index failed:`, e.message);
-                }
-
-                // v5.12: 共享碎片实体同步 — 碎片可能同时链接到多个entity
-                // （如"和朋友看某剧"链接到「某朋友」和「某剧名」）
-                // 合并后的episode应两边都有，否则consumed类实体永远拿不到叙事弧线
-                const sharedEntities = db.prepare(`
-                    SELECT fe.entity_id, ep.name, ep.category, COUNT(*) as shared_count
-                    FROM fragment_entities fe
-                    JOIN entity_profiles ep ON ep.id = fe.entity_id
-                    WHERE fe.fragment_id IN (${mergedIds.map(() => '?').join(',')})
-                      AND fe.entity_id != ?
-                    GROUP BY fe.entity_id
-                    HAVING shared_count >= 3
-                `).all(...mergedIds, cat.id);
-
-                for (const shared of sharedEntities) {
-                    const sharedInfo = insert.run(
-                        title,
-                        cluster.merged_memory,
-                        mergedWeight,
-                        finalDate,
-                        JSON.stringify([...allMsgIds]),
-                        shared.entity_id
-                    );
-                    console.log(`[Archivist] 星座整合 [${shared.name}(${shared.category})]: 共享episode #${sharedInfo.lastInsertRowid} (${shared.shared_count}/${mergedIds.length}个共享碎片, from ${cat.path})`);
-                    newEpisodes.push({
-                        memoryId: sharedInfo.lastInsertRowid,
-                        memoryContent: cluster.merged_memory,
-                        fragmentIds: mergedIds,
-                        correctedDate: cluster.corrected_date || null,
-                        confidence: cluster.confidence || 'medium',
-                        contradiction: cluster.contradiction || null,
-                        significance: sig,
-                        entityId: shared.entity_id,
-                        entityName: shared.name,
-                    });
-                }
-
-                // Mark fragments as consolidated
-                const markStmt = db.prepare('UPDATE memory_fragments SET status = ? WHERE id = ?');
-                for (const fid of mergedIds) {
-                    markStmt.run('consolidated', fid);
-                }
-
-                episodesWritten++;
-                newEpisodes.push({
-                    memoryId,
-                    memoryContent: cluster.merged_memory,
-                    fragmentIds: mergedIds,
-                    correctedDate: cluster.corrected_date || null,
-                    confidence: cluster.confidence || 'medium',
-                    contradiction: cluster.contradiction || null,
-                    significance: sig,
-                    entityId: cat.id,
-                    entityName: cat.path,
-                });
-
-                console.log(`[Archivist] 星座整合 [${cat.path}]: ${mergedIds.length}碎片 → episode #${memoryId} (sig=${sig})`);
             }
 
             // 概述更新已移除——统一由 regenerateEntityOverviews 负责
@@ -4400,7 +3997,7 @@ ${buildLandscapeIndex()}
         // schedulable in GARDEN_TASKS. This dual-trigger ensures sagas update promptly
         // when new episodes arrive, while the garden plan covers periodic full-clustering.
         try {
-            const episodeCount = db.prepare("SELECT COUNT(*) as c FROM memories WHERE layer='episode' AND status='permanent'").get();
+            const episodeCount = db.prepare("SELECT COUNT(*) as c FROM memory_valid_episodes AS memories WHERE layer='episode' AND status='permanent'").get();
             if (episodeCount.c >= 5) {
                 const { clusterSagas } = require('./consolidator');
                 console.log(`[Archivist] episode已累积${episodeCount.c}条，触发Saga聚类...`);
@@ -4430,9 +4027,9 @@ async function regenerateEntityOverviews() {
                ep.emotional_significance, ep.facts, ep.overview_updated_at,
                ep.last_eval_frag_count, ep.fragment_count, ep.aliases, ep.tags,
                ep.judgment, ep.current_status, ep.gender
-        FROM entity_profiles ep
+        FROM memory_visible_profiles ep
         WHERE ep.name NOT IN (${SKIP_PH})
-          AND ep.fragment_count > 0
+          AND (ep.fragment_count > 0 OR EXISTS(SELECT 1 FROM memory_derivation_reviews r WHERE r.target_type='profile' AND r.target_id=ep.id))
         ORDER BY ep.fragment_count DESC
     `).all(...SKIP_NAMES);
 
@@ -4442,9 +4039,10 @@ async function regenerateEntityOverviews() {
     const needsUpdate = [];
     for (const ent of entities) {
         const currentCount = db.prepare(
-            'SELECT COUNT(*) as c FROM fragment_entities WHERE entity_id = ?'
-        ).get(ent.id)?.c || ent.fragment_count || 0;
+            'SELECT COUNT(*) as c FROM memory_entity_evidence WHERE entity_id = ?'
+        ).get(ent.id)?.c || 0;
 
+        if(revision(db,'profile',ent.id)) { needsUpdate.push({...ent,currentCount,reason:'source_review'});continue; }
         if (currentCount === 0) continue; // no fragments → skip
 
         // Never had an overview (facts or legacy overview)
@@ -4516,7 +4114,7 @@ async function regenerateEntityOverviews() {
 
     needsUpdate.sort((a, b) => {
         // Priority: never_described > never_processed > missing_judgment > missing_* > grown/shrunk > stale_30d
-        const prio = r => r === 'never_described' ? 0 : r === 'never_processed' ? 0.5 : r === 'missing_judgment' ? 1 : r.startsWith('missing_') ? 1.5 : r.startsWith('grown') || r.startsWith('shrunk') ? 2 : 3;
+        const prio = r => r === 'source_review' ? -1 : r === 'never_described' ? 0 : r === 'never_processed' ? 0.5 : r === 'missing_judgment' ? 1 : r.startsWith('missing_') ? 1.5 : r.startsWith('grown') || r.startsWith('shrunk') ? 2 : 3;
         const pa = prio(a.reason), pb = prio(b.reason);
         if (pa !== pb) return pa - pb;
         return b.currentCount - a.currentCount;
@@ -4527,12 +4125,17 @@ async function regenerateEntityOverviews() {
 
     let regenerated = 0;
     for (const ent of batch) {
+        const reviewRevision=revision(db,'profile',ent.id);
+        if(reviewRevision) for(const field of ['facts','current_status','judgment','aliases','tags','relationship_to_user','relationship_nature','emotional_significance','gender']) ent[field]=null;
         // v5.7: 读两类素材——叙事片段（已整合的episode）+ 活跃星星（尚未整合的碎片）
         // 叙事片段是已提炼的故事，带日期和权重；活跃星星是最近还没被合并的新信息
         const episodes = db.prepare(`
             SELECT content, valid_from AS date, weight, 'episode' AS source
-            FROM memories
-            WHERE layer = 'episode' AND entity_id = ? AND status IN ('permanent', 'transient')
+            FROM memory_valid_episodes AS memories
+            WHERE layer = 'episode' AND entity_id = ?
+              AND COALESCE(tags,'') NOT LIKE '%memory_kind:unverified%'
+              AND EXISTS(SELECT 1 FROM episode_fragment_sources es WHERE es.memory_id=memories.id)
+              AND NOT EXISTS(SELECT 1 FROM episode_fragment_sources es LEFT JOIN memory_fragment_provenance p ON p.fragment_id=es.fragment_id WHERE es.memory_id=memories.id AND (p.fragment_id IS NULL OR p.kind!='user_fact' OR p.state!='quoted')) AND status IN ('permanent', 'transient')
             ORDER BY
                 CASE status WHEN 'permanent' THEN 0 ELSE 1 END,
                 valid_from DESC
@@ -4542,9 +4145,9 @@ async function regenerateEntityOverviews() {
         const activeFrags = db.prepare(`
             SELECT mf.content, COALESCE(mf.source_date, DATE(mf.created_at)) AS date,
                    mf.emotional_weight AS weight, 'fragment' AS source
-            FROM memory_fragments mf
-            JOIN fragment_entities fe ON fe.fragment_id = mf.id
-            WHERE fe.entity_id = ? AND mf.status IN ('active', 'consolidated', 'cooling')
+            FROM memory_visible_fragments mf
+            JOIN memory_entity_evidence fe ON fe.fragment_id = mf.id
+            WHERE fe.entity_id = ? AND EXISTS(SELECT 1 FROM memory_fragment_provenance p WHERE p.fragment_id=mf.id AND p.kind='user_fact' AND p.state='quoted') AND mf.status IN ('active', 'consolidated', 'cooling')
             ORDER BY
                 CASE mf.status WHEN 'active' THEN 0 WHEN 'consolidated' THEN 1 ELSE 2 END,
                 mf.created_at DESC
@@ -4571,7 +4174,7 @@ async function regenerateEntityOverviews() {
         // v5.7: 每条素材带日期和类型标记，LLM 才能区分新旧
         const itemsBlock = allItems.map((item, i) => {
             const prefix = item.source === 'episode' ? '叙事' : '★新碎片';
-            const dateStr = (item.date || '?').slice(5); // MM-DD 格式
+            const dateStr = (item.date || '?'); // MM-DD 格式
             const weightStr = typeof item.weight === 'number' ? ` 权重${item.weight.toFixed(0)}` : '';
             return `[${i + 1}] (${dateStr}) ${prefix}${weightStr}: ${item.content}`;
         }).join('\n');
@@ -4772,9 +4375,9 @@ JSON格式：
                     if (Array.isArray(meta.aliases)) aliases = meta.aliases.filter(a => typeof a === 'string' && a.trim().length >= 2).slice(0, 5);
                     if (Array.isArray(meta.tags)) tags = meta.tags.filter(t => typeof t === 'string' && t.trim().length >= 2).slice(0, 5);
                     if (typeof meta.entity_type === 'string' && meta.entity_type.trim()) entityType = meta.entity_type.trim();
-                    if (typeof meta.facts === 'string' && meta.facts.trim()) factsText = meta.facts.trim().slice(0, 500);
-                    if (typeof meta.current_status === 'string') statusText = meta.current_status.trim().slice(0, 200);
-                    if (typeof meta.judgment === 'string' && meta.judgment.trim()) judgmentText = meta.judgment.trim().slice(0, 500);
+                    if (typeof meta.facts === 'string' && meta.facts.trim()) factsText = completeSentences(meta.facts,500);
+                    if (typeof meta.current_status === 'string') statusText = completeSentences(meta.current_status,200);
+                    if (typeof meta.judgment === 'string' && meta.judgment.trim()) judgmentText = completeSentences(meta.judgment,500);
                     if (Array.isArray(meta.talking_points)) {
                         talkingPoints = meta.talking_points
                             .filter(tp => typeof tp === 'string' && tp.trim().length > 0)
@@ -4819,7 +4422,7 @@ JSON格式：
             // v5.2: guard against overwriting recent manual updates (chat Companion's update_overview)
             const recentlyUpdated = ent.overview_updated_at
                 && (Date.now() - new Date(ent.overview_updated_at)) < 3 * 60 * 60 * 1000;
-            if (recentlyUpdated && ent.reason && !ent.reason.startsWith('never') && !ent.reason.startsWith('grown') && !ent.reason.startsWith('shrunk')) {
+            if (!reviewRevision && recentlyUpdated && ent.reason && !ent.reason.startsWith('never') && !ent.reason.startsWith('grown') && !ent.reason.startsWith('shrunk')) {
                 console.log(`[Archivist] ⏭️ 跳过 ${ent.name} — overview 3h内刚更新过 (${ent.reason}), 保留手动修改`);
                 continue;
             }
@@ -4860,8 +4463,12 @@ JSON格式：
                 updateCols.push('last_eval_frag_count = ?'); updateVals.push(ent.currentCount);
                 updateCols.push('overview_updated_at = datetime(\'now\')');
                 updateCols.push('updated_at = datetime(\'now\')');
-                db.prepare(`UPDATE entity_profiles SET ${updateCols.join(', ')} WHERE id = ?`)
-                    .run(...updateVals, ent.id);
+                if(reviewRevision) {
+                    const fields=require('./memoryViews').PROFILE_FIELDS;
+                    const existing=new Set(db.prepare('PRAGMA table_info(entity_profiles)').all().map(c=>c.name));
+                    for(const field of fields) if(existing.has(field) && !updateCols.some(c=>c.startsWith(`${field} =`))) updateCols.push(`${field} = NULL`);
+                }
+                if(!commitReview(db,'profile',ent.id,reviewRevision,()=>db.prepare(`UPDATE entity_profiles SET ${updateCols.join(', ')} WHERE id = ?`).run(...updateVals,ent.id))) continue;
                 regenerated++;
                 const citedFragsPreviews = validCited.map(n => {
                     const f = allItems[n - 1];
@@ -4877,9 +4484,9 @@ JSON格式：
                         const shortKeys = aliases.filter(a => a.length >= 2 && a.length <= 4);
                         // Gather candidate fragments: contain any alias keyword + not already linked
                         const candidateFrags = db.prepare(`
-                            SELECT mf.id, mf.content FROM memory_fragments mf
+                            SELECT mf.id, mf.content FROM memory_visible_fragments mf
                             WHERE mf.status = 'active'
-                              AND mf.id NOT IN (SELECT fragment_id FROM fragment_entities WHERE entity_id = ?)
+                              AND mf.id NOT IN (SELECT fragment_id FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?)
                               AND (${shortKeys.map(() => "mf.content LIKE '%' || ? || '%'").join(' OR ')})
                             ORDER BY mf.created_at DESC
                             LIMIT 15
@@ -4900,14 +4507,14 @@ JSON格式：
                                 const verdicts = JSON.parse(bfMatch[0]);
                                 const matched = verdicts.filter(v => v.match).map(v => candidateFrags[v.idx - 1]).filter(Boolean);
                                 if (matched.length > 0) {
-                                    const bfInsert = db.prepare(`INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, confidence, classified_by) VALUES (?, ?, 0.60, 'backfill_llm')`);
+                                    const bfInsert = linkWriter(db,["fragment_id", "entity_id"],{"confidence": 0.6, "classified_by": "backfill_llm"});
                                     let bfCount = 0;
                                     for (const m of matched) {
                                         const r = bfInsert.run(m.id, ent.id);
                                         if (r.changes > 0) bfCount++;
                                     }
                                     if (bfCount > 0) {
-                                        db.prepare(`UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ?), updated_at = datetime('now') WHERE id = ?`).run(ent.id, ent.id);
+                                        db.prepare(`UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?), updated_at = datetime('now') WHERE id = ?`).run(ent.id, ent.id);
                                         console.log(`[Archivist] 回补碎片链接(LLM): ${ent.name} +${bfCount}条 (${candidateFrags.length}候选)`);
                                     }
                                 }
@@ -5003,7 +4610,7 @@ async function scanContentForNewEntities() {
     const db = getDb();
 
     const knownNames = new Set(SKIP_NAMES);
-    const profiles = db.prepare("SELECT name, aliases FROM entity_profiles").all();
+    const profiles = db.prepare("SELECT name, aliases FROM memory_visible_profiles AS entity_profiles").all();
     for (const p of profiles) {
         knownNames.add(p.name);
         if (p.aliases) {
@@ -5015,7 +4622,7 @@ async function scanContentForNewEntities() {
     }
 
     const fragments = db.prepare(`
-        SELECT id, content FROM memory_fragments
+        SELECT id, content FROM memory_visible_fragments AS memory_fragments
         WHERE status = 'active' AND content != ''
         ORDER BY id DESC LIMIT ?
     `).all(CONTENT_SCAN_FRAG_LIMIT);
@@ -5070,7 +4677,7 @@ async function scanContentForNewEntities() {
     const candidatesForLLM = [];
     for (const [name, info] of sorted) {
         const contextFrags = db.prepare(`
-            SELECT content FROM memory_fragments
+            SELECT content FROM memory_visible_fragments AS memory_fragments
             WHERE status = 'active' AND content LIKE ?
             ORDER BY id DESC LIMIT 5
         `).all(`%${name}%`);
@@ -5156,8 +4763,8 @@ async function discoverEntityRelationships(options = {}) {
     const missingRelations = db.prepare(`
         SELECT ep.id, ep.name, COUNT(mf.id) as frag_count,
                ep.last_hypothesis, ep.last_eval_frag_count
-        FROM entity_profiles ep
-        JOIN memory_fragments mf ON mf.entity_id = ep.id
+        FROM memory_visible_profiles ep
+        JOIN memory_visible_fragments mf ON mf.entity_id = ep.id
         WHERE ep.category = 'person'
           AND (ep.relationship_to_user IS NULL OR ep.relationship_to_user = '')
           AND ep.name NOT IN (${SKIP_NAMES.map(() => '?').join(',')})
@@ -5173,11 +4780,11 @@ async function discoverEntityRelationships(options = {}) {
     // Candidates without entity_profiles
     const unknownEntities = db.prepare(`
         SELECT mf.entity, COUNT(*) as cnt
-        FROM memory_fragments mf
+        FROM memory_visible_fragments mf
         WHERE mf.entity != ''
           AND mf.entity NOT IN (${SKIP_NAMES.map(() => '?').join(',')})
-          AND mf.entity NOT IN (SELECT name FROM entity_profiles)
-          AND mf.entity NOT IN (SELECT COALESCE(value, '') FROM entity_profiles, json_each(aliases))
+          AND mf.entity NOT IN (SELECT name FROM memory_visible_profiles AS entity_profiles)
+          AND mf.entity NOT IN (SELECT COALESCE(value, '') FROM memory_visible_profiles AS entity_profiles, json_each(aliases))
           AND mf.status = 'active'
         GROUP BY mf.entity
         HAVING cnt >= ?
@@ -5208,8 +4815,8 @@ async function discoverEntityRelationships(options = {}) {
     if (includeReEval) {
         const lowConfCandidates = db.prepare(`
             SELECT ep.id, ep.name, COUNT(mf.id) as frag_count
-            FROM entity_profiles ep
-            JOIN memory_fragments mf ON mf.entity_id = ep.id
+            FROM memory_visible_profiles ep
+            JOIN memory_visible_fragments mf ON mf.entity_id = ep.id
             WHERE ep.category = 'person'
               AND ep.name NOT IN (${SKIP_NAMES.map(() => '?').join(',')})
               AND ep.relationship_confidence IN ('low', 'medium')
@@ -5223,8 +4830,8 @@ async function discoverEntityRelationships(options = {}) {
 
         const staleCandidates = db.prepare(`
             SELECT ep.id, ep.name, COUNT(mf.id) as frag_count
-            FROM entity_profiles ep
-            JOIN memory_fragments mf ON mf.entity_id = ep.id
+            FROM memory_visible_profiles ep
+            JOIN memory_visible_fragments mf ON mf.entity_id = ep.id
             WHERE ep.category = 'person'
               AND ep.name NOT IN (${SKIP_NAMES.map(() => '?').join(',')})
               AND ep.relationship_confidence = 'high'
@@ -5265,18 +4872,18 @@ async function discoverEntityRelationships(options = {}) {
             let fragments;
             if (cand.discoveryMethod === 'content_scan') {
                 fragments = db.prepare(`
-                    SELECT id, content, source_date FROM memory_fragments
+                    SELECT id, content, source_date FROM memory_visible_fragments AS memory_fragments
                     WHERE status = 'active' AND content LIKE ?
                     ORDER BY source_date
                 `).all(`%${cand.name}%`);
             } else if (cand.isNew) {
                 fragments = db.prepare(`
-                    SELECT id, content, source_date FROM memory_fragments
+                    SELECT id, content, source_date FROM memory_visible_fragments AS memory_fragments
                     WHERE entity = ? AND status = 'active' ORDER BY source_date
                 `).all(cand.name);
             } else {
                 fragments = db.prepare(`
-                    SELECT mf.id, mf.content, mf.source_date FROM memory_fragments mf
+                    SELECT mf.id, mf.content, mf.source_date FROM memory_visible_fragments mf
                     WHERE mf.entity_id = ? AND mf.status = 'active' ORDER BY mf.source_date
                 `).all(cand.entityProfileId);
             }
@@ -5361,7 +4968,7 @@ ${fragmentTexts}
             const entityType = rel.entity_type || 'unknown';
 
             const existingRel = db.prepare(
-                'SELECT relationship_to_user, relationship_confidence FROM entity_profiles WHERE id = ?'
+                'SELECT relationship_to_user, relationship_confidence FROM memory_visible_profiles AS entity_profiles WHERE id = ?'
             ).get(cand.entityProfileId);
 
             // Oscillation guard
@@ -5484,7 +5091,7 @@ async function extractFragmentInsights(batchSize = INSIGHT_BATCH_MAX) {
 
     const fragments = db.prepare(`
         SELECT mf.id, mf.content, mf.entity_id, mf.entity
-        FROM memory_fragments mf
+        FROM memory_visible_fragments mf
         WHERE mf.insight IS NULL
           AND mf.status = 'active'
           AND mf.content IS NOT NULL
@@ -5500,7 +5107,7 @@ async function extractFragmentInsights(batchSize = INSIGHT_BATCH_MAX) {
     if (entityIds.length > 0) {
         const profiles = db.prepare(`
             SELECT id, name, relationship_to_user, emotional_significance
-            FROM entity_profiles WHERE id IN (${entityIds.map(() => '?').join(',')})
+            FROM memory_visible_profiles AS entity_profiles WHERE id IN (${entityIds.map(() => '?').join(',')})
         `).all(...entityIds);
         for (const p of profiles) entityMap.set(p.id, p);
     }
@@ -5679,22 +5286,22 @@ async function decideGardenAction(health, llmAvailable) {
     }
 
     // Detailed snapshot
-    const seedsAtRisk = db.prepare(`SELECT COUNT(*) as c FROM entity_profiles WHERE status = 'seed' AND fragment_count = 2`).get()?.c || 0;
-    const seedsReady = db.prepare(`SELECT COUNT(*) as c FROM entity_profiles WHERE status = 'seed' AND fragment_count >= 3`).get()?.c || 0;
-    const recentSeeds = db.prepare(`SELECT name, category, fragment_count FROM entity_profiles WHERE status = 'seed' AND fragment_count >= 2 ORDER BY fragment_count DESC LIMIT 10`).all();
+    const seedsAtRisk = db.prepare(`SELECT COUNT(*) as c FROM memory_visible_profiles AS entity_profiles WHERE status = 'seed' AND fragment_count = 2`).get()?.c || 0;
+    const seedsReady = db.prepare(`SELECT COUNT(*) as c FROM memory_visible_profiles AS entity_profiles WHERE status = 'seed' AND fragment_count >= 3`).get()?.c || 0;
+    const recentSeeds = db.prepare(`SELECT name, category, fragment_count FROM memory_visible_profiles AS entity_profiles WHERE status = 'seed' AND fragment_count >= 2 ORDER BY fragment_count DESC LIMIT 10`).all();
 
     // v5.5: 过时overview详情
     const staleEntities = db.prepare(`
         SELECT ep.id, ep.name, ep.category,
-               (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ep.id) as fc,
+               (SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ep.id) as fc,
                ep.last_eval_frag_count,
                ROUND(CAST(julianday('now') - julianday(COALESCE(ep.overview_updated_at, ep.created_at)) AS REAL)) as days_stale
-        FROM entity_profiles ep
+        FROM memory_visible_profiles ep
         WHERE ep.status = 'active' AND ep.fragment_count >= 3
           AND ep.name NOT IN (${SKIP_PH})
           AND (ep.overview_updated_at IS NULL
                OR ep.overview_updated_at < datetime('now', '-1 day'))
-          AND (SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ep.id) > COALESCE(ep.last_eval_frag_count, 0)
+          AND (SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ep.id) > COALESCE(ep.last_eval_frag_count, 0)
         ORDER BY days_stale DESC
         LIMIT 8
     `).all(...SKIP_NAMES);
@@ -5794,7 +5401,7 @@ async function generateDailyEntityStatus(targetDate) {
     const datePrefix = `${t.m}月${t.day}日：`;
 
     const ent = db.prepare(
-        "SELECT id, name, category, current_status FROM entity_profiles WHERE name = ? AND status = 'active'"
+        "SELECT id, name, category, current_status FROM memory_visible_profiles AS entity_profiles WHERE name = ? AND status = 'active'"
     ).get(USER.name);
     if (!ent) {
         console.log(`[DailyStatus] 未找到主角星座「${USER.name}」，跳过`);
@@ -5807,8 +5414,8 @@ async function generateDailyEntityStatus(targetDate) {
     const frags = db.prepare(`
         SELECT mf.content, COALESCE(mf.source_date, DATE(mf.created_at, 'localtime')) AS date,
                mf.emotional_weight
-        FROM memory_fragments mf
-        JOIN fragment_entities fe ON fe.fragment_id = mf.id
+        FROM memory_visible_fragments mf
+        JOIN memory_entity_associations fe ON fe.fragment_id = mf.id
         WHERE fe.entity_id = ?
           AND DATE(mf.created_at, 'localtime') = ?
         ORDER BY mf.created_at DESC

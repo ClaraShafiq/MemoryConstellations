@@ -71,10 +71,13 @@ router.post('/messages', (req, res) => {
 
     // 规整成消息数组
     const rawList = Array.isArray(body) ? body : [body];
+    if(rawList.some(item=>item?.chat_mode!==undefined && !['default','roleplay','game','cinema'].includes(item.chat_mode))) {
+        return res.status(400).json({success:false,error:'Invalid chat_mode'});
+    }
     const msgs = [];
     for (const item of rawList) {
         const m = normalizeMessage(item);
-        if (m) msgs.push(m);
+        if (m) msgs.push({...m,chat_mode:item.chat_mode || (item.is_rp?'roleplay':'default'),is_rp:Number(item.chat_mode==='roleplay'||(!item.chat_mode && !!item.is_rp))});
     }
 
     if (msgs.length === 0) {
@@ -93,14 +96,17 @@ router.post('/messages', (req, res) => {
     }
 
     // 默认 chat_id=1（若没有独立 chat 概念）
-    const chatId = body.chat_id ?? body.group_id ?? 1;
+    const chatId = Number(body.chat_id ?? body.group_id ?? 1);
+    if (!Number.isSafeInteger(chatId) || chatId <= 0) return res.status(400).json({success:false,error:'Invalid chat_id'});
 
     const insert = db.prepare(`
-        INSERT INTO messages (chat_id, sender, content, timestamp, is_encrypted, message_type, status)
-        VALUES (?, ?, ?, ?, 0, 'text', 'sent')
+        INSERT INTO messages (chat_id, sender, content, timestamp, is_encrypted, message_type, status, chat_mode, is_rp)
+        VALUES (?, ?, ?, ?, 0, 'text', 'sent', ?, ?)
     `);
     const tx = db.transaction((list) => {
-        for (const m of list) insert.run(chatId, m.sender, m.content, m.timestamp);
+        // Fresh installs have no chat yet. Create the ingress parent in the same transaction.
+        db.prepare('INSERT OR IGNORE INTO chats(id,name) VALUES(?,?)').run(chatId, `Ingest ${chatId}`);
+        for (const m of list) insert.run(chatId, m.sender, m.content, m.timestamp,m.chat_mode,m.is_rp);
     });
     tx(msgs);
 

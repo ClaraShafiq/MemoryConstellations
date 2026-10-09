@@ -1,3 +1,7 @@
+const { resolveName,writeLink } = require('./memoryLinks');
+const { sourceFor } = require('./memoryIntegrity');
+const { WORLD_CONTEXT } = require('./worldContext');
+const { linkWriter } = require('./memoryLinks');
 // =================================================================
 // Entity Resolver（实体解析器）：自动绑定 fragment → entity
 //
@@ -6,7 +10,7 @@
 //   2. ★ 向量联想：embed fragment → ChromaDB 查相似碎片 → 聚合已有 entity 关联 →
 //                候选实体投票
 //   3. LLM 指代消解：结合候选实体列表 + 描述，做单选判断（一条碎片一个直接归属）
-//   4. ★ 派生关联：从直接实体出发，沿 related_entity_ids 自动派生二级链接，
+//   4. ★ 派生关联：从直接实体出发，沿 related_entities 自动派生二级链接，
 //                标记为 derived_from，供 Librarian/overview 做辅助参考
 //
 // 写入目标：fragment_entities 多对多表（+ 兼容 memory_fragments.entity_id 旧字段）
@@ -33,12 +37,12 @@ let _cacheAge = 0;
 
 function getAliasData() {
     const now = Date.now();
-    if (_aliasCache && (now - _cacheAge) < 300000) return _aliasCache;
+    // Re-read current masked profiles; correctness precedes the small lookup cache.
 
     const db = getDb();
     const rows = db.prepare(`
-        SELECT id, name, category, aliases, facts, related_entity_ids FROM entity_profiles
-        WHERE name IS NOT NULL AND category != 'term'
+        SELECT id, name, category, aliases, facts, related_entities FROM memory_visible_profiles AS entity_profiles
+        WHERE name IS NOT NULL AND category != 'term' AND status IN ('active','seed','dormant')
     `).all();
 
     const aliasMap = new Map();
@@ -50,7 +54,7 @@ function getAliasData() {
     for (const row of rows) {
         let aliasList = [], relatedIds = [];
         try { aliasList = JSON.parse(row.aliases || '[]'); } catch (_) {}
-        try { relatedIds = JSON.parse(row.related_entity_ids || '[]'); } catch (_) {}
+        try { relatedIds = JSON.parse(row.related_entities || '[]').map(r=>r.id).filter(Number.isInteger); } catch (_) {}
 
         knownEntities.push({ id: row.id, name: row.name, aliases: aliasList });
 
@@ -85,25 +89,22 @@ function getAliasData() {
 // ── 内部：写入 fragment_entities（替换旧 entity_id UPDATE）──
 function linkFragmentToEntity(fragmentId, entityId, relation, confidence, classifiedBy) {
     const db = getDb();
-    db.prepare(`
-        INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, relation, confidence, classified_by, created_at)
-        VALUES (?, ?, ?, ?, ?, datetime('now'))
-    `).run(fragmentId, entityId, relation || null, confidence, classifiedBy);
+    linkWriter(db,["fragment_id", "entity_id", "relation", "confidence", "classified_by"],{}).run(fragmentId, entityId, relation || null, confidence, classifiedBy);
 
     // 同步更新 entity_profiles.fragment_count
     db.prepare(`
         UPDATE entity_profiles SET fragment_count = (
-            SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ?
+            SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?
         ) WHERE id = ?
     `).run(entityId, entityId);
 
     // 兼容旧字段
-    db.prepare('UPDATE memory_fragments SET entity_id = ? WHERE id = ? AND entity_id IS NULL')
-        .run(entityId, fragmentId);
+    db.prepare('UPDATE memory_fragments SET entity_id = ? WHERE id = ? AND entity_id IS NULL AND EXISTS(SELECT 1 FROM memory_entity_evidence fe WHERE fe.fragment_id=memory_fragments.id AND fe.entity_id=?)')
+        .run(entityId, fragmentId, entityId);
 }
 
 // ── 内部：从直接实体派生二级关联 ──
-// 读取 entity 的 related_entity_ids，写入 fragment_entities（标记 derived_from）
+// 读取 entity 的 related_entities，写入 fragment_entities（标记 derived_from）
 function deriveEntityLinks(fragmentId, directEntityId) {
     const db = getDb();
     const { relationGraph, entityDescriptors } = _aliasCache;  // 可能在当前 tick 内已过期，fallback 到实查
@@ -111,28 +112,25 @@ function deriveEntityLinks(fragmentId, directEntityId) {
     // 先查缓存，缓存没有则查 DB
     let relatedIds = relationGraph?.get(directEntityId);
     if (!relatedIds) {
-        const row = db.prepare('SELECT related_entity_ids FROM entity_profiles WHERE id = ?').get(directEntityId);
-        if (!row?.related_entity_ids) return 0;
-        try { relatedIds = JSON.parse(row.related_entity_ids); } catch (_) { return 0; }
+        const row = db.prepare('SELECT related_entities FROM memory_visible_profiles AS entity_profiles WHERE id = ?').get(directEntityId);
+        if (!row?.related_entities) return 0;
+        try { relatedIds = JSON.parse(row.related_entities).map(r=>r.id).filter(Number.isInteger); } catch (_) { return 0; }
         if (!relatedIds?.length) return 0;
     }
 
     let derived = 0;
     for (const rid of relatedIds) {
         // 跳过不存在的 entity
-        const exists = db.prepare('SELECT 1 FROM entity_profiles WHERE id = ? AND status = ?').get(rid, 'active');
+        const exists = db.prepare('SELECT 1 FROM memory_visible_profiles AS entity_profiles WHERE id = ? AND status = ?').get(rid, 'active');
         if (!exists) continue;
 
         const relation = `derived_from:${directEntityId}`;
-        db.prepare(`
-            INSERT OR IGNORE INTO fragment_entities (fragment_id, entity_id, relation, confidence, classified_by, created_at)
-            VALUES (?, ?, ?, ?, ?, datetime('now'))
-        `).run(fragmentId, rid, relation, DERIVED_CONFIDENCE, 'resolver.derived');
+        linkWriter(db,["fragment_id", "entity_id", "relation", "confidence", "classified_by"],{}).run(fragmentId, rid, relation, DERIVED_CONFIDENCE, 'resolver.derived');
 
         // 更新派生 entity 的 fragment_count
         db.prepare(`
             UPDATE entity_profiles SET fragment_count = (
-                SELECT COUNT(*) FROM fragment_entities WHERE entity_id = ?
+                SELECT COUNT(*) FROM memory_entity_associations AS fragment_entities WHERE entity_id = ?
             ) WHERE id = ?
         `).run(rid, rid);
 
@@ -206,7 +204,7 @@ async function matchByVectorHint(unmatchedFragments) {
             const placeholders = neighborIds.map(() => '?').join(',');
             const links = db.prepare(`
                 SELECT fe.entity_id, fe.fragment_id
-                FROM fragment_entities fe
+                FROM memory_entity_associations fe
                 WHERE fe.fragment_id IN (${placeholders})
             `).all(...neighborIds);
 
@@ -274,7 +272,8 @@ async function resolveByLLM(unmatchedFragments, conversationText, knownEntities,
         return `[frag_${f.id}] entity="${f.entity_label}" content="${f.content}"${hintText}`;
     });
 
-    const prompt = `你是实体指代消解器。给定对话上下文、已知实体列表和记忆碎片，判断每条碎片提及的人物/事物指向哪个已知实体。
+    const prompt = `${WORLD_CONTEXT}
+你是实体指代消解器。给定对话上下文、已知实体列表和记忆碎片，判断每条碎片提及的人物/事物指向哪个已知实体。
 
 已知实体：
 ${entityLines.join('\n')}
@@ -347,11 +346,12 @@ async function resolveEntityIds(fragmentIds, conversationText) {
 
     const db = getDb();
     const { aliasMap, knownEntities } = getAliasData();
+    const knownIds=new Set(knownEntities.map(e=>e.id));
     if (aliasMap.size === 0) return 0;
 
     const placeholders = fragmentIds.map(() => '?').join(',');
     const fragments = db.prepare(`
-        SELECT id, entity, content FROM memory_fragments WHERE id IN (${placeholders})
+        SELECT id, entity, content FROM memory_visible_fragments AS memory_fragments WHERE id IN (${placeholders})
     `).all(...fragmentIds);
 
     const unmatched = [];
@@ -359,11 +359,13 @@ async function resolveEntityIds(fragmentIds, conversationText) {
 
     // —— 第一层：关键词匹配 ——
     for (const frag of fragments) {
-        const match = matchByKeyword(frag, aliasMap);
+        const match = resolveName(db,frag.entity);
+        const provenance=sourceFor(db,frag.id);
+        if(provenance && provenance.state!=='quoted') continue;
         if (match) {
             linkFragmentToEntity(frag.id, match.id, 'keyword', 0.90, 'resolver.keyword');
             totalDerived += deriveEntityLinks(frag.id, match.id);
-            totalDirect++;
+            unmatched.push(frag);
         } else {
             unmatched.push(frag);
         }
@@ -384,7 +386,12 @@ async function resolveEntityIds(fragmentIds, conversationText) {
         const llmResolutions = await resolveByLLM(unmatched, conversationText, knownEntities, entityCandidates);
         let llmDirect = 0, llmDerived = 0;
         for (const [fragId, entityId] of Object.entries(llmResolutions)) {
-            linkFragmentToEntity(parseInt(fragId), entityId, 'llm_resolved', 0.70, 'resolver.llm');
+            const id=Number(fragId);
+            if(!unmatched.some(f=>f.id===id) || !knownIds.has(entityId)) continue;
+            const provenance=sourceFor(db,id);
+            const relation=provenance?.kind==='user_fact' ? 'llm_resolved' : ({interaction_pattern:'interaction',ai_opinion:'opinion',fiction:'fictional',third_party:'third_party'}[provenance?.kind] || 'candidate');
+            if(provenance && provenance.state!=='quoted') continue;
+            linkFragmentToEntity(id, entityId, relation, 0.70, 'resolver.llm');
             llmDerived += deriveEntityLinks(parseInt(fragId), entityId);
             llmDirect++;
         }
@@ -408,20 +415,20 @@ async function resolveEntityIds(fragmentIds, conversationText) {
         const db = getDb();
 
         const missingRels = db.prepare(`
-            SELECT COUNT(*) as c FROM entity_profiles ep
+            SELECT COUNT(*) as c FROM memory_visible_profiles ep
             WHERE ep.category = 'person'
               AND ep.name NOT IN ('${USER.name}', '${AI.name}')
               AND (ep.relationship_to_user IS NULL OR ep.relationship_to_user = '')
-              AND (SELECT COUNT(*) FROM memory_fragments WHERE entity_id = ep.id AND status = 'active') >= 5
+              AND (SELECT COUNT(*) FROM memory_visible_fragments AS memory_fragments WHERE entity_id = ep.id AND status = 'active') >= 5
         `).get();
 
         const lowConfRels = db.prepare(`
-            SELECT COUNT(*) as c FROM entity_profiles ep
+            SELECT COUNT(*) as c FROM memory_visible_profiles ep
             WHERE ep.category = 'person'
               AND ep.name NOT IN ('${USER.name}', '${AI.name}')
               AND ep.relationship_confidence IN ('low', 'medium')
               AND (ep.last_evaluated_at IS NULL OR ep.last_evaluated_at < datetime('now', '-1 day'))
-              AND (SELECT COUNT(*) FROM memory_fragments
+              AND (SELECT COUNT(*) FROM memory_visible_fragments AS memory_fragments
                    WHERE entity_id = ep.id AND status = 'active'
                      AND created_at > COALESCE(ep.last_evaluated_at, '1970-01-01')) >= 3
         `).get();

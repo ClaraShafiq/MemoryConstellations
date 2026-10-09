@@ -11,6 +11,9 @@ const { CONFIG } = require('./config');
 const { registerCronJobs } = require('./tasks/cron');
 
 const db = initDatabase();
+require('./services/memoryOperations').startMonitor(require('./database').getDb, {
+  expectedStages: ['scribe', 'archivist_start'],
+});
 
 // 后台记忆管线（Archivist 自主循环 + Scribe + 每日任务）。
 // 只挂路由不启管线的话，库不会自己长：消息进来没人提取、碎片没人分类、星座不增加。
@@ -82,6 +85,13 @@ app.get('/memory.html', requireAuth, (req, res) => {
 // 注意：memory-api.js 内部写的是完整路径（'/api/memory/...'），这里不能再加前缀，
 // 否则实际路径会变成 /api/memory/api/memory/...，前端全部 404。
 app.use(require('./routes/memory-api'));
+app.use(require('./routes/memory-operations').createRouter({
+  getDb: require('./database').getDb,
+  requireAuth,
+  ...require('./services/memoryIntegrity'),
+  decode: value => require('./encryption').encryption.decrypt(value),
+  expectedStages: ['scribe', 'archivist_start'],
+}));
 
 // ── Chat ingest API（接收外部机器人消息，攒记忆）──
 app.use('/api', require('./routes/ingest'));

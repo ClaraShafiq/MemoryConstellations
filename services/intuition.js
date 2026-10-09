@@ -181,7 +181,7 @@ function lookupEntitiesInMessage(userMessage) {
   const db = getDb();
   if (!userMessage || !userMessage.trim()) return [];
   const entities = db.prepare(`
-    SELECT id, name, aliases, facts, overview_updated_at FROM entity_profiles
+    SELECT id, name, aliases, facts, overview_updated_at FROM memory_visible_profiles AS entity_profiles
     WHERE name IS NOT NULL AND status IN ('active', 'seed')
       AND facts IS NOT NULL AND facts != ''
     ORDER BY fragment_count DESC
@@ -218,7 +218,7 @@ function getTriggeredIntuition(userMessage, maxTokens = 800) {
 
   const states = db.prepare(`
     SELECT id, content, confidence, last_evidence_at, created_at, expires_at, decay_params, source_quality
-    FROM user_model
+    FROM memory_valid_user_model AS user_model
     WHERE type = 'current_state' AND status = 'active'
       AND (expires_at IS NULL OR expires_at > datetime('now'))
     ORDER BY last_evidence_at DESC LIMIT 8
@@ -306,7 +306,7 @@ function getTriggeredIntuition(userMessage, maxTokens = 800) {
   // ── v5.2: 观察到的模式（日积月累的行为观察，话题触发）──
   const patterns = db.prepare(`
     SELECT content, evidence_count, first_seen, last_seen, confidence, tags
-    FROM user_patterns WHERE status = 'active'
+    FROM memory_valid_patterns AS user_patterns WHERE status = 'active'
     ORDER BY confidence DESC LIMIT 15
   `).all();
 
@@ -377,10 +377,10 @@ function getTriggeredIntuition(userMessage, maxTokens = 800) {
 function getFullModel() {
   const db = getDb();
   return {
-    facts: db.prepare("SELECT * FROM user_model WHERE type='immutable_fact' AND status='active' ORDER BY confidence DESC").all(),
-    traits: db.prepare("SELECT * FROM user_model WHERE type='stable_trait' AND status='active' ORDER BY confidence DESC").all(),
-    states: db.prepare("SELECT * FROM user_model WHERE type='current_state' AND status='active' ORDER BY last_evidence_at DESC").all(),
-    hyps: db.prepare("SELECT * FROM user_model WHERE type='active_hypothesis' AND status='active' ORDER BY confidence DESC").all(),
+    facts: db.prepare("SELECT * FROM memory_valid_user_model AS user_model WHERE type='immutable_fact' AND status='active' ORDER BY confidence DESC").all(),
+    traits: db.prepare("SELECT * FROM memory_valid_user_model AS user_model WHERE type='stable_trait' AND status='active' ORDER BY confidence DESC").all(),
+    states: db.prepare("SELECT * FROM memory_valid_user_model AS user_model WHERE type='current_state' AND status='active' ORDER BY last_evidence_at DESC").all(),
+    hyps: db.prepare("SELECT * FROM memory_valid_user_model AS user_model WHERE type='active_hypothesis' AND status='active' ORDER BY confidence DESC").all(),
   };
 }
 

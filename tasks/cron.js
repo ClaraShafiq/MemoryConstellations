@@ -11,6 +11,8 @@
 // =================================================================
 
 const cron = require('node-cron');
+const { tracked } = require('../services/memoryOperations');
+const { getDb } = require('../database');
 
 // 时区统一走 TZ 环境变量（docker-compose 里已设）。不设就用系统时区——
 // generateDailyEntityStatus 判「昨天」用的也是同一套口径，别在这儿单独写死。
@@ -27,7 +29,7 @@ function registerCronJobs() {
 
     // ── Archivist Agent：自主循环（2min tick + 事件驱动）──
     // 启动即生效，不是定时任务；没这一步后面的 Scribe/分类/整合都不会发生。
-    startArchivist()
+    tracked(getDb(), 'archivist_start', () => startArchivist())
         .then(() => console.log('[Cron] Archivist Agent started (2min tick loop + event-driven)'))
         .catch(err => console.error('[Cron] Archivist Agent start error:', err));
 
@@ -36,7 +38,7 @@ function registerCronJobs() {
     // 这里只负责定期敲门。挂在自己的 cron 上、不要串进别的 tick——上游踩过：
     // 排在一串会 return 的闸门后面时，兜底那句「超过 N 小时也跑」可能永远轮不到执行。
     cron.schedule('*/5 * * * *', () => {
-        require('../services/scribe').checkAndRunScribe().catch(err => {
+        tracked(getDb(), 'scribe', () => require('../services/scribe').checkAndRunScribe()).catch(err => {
             console.error('[Cron] Scribe error:', err.message);
         });
     }, TZ_OPT);

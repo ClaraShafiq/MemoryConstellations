@@ -43,7 +43,7 @@ function searchMemoriesByHardTrigger(userMessage) {
         const db = getDb();
         const allMemories = db.prepare(`
             SELECT id, content, tags, status, valid_from, valid_to
-            FROM memories
+            FROM memory_valid_episodes AS memories
             WHERE tags IS NOT NULL AND tags != '[]'
               AND status IN ('permanent', 'ongoing')
         `).all();
@@ -142,7 +142,7 @@ async function searchMemoriesByVector(query, nResults = 3) {
         // 查 memory_fragments 表（只返回 active，consolidated 不走向量路径）
         if (fragmentIds.length > 0) {
             const placeholders = fragmentIds.map(() => '?').join(',');
-            const fragments = db.prepare(`SELECT * FROM memory_fragments WHERE id IN (${placeholders}) AND status = 'active'`).all(...fragmentIds);
+            const fragments = db.prepare(`SELECT * FROM memory_visible_fragments AS memory_fragments WHERE id IN (${placeholders}) AND status = 'active'`).all(...fragmentIds);
             const staleCount = fragmentIds.length - fragments.length;
             if (staleCount > 0) {
                 console.log(`searchMemoriesByVector: 过滤 ${staleCount} 条已合并/非活跃碎片 (ChromaDB stale entries)`);
@@ -156,7 +156,7 @@ async function searchMemoriesByVector(query, nResults = 3) {
         // 查 memories 表（只返回 episode + permanent，旧冥想盆历史条目不纳入）
         if (memoryIds.length > 0) {
             const placeholders = memoryIds.map(() => '?').join(',');
-            const episodes = db.prepare(`SELECT * FROM memories WHERE id IN (${placeholders}) AND layer = 'episode' AND status = 'permanent'`).all(...memoryIds);
+            const episodes = db.prepare(`SELECT * FROM memory_valid_episodes AS memories WHERE id IN (${placeholders}) AND layer = 'episode' AND status = 'permanent'`).all(...memoryIds);
             for (const m of episodes) {
                 try { m.content = encryption.decrypt(m.content); } catch (_) {}
                 try { m.title = encryption.decrypt(m.title); } catch (_) {}
@@ -181,7 +181,7 @@ async function cleanupStaleChromaEntries() {
     const db = getDb();
     // Find fragments with status != 'active' that likely still have ChromaDB entries
     const stale = db.prepare(`
-        SELECT id, chroma_id FROM memory_fragments
+        SELECT id, chroma_id FROM memory_visible_fragments AS memory_fragments
         WHERE status != 'active' AND chroma_id IS NOT NULL
         LIMIT 50
     `).all();

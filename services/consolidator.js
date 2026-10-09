@@ -1,3 +1,5 @@
+const { prepareEpisodeBatch,persistEpisode,version:episodeVersion } = require('./episodeWriter');
+const { sourceFor } = require('./memoryIntegrity');
 // =================================================================
 // Consolidator — 遗留工具模块（v5.0）
 //
@@ -32,6 +34,8 @@ const CONFIG = {
 const CONSOLIDATOR_SYSTEM_PROMPT = `${WORLD_CONTEXT}
 
 你是记忆整合器，负责将多个相似的记忆碎片合并为一条规范的长期记忆。
+
+每条输出必须声明 fragment_indices（从1开始）和 covered_fragment_indices（只列完全覆盖项），operation=merge或split。同主题不等于同事件；不同语境分开；混杂来源可以拆分，部分使用不能标完整覆盖。
 
 ## 你的任务
 
@@ -68,6 +72,9 @@ const CONSOLIDATOR_SYSTEM_PROMPT = `${WORLD_CONTEXT}
 严格JSON，不含任何其他文字：
 
 {
+  "operation": "merge或split",
+  "fragment_indices": [1, 2, 3],
+  "covered_fragment_indices": [1, 2],
   "merged_memory": "第三人称规范记忆文本，150字以内。必须以人名或实体名开头。significance≤4时可为空字符串。",
   "corrected_date": "YYYY-MM-DD 或空字符串",
   "confidence": "high/medium/low——有原始对话佐证→high；只用source_date推断→medium；碎片间明显矛盾或信息不足→low",
@@ -111,14 +118,14 @@ function getRecentActiveFragments(daysBack = CONFIG.LOOKBACK_DAYS) {
     if (daysBack === null) {
         return db.prepare(`
             SELECT id, type, entity, content, emotional_weight, source, source_date, source_msg_ids, created_at, is_rp
-            FROM memory_fragments
+            FROM memory_visible_fragments AS memory_fragments
             WHERE status = 'active'
             ORDER BY created_at DESC
         `).all();
     }
     return db.prepare(`
         SELECT id, type, entity, content, emotional_weight, source, source_date, source_msg_ids, created_at, is_rp
-        FROM memory_fragments
+        FROM memory_visible_fragments AS memory_fragments
         WHERE status = 'active'
           AND created_at >= datetime('now', '-' || ? || ' days')
         ORDER BY created_at DESC
@@ -240,6 +247,7 @@ function formatMessagesForLLM(messages) {
 // 整合一组相似碎片
 async function consolidateGroup(group) {
     const db = getDb();
+    for(const f of group) f._source_version=episodeVersion(f,sourceFor(db,f.id));
 
     // 收集所有源消息 ID
     const allMsgIds = [];
@@ -310,42 +318,17 @@ async function consolidateGroup(group) {
         };
     }
 
-    // 计算合并后的权重（emotional_weight 为基础，significance 为主调）
-    const avgEW = group.reduce((s, f) => s + (f.emotional_weight || 0.5), 0) / group.length;
-    // significance 5-6 → weight 5-6, 7-8 → weight 7-8, 9-10 → weight 9-10
-    const sigWeight = Math.round(significance);
-    const mergedWeight = Math.min(10, Math.round(sigWeight * 0.7 + (5 + avgEW * 3) * 0.3));
-
-    // 使用校正后的日期，或回退到 source_date
-    const finalDate = result.corrected_date || group[0].source_date || '';
-
-    // 收集所有碎片的 source_msg_ids（合并继承）
-    const mergedMsgIds = [...new Set(allMsgIds)];
-
-    // 收集所有碎片的 ID 用于标记 consolidated
-    const fragmentIds = group.map(f => f.id);
-
-    // 写入 memories 表
-    const title = result.merged_memory.slice(0, 50);
-    const consolidationType = group.consolidationType || 'standard';
-    const insert = db.prepare(`
-        INSERT INTO memories (title, content, weight, valid_from, status, source_msg_ids, layer, consolidation_type, audit_status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'permanent', ?, 'episode', ?, 'pending', datetime('now'), datetime('now'))
-    `);
-    const info = insert.run(
-        title,
-        result.merged_memory,
-        mergedWeight,
-        finalDate,
-        JSON.stringify(mergedMsgIds),
-        consolidationType
-    );
-    const memoryId = info.lastInsertRowid;
+    const prepared=prepareEpisodeBatch([result],group,{indexBase:1,minSources:2,db});
+    if(!prepared.length) return null;
+    const episode=prepared[0].episode;
+    const rows=persistEpisode(db,episode,{consolidationType:group.consolidationType || 'standard'});
+    const memoryId=rows[0].memoryId,mergedWeight=episode.weight;
+    const fragmentIds=episode.selected.map(f=>f.id);
 
     // ❶ 先清理 ChromaDB 中旧碎片嵌入（必须在 embed 新记忆之前，防止误判 duplicate）
     try {
         let cleaned = 0;
-        for (const fid of fragmentIds) {
+        for (const fid of episode.coveredIds) {
             try {
                 await chromaDBOperation('delete', { id: `fragment_${fid}` });
                 cleaned++;
@@ -358,13 +341,7 @@ async function consolidateGroup(group) {
         console.warn(`[Consolidator] ChromaDB 清理失败（非致命）: ${e.message}`);
     }
 
-    // ❷ 标记原碎片为已整合
-    const markConsolidated = db.prepare(`
-        UPDATE memory_fragments SET status = 'consolidated' WHERE id = ?
-    `);
-    for (const fid of fragmentIds) {
-        markConsolidated.run(fid);
-    }
+    // Source state and lineage already committed together.
 
     // ❸ 索引新记忆到 ChromaDB（旧碎片已删，不会冲突判重）
     let chromaId = null;
@@ -415,7 +392,7 @@ async function detectContradictions(consolidatedResult) {
 
     // 查已有 memories（排除刚写入的）
     const existing = db.prepare(`
-        SELECT id, title, content FROM memories
+        SELECT id, title, content FROM memory_valid_episodes AS memories
         WHERE status IN ('permanent', 'ongoing')
           AND id != ?
         ORDER BY updated_at DESC
@@ -468,25 +445,25 @@ async function detectContradictions(consolidatedResult) {
                 try {
                     const { addEvidence: cmAddEvidence } = require('./cognitiveModel');
                     // Find user_model entries referencing the existing memory's entities
-                    const existingMem = db.prepare('SELECT content, source_msg_ids FROM memories WHERE id = ?').get(c.existing_memory_id);
+                    const existingMem = db.prepare('SELECT content, source_msg_ids FROM memory_valid_episodes AS memories WHERE id = ?').get(c.existing_memory_id);
                     if (existingMem) {
                         // Get fragments from the consolidated result to use as evidence source
                         const fragIds = consolidatedResult.fragmentIds || [];
                         // Find user_model entries that share entity overlap with the existing memory
                         const cmEntries = db.prepare(`
-                            SELECT id FROM user_model WHERE status = 'active'
+                            SELECT id FROM memory_valid_user_model AS user_model WHERE status = 'active'
                             AND content LIKE '%' || ? || '%'
                             LIMIT 5
                         `).all(newContent.slice(0, 40));
 
                         // Also check by entity name → id resolution
-                        const entityNames = db.prepare('SELECT id, name FROM entity_profiles').all()
+                        const entityNames = db.prepare('SELECT id, name FROM memory_visible_profiles AS entity_profiles').all()
                             .filter(e => newContent.includes(e.name) || (existingMem.content || '').includes(e.name));
 
                         for (const ent of entityNames.slice(0, 3)) {
                             // Match entity ID in the JSON array: entity_ids LIKE '%"<id>"%' or '[<id>,'
                             const byEntity = db.prepare(`
-                                SELECT id FROM user_model WHERE status = 'active'
+                                SELECT id FROM memory_valid_user_model AS user_model WHERE status = 'active'
                                 AND (content LIKE '%' || ? || '%'
                                      OR entity_ids LIKE '%' || ? || '%')
                                 LIMIT 3
@@ -560,11 +537,11 @@ function getConsolidationSummary() {
     if (!lastRun) return null;
 
     const totalConsolidated = db.prepare(`
-        SELECT COUNT(*) as count FROM memory_fragments WHERE status = 'consolidated'
+        SELECT COUNT(*) as count FROM memory_visible_fragments AS memory_fragments WHERE status = 'consolidated'
     `).get();
 
     const totalMemories = db.prepare(`
-        SELECT COUNT(*) as count FROM memories WHERE source_msg_ids IS NOT NULL
+        SELECT COUNT(*) as count FROM memory_valid_episodes AS memories WHERE source_msg_ids IS NOT NULL
     `).get();
 
     return {
@@ -654,7 +631,7 @@ async function clusterSagas() {
     // 获取所有 episode 级别记忆
     const episodes = db.prepare(`
         SELECT id, title, content, valid_from, source_msg_ids
-        FROM memories
+        FROM memory_valid_episodes AS memories
         WHERE layer = 'episode'
           AND status = 'permanent'
         ORDER BY valid_from DESC
@@ -674,7 +651,7 @@ async function clusterSagas() {
     });
 
     // 取已有 sagas，建立归一化标题索引用于去重合并
-    const existingSagas = db.prepare("SELECT id, title, memory_ids FROM memory_sagas WHERE status = 'active'").all();
+    const existingSagas = db.prepare("SELECT id, title, memory_ids FROM memory_valid_sagas AS memory_sagas WHERE status = 'active'").all();
     const normalizeTitle = (t) => (t || '').replace(/（续）|\(续\)/g, '').replace(/\s+/g, '').toLowerCase();
     const sagaIndex = new Map(); // normalized title → {id, title, memory_ids}
     for (const s of existingSagas) {
@@ -780,7 +757,7 @@ ${episodesText}`;
 // 向量去重：比较所有活跃 Saga 的描述 embedding，合并相似对
 async function deduplicateSagas() {
     const db = getDb();
-    const sagas = db.prepare("SELECT id, title, description, memory_ids FROM memory_sagas WHERE status = 'active'").all();
+    const sagas = db.prepare("SELECT id, title, description, memory_ids FROM memory_valid_sagas AS memory_sagas WHERE status = 'active'").all();
     if (sagas.length < 2) return 0;
 
     // 批量获取 embedding
@@ -881,7 +858,7 @@ async function consolidateFlash(highEWFragments, windowMsgIds) {
             // 查找同窗口内但非高EW的碎片（用于丰富上下文）
             const placeholders = allMsgIds.map(() => '?').join(',');
             relatedFragments = db.prepare(`
-                SELECT * FROM memory_fragments
+                SELECT * FROM memory_visible_fragments AS memory_fragments
                 WHERE status = 'active' AND id NOT IN (${highEWFragments.map(() => '?').join(',')})
                 ORDER BY emotional_weight DESC LIMIT 10
             `).all(...highEWFragments.map(f => f.id));

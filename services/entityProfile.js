@@ -29,6 +29,12 @@ const ENTITY_EXTRACT_PROMPT = `${WORLD_CONTEXT}
 async function updateEntityProfiles(newEpisodes) {
     if (!newEpisodes || newEpisodes.length === 0) return [];
 
+    const dbForInput = getDb();
+    newEpisodes = newEpisodes.filter(ep => {
+        const row = dbForInput.prepare('SELECT tags FROM memory_valid_episodes WHERE id=?').get(ep.memoryId);
+        return row && (row.tags || '').includes('memory_kind:user_fact');
+    });
+    if (!newEpisodes.length) return [];
     const episodesText = newEpisodes.map((ep, i) =>
         `[记忆${i + 1}] ${ep.memoryContent} (date: ${ep.correctedDate || '未知'})`
     ).join('\n\n');
@@ -58,7 +64,7 @@ async function updateEntityProfiles(newEpisodes) {
     const allNames = [...new Set(result.updates.map(u => u.entity).filter(Boolean))];
     if (allNames.length > 0) {
         const placeholders = allNames.map(() => '?').join(',');
-        const existing = db.prepare(`SELECT name, status_since FROM entity_profiles WHERE name IN (${placeholders})`).all(...allNames);
+        const existing = db.prepare(`SELECT name, status_since FROM memory_visible_profiles AS entity_profiles WHERE name IN (${placeholders})`).all(...allNames);
         for (const e of existing) {
             existingMap.set(e.name, e.status_since || '');
         }
@@ -126,27 +132,10 @@ function getEntityContext(fragments) {
     if (fragIds.length > 0) {
         const placeholders = fragIds.map(() => '?').join(',');
         const linked = db.prepare(`
-            SELECT DISTINCT entity_id FROM fragment_entities
+            SELECT DISTINCT entity_id FROM memory_entity_associations AS fragment_entities
             WHERE fragment_id IN (${placeholders})
         `).all(...fragIds);
         linked.forEach(r => entityIds.add(r.entity_id));
-    }
-
-    // Path 2: 旧 entity 字段（Scribe 提取时标注的实体名）
-    if (fragIds.length > 0) {
-        const placeholders = fragIds.map(() => '?').join(',');
-        const rows = db.prepare(`
-            SELECT DISTINCT entity FROM memory_fragments
-            WHERE id IN (${placeholders}) AND entity != ''
-        `).all(...fragIds);
-        const names = [...new Set(rows.map(r => r.entity))];
-        if (names.length > 0) {
-            const matched = db.prepare(`
-                SELECT id FROM entity_profiles
-                WHERE name IN (${names.map(() => '?').join(',')})
-            `).all(...names);
-            matched.forEach(r => entityIds.add(r.id));
-        }
     }
 
     if (entityIds.size === 0) return null;
@@ -157,7 +146,7 @@ function getEntityContext(fragments) {
         SELECT id, name, category, related_entities, overview_updated_at, fragment_count,
                facts, current_status, judgment, gender,
                relationship_category, mbti, location, occupation, age_text
-        FROM entity_profiles
+        FROM memory_visible_profiles AS entity_profiles
         WHERE id IN (${idList.map(() => '?').join(',')})
           AND name NOT IN (?, ?)
         ORDER BY fragment_count DESC
@@ -221,7 +210,7 @@ function getEntityContext(fragments) {
 
         // 最近叙事片段（episodes），每条截断到80字
         const episodes = db.prepare(`
-            SELECT content, valid_from FROM memories
+            SELECT content, valid_from FROM memory_valid_episodes AS memories
             WHERE layer = 'episode' AND status = 'permanent' AND entity_id = ?
             ORDER BY valid_from DESC LIMIT 3
         `).all(p.id);
@@ -230,7 +219,7 @@ function getEntityContext(fragments) {
             line += '\n  📖 最近动态：';
             episodes.forEach((ep, i) => {
                 const date = (ep.valid_from || '?').slice(5);
-                const text = ep.content.length > 80 ? ep.content.slice(0, 80) + '…' : ep.content;
+                const text = ep.content;
                 line += `\n    ${i + 1}. (${date}) ${text}`;
             });
             line += '\n  （用 recall_memory 可查看完整叙事片段，或追溯到原始聊天消息）';
@@ -240,13 +229,13 @@ function getEntityContext(fragments) {
         // Saga 的 memory_ids 中包含本实体的 episode → 展示标题 + 截断描述
         try {
             const entityEpisodeIds = db.prepare(`
-                SELECT id FROM memories
+                SELECT id FROM memory_valid_episodes AS memories
                 WHERE layer = 'episode' AND status = 'permanent' AND entity_id = ?
             `).all(p.id).map(r => r.id);
 
             if (entityEpisodeIds.length > 0) {
                 const activeSagas = db.prepare(`
-                    SELECT title, description, memory_ids FROM memory_sagas
+                    SELECT title, description, memory_ids FROM memory_valid_sagas AS memory_sagas
                     WHERE status = 'active' AND memory_ids IS NOT NULL
                     ORDER BY created_at DESC
                 `).all();

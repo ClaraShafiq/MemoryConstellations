@@ -1209,6 +1209,30 @@ function initDatabase() {
         console.error('[DB] 本体论种子数据插入失败（表已存在则忽略）:', e.message);
     }
 
+    // Integrity schema is a mandatory, atomic migration, never an optional background task.
+    if (!db.prepare('SELECT 1 FROM schema_version WHERE version=104').get()) {
+        db.transaction(() => {
+            db.exec(require('./services/memoryIntegrity').SCHEMA);
+            require('./services/memoryOperations').installOperations(db);
+            require('./services/memoryViews').installViews(db);
+            db.exec(`INSERT OR IGNORE INTO memory_derivation_reviews(target_type,target_id,reason)
+                SELECT 'profile',ep.id,'legacy_sources_require_review' FROM entity_profiles ep WHERE ep.facts IS NOT NULL
+                AND EXISTS(SELECT 1 FROM fragment_entities fe WHERE fe.entity_id=ep.id);
+                INSERT OR IGNORE INTO memory_derivation_reviews(target_type,target_id,reason)
+                SELECT 'episode',id,'legacy_episode_lineage_unknown' FROM memories WHERE layer='episode';
+                INSERT OR IGNORE INTO memory_derivation_reviews(target_type,target_id,reason)
+                SELECT 'user_model',id,'legacy_evidence_requires_review' FROM user_model WHERE type!='immutable_fact' AND status='active';
+                INSERT OR IGNORE INTO memory_derivation_reviews(target_type,target_id,reason)
+                SELECT 'pattern',id,'legacy_evidence_requires_review' FROM user_patterns WHERE status='active';
+                INSERT OR IGNORE INTO memory_derivation_reviews(target_type,target_id,reason)
+                SELECT 'saga',id,'legacy_episode_lineage_unknown' FROM memory_sagas WHERE status='active';`);
+
+            db.prepare('INSERT INTO schema_version(version,name,applied_at) VALUES(104,?,?)')
+                .run('memory provenance and withdrawal contracts',sqlNow());
+        })();
+    }
+    require('./services/memoryOperations').assertContracts(db);
+
     // ── 打印当前 schema 版本 ──
     const currentVersion = db.prepare('SELECT MAX(version) as v FROM schema_version').get();
     console.log(`[DB] 数据库初始化完成, schema v${currentVersion.v || 0}`);
@@ -1222,4 +1246,13 @@ function getDb() {
     return db;
 }
 
-module.exports = { initDatabase, getDb };
+function openMaintenanceDb(filename,{readonly=true}={}) {
+    const handle=new Database(filename,{readonly,fileMustExist:true});
+    handle.function('splitCJK', (text) => {
+        if (!text) return '';
+        return text.replace(/[一-鿿㐀-䶿豈-﫿]/g, ' $& ');
+    });
+    handle.pragma('busy_timeout=5000');
+    return handle;
+}
+module.exports = { initDatabase, getDb, openMaintenanceDb };

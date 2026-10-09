@@ -175,7 +175,10 @@ function getRecentFragments() {
     for (const [key, entry] of pool) {
         if (now - entry.lastBoostedAt < TTL_MS) {
             const [source_table, idStr] = key.split('-');
-            result.push({ id: parseInt(idStr), content: entry.content, source_table });
+            const table=source_table==='memory'?'memory_valid_episodes':'memory_visible_fragments';
+            const row=getDb().prepare(`SELECT * FROM ${table} WHERE id=?`).get(parseInt(idStr));
+            if(row && ['active','consolidated','cooling','permanent','ongoing'].includes(row.status))
+                result.push({ id:parseInt(idStr),content:row.content,source_table });
         }
     }
     return result;

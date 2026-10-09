@@ -4,6 +4,10 @@
 // 用法: node tests/smoke_memory.js
 // =================================================================
 
+const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'constellations-smoke-'));
+process.env.DB_PATH=path.join(dir,'fixture.db');
+process.env.SANCTUARY_ENCRYPTION_KEY=require('node:crypto').randomBytes(32).toString('hex');
 require('dotenv').config();
 const { initDatabase } = require('../database');
 
@@ -175,11 +179,7 @@ async function main() {
 
     // ── 7. ChromaDB ──
     console.log('\n── 7. ChromaDB ──');
-    await asyncTest('ChromaDB heartbeat', async () => {
-        const { chromaDBOperation } = require('../services/memory');
-        const r = await chromaDBOperation('heartbeat');
-        if (!r) throw new Error('ChromaDB 无响应');
-    });
+    console.log('SKIP: real ChromaDB heartbeat (this default smoke test is offline)');
 
     // ── 结果 ──
     console.log(`\n══════════════════`);
@@ -188,12 +188,15 @@ async function main() {
         console.log('🎉 记忆管线就绪！');
     } else {
         console.log('⚠️  有测试失败。');
-        process.exit(1);
+        process.exitCode=1;
     }
-    process.exit(0);
+
 }
 
 main().catch(e => {
     console.error('💥 测试中断:', e.message);
-    process.exit(1);
+    process.exitCode=1;
+}).finally(()=>{
+    try { require('../database').getDb().close(); } catch {}
+    fs.rmSync(dir,{recursive:true,force:true});
 });

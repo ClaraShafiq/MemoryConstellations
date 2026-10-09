@@ -365,7 +365,7 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
                        mf.read_count,
                        mf.entity_id, fe.confidence AS link_confidence, fe.relation
                 FROM memory_fragments mf
-                JOIN fragment_entities fe ON fe.fragment_id = mf.id
+                JOIN memory_entity_associations fe ON fe.fragment_id = mf.id
                 WHERE fe.entity_id = ? AND mf.status IN ('active', 'consolidated', 'cooling', 'frozen')
                 ORDER BY
                     CASE mf.status WHEN 'active' THEN 0 WHEN 'consolidated' THEN 1 WHEN 'cooling' THEN 2 ELSE 3 END,
@@ -689,7 +689,7 @@ router.post('/api/memory/merge-proposal/:id', requireAuth, (req, res) => {
                 (aFc === bFc && (detail.a_name || '').length <= (detail.b_name || '').length))
                 ? [detail.a_id, detail.b_id] : [detail.b_id, detail.a_id];
             const { executeEntityMerge } = require('../services/archivist');
-            const ok = executeEntityMerge(survivorId, victimId);
+            const ok = executeEntityMerge(survivorId, victimId, { identityConfirmed: true });
             if (!ok) return res.status(500).json({ error: 'merge execution failed' });
             db.prepare(`UPDATE ontology_changelog SET status = 'approved' WHERE id = ?`).run(proposalId);
             return res.json({ ok: true, merged: true });
@@ -752,13 +752,13 @@ router.post('/api/memory/unlink-fragment', requireAuth, (req, res) => {
         const { entity_id, fragment_id } = req.body || {};
         if (!entity_id || !fragment_id) return res.status(400).json({ error: 'entity_id and fragment_id required' });
         const db = getDb();
-        const r = db.prepare('DELETE FROM fragment_entities WHERE entity_id=? AND fragment_id=?').run(entity_id, fragment_id);
+        const r = db.prepare("UPDATE fragment_entities SET relation='rejected',confidence=0,classified_by='manual_verified' WHERE entity_id=? AND fragment_id=?").run(entity_id, fragment_id);
         if (r.changes === 0) {
             // Already unlinked — still success
             return res.json({ ok: true, already: true });
         }
         // Update fragment_count
-        db.prepare(`UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM fragment_entities WHERE entity_id=?), updated_at=datetime('now') WHERE id=?`).run(entity_id, entity_id);
+        db.prepare(`UPDATE entity_profiles SET fragment_count = (SELECT COUNT(*) FROM memory_entity_associations WHERE entity_id=?), updated_at=datetime('now') WHERE id=?`).run(entity_id, entity_id);
         console.log(`[memory-api] 🔗 手动解除: fragment #${fragment_id} ← entity #${entity_id}`);
         res.json({ ok: true });
     } catch (e) {
@@ -778,7 +778,7 @@ router.get('/api/memory/trace/:fragmentId', requireAuth, (req, res) => {
     try {
         // 1. Get the fragment
         const fragment = db.prepare(`
-            SELECT mf.*, (SELECT GROUP_CONCAT(ep.name, ', ') FROM fragment_entities fe
+            SELECT mf.*, (SELECT GROUP_CONCAT(ep.name, ', ') FROM memory_entity_associations fe
                 JOIN entity_profiles ep ON ep.id = fe.entity_id WHERE fe.fragment_id = mf.id) as entity_names
             FROM memory_fragments mf WHERE mf.id = ?
         `).get(fragmentId);

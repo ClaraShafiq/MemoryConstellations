@@ -5,7 +5,9 @@
   "scripts": {
     "start": "node index.js",
     "setup": "bash scripts/setup.sh",
-    "vacuum": "node scripts/vacuum.js"
+    "vacuum": "node scripts/vacuum.js",
+    "test": "node --test tests/pipeline_integrity.test.js tests/upgrade_integrity.test.js",
+    "test:smoke": "node tests/smoke_memory.js"
   },
   "keywords": [],
   "author": "",

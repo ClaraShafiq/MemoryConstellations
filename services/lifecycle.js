@@ -34,7 +34,7 @@ async function runFragmentGC() {
     // 1. 活跃 → 冷却：14天以上没人看过
     const coolingCutoff = sqlDaysAgo(CONFIG.FRAGMENT_COOLING_DAYS);
     const toCool = db.prepare(`
-        SELECT id, chroma_id FROM memory_fragments
+        SELECT id, chroma_id FROM memory_visible_fragments AS memory_fragments
         WHERE status = 'active'
           AND read_count = 0
           AND created_at < ?
@@ -48,7 +48,7 @@ async function runFragmentGC() {
 
     // 2. 复活：冷却期被访问过的 → 重回活跃
     const resurrected = db.prepare(`
-        SELECT id FROM memory_fragments
+        SELECT id FROM memory_visible_fragments AS memory_fragments
         WHERE status = 'cooling'
           AND read_count > 0
     `).all();
@@ -62,7 +62,7 @@ async function runFragmentGC() {
     // 3. 冷却 → 冻结：冷却30天以上 → 删除ChromaDB向量
     const frozenCutoff = sqlDaysAgo(CONFIG.FRAGMENT_FROZEN_DAYS);
     const toFreeze = db.prepare(`
-        SELECT id, chroma_id FROM memory_fragments
+        SELECT id, chroma_id FROM memory_visible_fragments AS memory_fragments
         WHERE status = 'cooling'
           AND lifecycle_updated_at IS NOT NULL
           AND lifecycle_updated_at < ?
@@ -83,7 +83,7 @@ async function runFragmentGC() {
     // 4. 冻结 → 墓碑：冻结90天 → 清空内容，仅保留证据链
     const tombstoneCutoff = sqlDaysAgo(CONFIG.FRAGMENT_TOMBSTONE_DAYS);
     const toTombstone = db.prepare(`
-        SELECT id FROM memory_fragments
+        SELECT id FROM memory_visible_fragments AS memory_fragments
         WHERE status = 'frozen'
           AND lifecycle_updated_at IS NOT NULL
           AND lifecycle_updated_at < ?
@@ -117,7 +117,7 @@ async function runEpisodeDecay() {
 
     // 标准 episode
     const toMatureStandard = db.prepare(`
-        SELECT id FROM memories
+        SELECT id FROM memory_valid_episodes AS memories
         WHERE status = 'permanent'
           AND (consolidation_type IS NULL OR consolidation_type != 'flash')
           AND (last_accessed_at IS NULL OR last_accessed_at < ?)
@@ -126,7 +126,7 @@ async function runEpisodeDecay() {
 
     // Flash episode：衰减减半
     const toMatureFlash = db.prepare(`
-        SELECT id FROM memories
+        SELECT id FROM memory_valid_episodes AS memories
         WHERE status = 'permanent'
           AND consolidation_type = 'flash'
           AND (last_accessed_at IS NULL OR last_accessed_at < ?)
@@ -148,14 +148,14 @@ async function runEpisodeDecay() {
     const archiveFlashCutoff = sqlDaysAgo(CONFIG.EPISODE_ARCHIVE_MONTHS * 2 * 30);
 
     const toArchiveStandard = db.prepare(`
-        SELECT id FROM memories
+        SELECT id FROM memory_valid_episodes AS memories
         WHERE status = 'mature'
           AND (consolidation_type IS NULL OR consolidation_type != 'flash')
           AND updated_at < ?
     `).all(archiveCutoff);
 
     const toArchiveFlash = db.prepare(`
-        SELECT id FROM memories
+        SELECT id FROM memory_valid_episodes AS memories
         WHERE status = 'mature'
           AND consolidation_type = 'flash'
           AND updated_at < ?
@@ -202,7 +202,7 @@ async function runEntityExtraction() {
     const cutoffDate = sqlDaysAgo(7);
     const frags = db.prepare(`
         SELECT id, entity, content, type, emotional_weight, source_date
-        FROM memory_fragments
+        FROM memory_visible_fragments AS memory_fragments
         WHERE status IN ('active', 'cooling')
           AND entity IS NOT NULL
           AND entity != ''
@@ -231,7 +231,7 @@ async function runEntityExtraction() {
 
         try {
             // 查已有档案
-            const existing = db.prepare('SELECT current_status FROM entity_profiles WHERE name = ?').get(entity);
+            const existing = db.prepare('SELECT current_status FROM memory_visible_profiles AS entity_profiles WHERE name = ?').get(entity);
 
             const fragText = fragList.map(f =>
                 `[${f.source_date || '?'}] ${f.content}`
@@ -325,7 +325,7 @@ async function runCorrectionFeedback() {
             // 降权同类碎片：找到与被纠正记忆内容相近的活跃碎片
             if (c.target_type === 'memory' && c.target_id) {
                 // 查被删记忆的碎片来源
-                const deletedMemory = db.prepare('SELECT source_msg_ids FROM memories WHERE id = ?').get(c.target_id);
+                const deletedMemory = db.prepare('SELECT source_msg_ids FROM memory_valid_episodes AS memories WHERE id = ?').get(c.target_id);
                 let sourceIds = [];
                 try { sourceIds = JSON.parse(deletedMemory?.source_msg_ids || '[]'); } catch {}
 
@@ -333,7 +333,7 @@ async function runCorrectionFeedback() {
                     // 找到同源碎片 → 降权
                     const placeholders = sourceIds.map(() => '?').join(',');
                     const relatedFrags = db.prepare(`
-                        SELECT id, emotional_weight FROM memory_fragments
+                        SELECT id, emotional_weight FROM memory_visible_fragments AS memory_fragments
                         WHERE status = 'active'
                           AND id IN (${placeholders})
                     `).all(...sourceIds);

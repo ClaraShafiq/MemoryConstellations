@@ -1,3 +1,4 @@
+const { describe,sourceFor } = require('./memoryIntegrity');
 const { getDb } = require('../database');
 const { encryption } = require('../encryption');
 const { AI } = require('./nameResolver');
@@ -91,7 +92,7 @@ const ACTIVITY_ENTITY_KEYWORDS = [
 async function lookupEntityIds(userMessage) {
     const db = getDb();
     const entities = db.prepare(`
-        SELECT id, name, aliases FROM entity_profiles
+        SELECT id, name, aliases FROM memory_visible_profiles AS entity_profiles
         WHERE name IS NOT NULL AND status IN ('active','seed')
     `).all();
 
@@ -150,8 +151,8 @@ function getEntityFragments(entityIds, limit = 10) {
         SELECT mf.id, mf.content, mf.emotional_weight, mf.source_date AS date_label,
                mf.created_at, mf.read_count, mf.layer, fe.entity_id,
                'fragment' AS source_table
-        FROM memory_fragments mf
-        JOIN fragment_entities fe ON fe.fragment_id = mf.id
+        FROM memory_visible_fragments mf
+        JOIN memory_entity_associations fe ON fe.fragment_id = mf.id
         WHERE fe.entity_id IN (${placeholders})
           AND mf.status = 'active'
         ORDER BY mf.created_at DESC
@@ -241,7 +242,7 @@ function searchFragments(userMessage, limit = 8) {
                  'fragment' AS source_table,
                  rank
           FROM memory_fragments_fts fts
-          JOIN memory_fragments mf ON mf.id = fts.rowid
+          JOIN memory_visible_fragments mf ON mf.id = fts.rowid
           WHERE memory_fragments_fts MATCH ?
             AND mf.status = 'active'
             ${EXCLUDE_SOURCE_SQL}
@@ -268,7 +269,7 @@ function searchFragments(userMessage, limit = 8) {
                  'memory' AS source_table,
                  rank
           FROM memories_fts fts
-          JOIN memories m ON m.id = fts.rowid
+          JOIN memory_valid_episodes m ON m.id = fts.rowid
           WHERE memories_fts MATCH ?
             AND m.layer = 'episode'
             AND m.status = 'permanent'
@@ -299,6 +300,20 @@ function searchFragments(userMessage, limit = 8) {
   }
 }
 
+function freshResults(db,fragments) {
+    return fragments.flatMap(hit=>{
+        const memory=hit.source_table==='memory';
+        const row=db.prepare(`SELECT * FROM ${memory?'memory_valid_episodes':'memory_visible_fragments'} WHERE id=?`).get(hit.id);
+        if(!row || (memory?!['permanent','ongoing','mature'].includes(row.status):!['active','consolidated','cooling'].includes(row.status))) return [];
+        let content=row.content;
+        if(memory) {try{content=encryption.decrypt(content);}catch{}}
+        let kind='unverified',state='quoted';
+        if(memory) {try{kind=JSON.parse(row.tags||'[]').find(t=>t.startsWith('memory_kind:'))?.slice(12)||'unverified';}catch{}}
+        else {const p=sourceFor(db,row.id);kind=p?.kind || 'unverified';state=p?.state || 'pending';}
+        return [{...hit,...row,content:describe(content,kind,state)}];
+    });
+}
+
 function formatForContext(fragments) {
   if (!fragments || fragments.length === 0) return null;
 
@@ -306,7 +321,7 @@ function formatForContext(fragments) {
   const incRead = db.prepare("UPDATE memory_fragments SET read_count = COALESCE(read_count, 0) + 1, last_accessed_at = datetime('now') WHERE id = ?");
   const touchMemory = db.prepare("UPDATE memories SET last_accessed_at = datetime('now') WHERE id = ?");
 
-  const lines = fragments.map(f => {
+  const lines = freshResults(db,fragments).map(f => {
     const date = f.date_label ? `(${f.date_label})` : '';
     const preview = f.content ? f.content.slice(0, 30) : '';
     console.log(`Librarian命中: [#${f.id}/${f.source_table}] ${preview}...`);
@@ -521,7 +536,7 @@ async function searchHybrid(userMessage, limit = 6) {
       const floatFrags = db.prepare(`
         SELECT mf.id, mf.content, mf.emotional_weight, mf.source_date AS date_label,
                mf.created_at, mf.read_count, mf.layer, 'fragment' AS source_table
-        FROM memory_fragments mf
+        FROM memory_visible_fragments mf
         WHERE mf.status = 'active'
           AND (mf.read_count IS NULL OR mf.read_count = 0)
           AND mf.created_at < datetime('now', '-3 days')
@@ -559,7 +574,7 @@ async function searchHybrid(userMessage, limit = 6) {
     if (fragIds.length > 0) {
       const placeholders = fragIds.map(() => '?').join(',');
       const excludedFragIds = new Set(
-        db2.prepare(`SELECT id FROM memory_fragments WHERE id IN (${placeholders}) AND source IN (${EXCLUDED_SOURCES.map(() => '?').join(',')})`)
+        db2.prepare(`SELECT id FROM memory_visible_fragments AS memory_fragments WHERE id IN (${placeholders}) AND source IN (${EXCLUDED_SOURCES.map(() => '?').join(',')})`)
           .all(...fragIds, ...EXCLUDED_SOURCES)
           .map(r => r.id)
       );
@@ -598,7 +613,7 @@ function formatHybridContext(fragments) {
 
   // v5.5: 先处理全部碎片（日志+解密+read_count），同时收集 entity 归属
   const processed = [];
-  for (const f of fragments) {
+  for (const f of freshResults(db,fragments)) {
     const permission = computePermission(f);
     const days = f._daysAgo ?? f._daysOld;
     const daysStr = days != null ? `${days}天前` : '?';
@@ -640,8 +655,8 @@ function formatHybridContext(fragments) {
   if (fragIds.length > 0) {
     const rows = db.prepare(`
       SELECT fe.fragment_id, ep.name
-      FROM fragment_entities fe
-      JOIN entity_profiles ep ON ep.id = fe.entity_id
+      FROM memory_entity_associations fe
+      JOIN memory_visible_profiles ep ON ep.id = fe.entity_id
       WHERE fe.fragment_id IN (${fragIds.map(() => '?').join(',')})
     `).all(...fragIds);
     for (const r of rows) {
@@ -652,8 +667,8 @@ function formatHybridContext(fragments) {
   if (memIds.length > 0) {
     const rows = db.prepare(`
       SELECT m.id, ep.name
-      FROM memories m
-      JOIN entity_profiles ep ON ep.id = m.entity_id
+      FROM memory_valid_episodes m
+      JOIN memory_visible_profiles ep ON ep.id = m.entity_id
       WHERE m.id IN (${memIds.map(() => '?').join(',')})
     `).all(...memIds);
     for (const r of rows) {
@@ -682,7 +697,7 @@ function formatHybridContext(fragments) {
 
   for (const [entityName, entityLines] of groups) {
     // 判定该 entity 的 category（用于跨人物告警）
-    const cat = db.prepare('SELECT category FROM entity_profiles WHERE name = ?').get(entityName);
+    const cat = db.prepare('SELECT category FROM memory_visible_profiles AS entity_profiles WHERE name = ?').get(entityName);
     if (cat && cat.category === 'person') personEntities.push(entityName);
 
     if (groups.size === 1 && ungrouped.length === 0) {

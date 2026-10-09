@@ -21,18 +21,8 @@ try { ({ captureMemoryGap } = require('../messageGuard')); } catch (_) {
 
 // 名字 → 星座。精确名/别称优先，落空再做一次模糊匹配（唯一命中才算，
 // 多个候选宁可当成没找到——猜错人比没查到更糟）。
-function resolveEntityRow(db, name) {
-  if (!name) return null;
-  const exact = db.prepare('SELECT * FROM entity_profiles WHERE name = ? OR aliases LIKE ?')
-    .get(name, `%${name}%`);
-  if (exact) return exact;
-  const fuzzy = db.prepare(`
-    SELECT * FROM entity_profiles
-    WHERE (name LIKE ? OR name LIKE ? OR aliases LIKE ?)
-      AND status IN ('active', 'seed')
-    ORDER BY fragment_count DESC LIMIT 5
-  `).all(`%${name}%`, `${name}%`, `%${name}%`);
-  return fuzzy.length === 1 ? fuzzy[0] : null;
+function resolveEntityRow(db,name) {
+  return require('../memoryLinks').resolveName(db,name);
 }
 
 // 关联星座一行。related_entities（{id,name,relation,shared_count}）由关系发现
@@ -197,9 +187,9 @@ ${USER.name} 想看当时的原话、或要你复述细节 → include_source=tr
 
     // 深度追溯：给定 ID → 那一条的完整内容 + 当时的原始对话（翻页用 offset）
     if (args.memory_id) {
-      let record = db.prepare('SELECT id, content, source_msg_ids, valid_from, layer FROM memories WHERE id = ?').get(args.memory_id);
+      let record = db.prepare('SELECT id, content, source_msg_ids, valid_from, layer FROM memory_valid_episodes AS memories WHERE id = ?').get(args.memory_id);
       if (!record) {
-        record = db.prepare('SELECT id, content, source_msg_ids, source_date AS valid_from, layer FROM memory_fragments WHERE id = ?').get(args.memory_id);
+        record = db.prepare('SELECT id, content, source_msg_ids, source_date AS valid_from, layer FROM memory_visible_fragments AS memory_fragments WHERE id = ?').get(args.memory_id);
       }
       if (!record) return { success: false, formatted: `记忆库中未找到ID为 ${args.memory_id} 的记忆。` };
 
@@ -275,7 +265,7 @@ ${USER.name} 想看当时的原话、或要你复述细节 → include_source=tr
       const frags = db.prepare(`
         SELECT mf.id, mf.content, mf.emotional_weight AS weight, mf.source_date AS date_label,
                mf.created_at, mf.read_count, mf.layer, 'fragment' AS source_table
-        FROM memory_fragments mf
+        FROM memory_visible_fragments mf
         WHERE mf.source_date >= ? AND mf.source_date <= ?
           AND mf.status = 'active'
           ${dateSql}
@@ -288,7 +278,7 @@ ${USER.name} 想看当时的原话、或要你复述细节 → include_source=tr
       const eps = db.prepare(`
         SELECT m.id, m.title AS content, (m.weight / 10.0) AS weight,
                m.valid_from AS date_label, m.created_at, m.layer, 'memory' AS source_table
-        FROM memories m
+        FROM memory_valid_episodes m
         WHERE m.valid_from >= ? AND m.valid_from <= ?
           AND m.layer = 'episode' AND m.status = 'permanent'
           ${dateSql ? dateSql.replace(/content/g, 'm.title') : ''}
@@ -484,14 +474,12 @@ const browseMemories = {
 
     // Mode 0: entity view — 精确名 → 模糊名匹配
     if (path && !query) {
-      let entityProfile = db.prepare(
-        'SELECT * FROM entity_profiles WHERE name = ? OR aliases LIKE ?'
-      ).get(path, `%${path}%`);
+      let entityProfile = resolveEntityRow(db,path);
 
       // 模糊匹配回退：名字包含查询词 或 向量相似名
       if (!entityProfile) {
         const fuzzyMatches = db.prepare(`
-          SELECT * FROM entity_profiles
+          SELECT * FROM memory_visible_profiles AS entity_profiles
           WHERE (name LIKE ? OR name LIKE ? OR aliases LIKE ?)
             AND status IN ('active', 'seed')
           ORDER BY fragment_count DESC LIMIT 5
@@ -517,8 +505,8 @@ const browseMemories = {
         // v5.0 fix: use fragment_entities junction table (canonical source)
         const fragments = db.prepare(`
           SELECT mf.id, mf.content, mf.source_date, mf.insight
-          FROM memory_fragments mf
-          JOIN fragment_entities fe ON fe.fragment_id = mf.id
+          FROM memory_visible_fragments mf
+          JOIN memory_entity_associations fe ON fe.fragment_id = mf.id
           WHERE fe.entity_id = ? AND mf.status = 'active'
           ORDER BY mf.source_date DESC
           LIMIT ?
@@ -560,7 +548,7 @@ const browseMemories = {
             const preview = (f.content || '').slice(0, 100);
             output += `- ${preview}${f.content && f.content.length > 100 ? '...' : ''}\n`;
             if (f.insight) {
-              output += `  ※ ${f.insight}\n`;
+              output += `  ※ 待核实的主观理解（不是用户自述或稳定特质证据）：${f.insight}\n`;
             }
           }
         } else {
@@ -576,13 +564,14 @@ const browseMemories = {
 
     // path + query：在该实体名下做语义搜索
     if (path && query) {
-      const entityProfile = db.prepare('SELECT * FROM entity_profiles WHERE name = ? OR aliases LIKE ?')
-        .get(path, `%${path}%`);
+      const entityProfile = resolveEntityRow(db,path);
       if (!entityProfile) {
         return { success: true, formatted: `「${path}」这个记忆分区还不存在。` };
       }
       const hybridResults = await searchHybrid(query, limit * 2);
-      const formatted = formatHybridContext(hybridResults.slice(0, limit));
+      const associated=new Set(db.prepare('SELECT fragment_id FROM memory_entity_associations WHERE entity_id=?').all(entityProfile.id).map(r=>r.fragment_id));
+      const scoped=hybridResults.filter(hit=>hit.source_table==='fragment'?associated.has(hit.id):!!db.prepare('SELECT 1 FROM memory_valid_episodes WHERE id=? AND entity_id=?').get(hit.id,entityProfile.id));
+      const formatted = formatHybridContext(scoped.slice(0, limit));
       if (!formatted) {
         captureMemoryGap(context.chatId, context.lastUserMessage, 'browse_memories',
           { formatted: `在「${entityProfile.name}」中没有找到与「${query}」相关的记忆。` });
@@ -593,15 +582,14 @@ const browseMemories = {
 
     // path-only：无查询，落到实体档案
     if (path) {
-      const entityProfile = db.prepare('SELECT * FROM entity_profiles WHERE name = ? OR aliases LIKE ?')
-        .get(path, `%${path}%`);
+      const entityProfile = resolveEntityRow(db,path);
       if (!entityProfile) {
         return { success: true, formatted: `「${path}」这个记忆分区还不存在。` };
       }
       const fragments = db.prepare(`
         SELECT mf.content, mf.insight
-        FROM memory_fragments mf
-        JOIN fragment_entities fe ON fe.fragment_id = mf.id
+        FROM memory_visible_fragments mf
+        JOIN memory_entity_associations fe ON fe.fragment_id = mf.id
         WHERE fe.entity_id = ? AND mf.status = 'active'
         ORDER BY mf.source_date DESC LIMIT ?
       `).all(entityProfile.id, limit);
@@ -614,7 +602,7 @@ const browseMemories = {
         for (const f of fragments) {
           const preview = f.content ? f.content.slice(0, 80) : '';
           output += `- ${preview}...\n`;
-          if (f.insight) output += `  ※ ${f.insight}\n`;
+          if (f.insight) output += `  ※ 待核实的主观理解（不是用户自述或稳定特质证据）：${f.insight}\n`;
         }
       } else {
         output += '这个分区还是空的。';
@@ -627,7 +615,7 @@ const browseMemories = {
     // 无参数 → 列出所有星座，按分类聚合
     const allEntities = db.prepare(`
       SELECT name, category, facts, fragment_count
-      FROM entity_profiles
+      FROM memory_visible_profiles AS entity_profiles
       WHERE status IN ('active', 'seed')
       ORDER BY fragment_count DESC
     `).all();

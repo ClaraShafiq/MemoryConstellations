@@ -170,7 +170,7 @@ function _matchTrigger(config, context, skill) {
             const db = getDb();
             const placeholders = context.newFragmentIds.map(() => '?').join(',');
             const frags = db.prepare(`
-                SELECT content FROM memory_fragments WHERE id IN (${placeholders})
+                SELECT content FROM memory_visible_fragments AS memory_fragments WHERE id IN (${placeholders})
             `).all(...context.newFragmentIds);
             return frags.some(f => keywords.some(kw => (f.content || '').toLowerCase().includes(kw.toLowerCase())));
 
@@ -203,7 +203,7 @@ function _checkThresholdTrigger(config) {
         case 'entity_frag_count':
             if (!config.entity_id) return false;
             const fragCount = db.prepare(
-                'SELECT COUNT(*) as c FROM memory_fragments WHERE entity_id = ? AND status = ?'
+                'SELECT COUNT(*) as c FROM memory_visible_fragments AS memory_fragments WHERE entity_id = ? AND status = ?'
             ).get(config.entity_id, 'active');
             return (fragCount?.c || 0) >= (config.value || 10);
 
@@ -276,7 +276,7 @@ async function _gatherAnalysisData(skill, context, analysisConfig) {
     if (entityIds.length > 0) {
         const fragments = db.prepare(`
             SELECT mf.content, mf.created_at, mf.emotional_weight
-            FROM memory_fragments mf
+            FROM memory_visible_fragments mf
             WHERE mf.entity_id IN (${entityIds.map(() => '?').join(',')})
               AND mf.status = 'active'
             ORDER BY mf.created_at DESC
@@ -294,7 +294,7 @@ async function _gatherAnalysisData(skill, context, analysisConfig) {
         const placeholders = context.newFragmentIds.map(() => '?').join(',');
         const fragments = db.prepare(`
             SELECT content, created_at, emotional_weight
-            FROM memory_fragments WHERE id IN (${placeholders})
+            FROM memory_visible_fragments AS memory_fragments WHERE id IN (${placeholders})
         `).all(...context.newFragmentIds);
 
         if (fragments.length === 0) return null;
@@ -452,7 +452,7 @@ async function _feedLessonToCorrection(skill, evalResult) {
         if (entityIds.length === 0) return;
 
         const db = getDb();
-        const entity = db.prepare('SELECT id, name FROM entity_profiles WHERE id = ?').get(entityIds[0]);
+        const entity = db.prepare('SELECT id, name FROM memory_visible_profiles AS entity_profiles WHERE id = ?').get(entityIds[0]);
         if (!entity) return;
 
         await logCorrection(
@@ -485,8 +485,8 @@ async function scanForPatterns() {
     const entities = db.prepare(`
         SELECT ep.id, ep.name, ep.relationship_confidence, ep.relationship_to_user,
                COUNT(mf.id) as frag_count
-        FROM entity_profiles ep
-        JOIN memory_fragments mf ON mf.entity_id = ep.id
+        FROM memory_visible_profiles ep
+        JOIN memory_visible_fragments mf ON mf.entity_id = ep.id
         WHERE ep.category = 'person'
           AND ep.name NOT IN ('${USER.name}', '${AI.name}')
           AND ep.relationship_confidence IN ('low', 'medium')
@@ -526,7 +526,7 @@ async function scanForPatterns() {
     // 2. Check for emotional patterns — clusters of high-EW fragments
     const highEWClusters = db.prepare(`
         SELECT source_date, COUNT(*) as cnt, AVG(emotional_weight) as avg_ew
-        FROM memory_fragments
+        FROM memory_visible_fragments AS memory_fragments
         WHERE emotional_weight >= 0.6
           AND status = 'active'
           AND source_date IS NOT NULL

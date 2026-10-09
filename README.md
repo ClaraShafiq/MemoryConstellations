@@ -29,7 +29,7 @@ Open `/memory.html` — it renders a star map from the database:
 - Bridges between constellations show when two entities share memories
 - Every memory traces back to its source conversation
 
-No manual curation. The map updates itself as the pipeline runs.
+The map updates itself during normal operation. When a source changes or a legacy summary lacks proof, the affected output is withheld and exposed through the authenticated review API instead of being silently trusted.
 
 **Note:** The star map is currently desktop-only (mouse + keyboard). Mobile support is planned but not yet implemented.
 
@@ -88,9 +88,9 @@ Archivist ── 2-min tick loop
     ├─ Lightweight mode (every tick, no LLM calls)
     │   ├─ Link fragments to entities by name match
     │   ├─ Update evidence counters for cognitive model
-    │   ├─ Maintain behavior patterns (bigram match, freshness refresh)
+    │   ├─ Maintain behavior patterns and run source-backed evidence checks
     │   ├─ Expire time-based entries (TTL-based current_state expiry)
-    │   └─ Detect and merge duplicate entities
+    │   └─ Propose possible duplicate entities for human review
     │
     └─ Deep cycle (user idle ≥1 hour, LLM-heavy)
         ├─ Classify unlinked fragments → assign to entities
@@ -140,7 +140,22 @@ The system maintains three layers of user understanding at different time scales
 | **current_status** (近期动态) | `entity_profiles.current_status` | Days to weeks | Recent developments per entity: "moved to a new apartment in July", "started a new project at work" | Archivist regenerates on significant change; companion can update mid-chat |
 | **behavior patterns** (行为模式) | `user_patterns` | Weeks to years, confidence-only-grows | Long-term behavioral regularities: "prefers a particular character archetype", "has strong aesthetic preferences" | Auto-clustered from observation & preference fragments; bigram-matched every 6h; new patterns discovered every 24h deep cycle |
 
-**Key design principle:** Behavior pattern confidence only increases — a person doesn't "stop preferring something they have always liked" just because they haven't mentioned it in three months. Freshness controls injection priority independently from confidence.
+**Key design principle:** confidence is evidence-backed and source-dependent. A repeated topic or name match is not evidence of a stable preference by itself. If a quoted source changes, dependent patterns are withdrawn from runtime reads until reviewed or rebuilt.
+
+### Source integrity and review
+
+New fragments carry a provenance record that separates user statements, interaction patterns, companion opinions, fictional/role-play material, third-party material, and unverified legacy data. A quoted source records exact message IDs, quotations, author, conversation mode, and a fingerprint checked again in the write transaction.
+
+Derived profiles, episodes, user-model entries, patterns, and sagas are fail-closed. Changes to a source message, fragment, attribution link, or episode enqueue affected outputs for review; runtime views hide or mask them until they are rebuilt, replaced from currently verified sources, or retired. Existing databases are upgraded without inventing quotations for legacy rows.
+
+Authenticated operational endpoints are available under `/api/memory/pipeline`:
+
+- `GET /health` reports contract status, stage invocations, review counts, and index backlog without memory text.
+- `GET /reviews` lists pending outputs with optimistic revision numbers.
+- `GET/POST /fragments/:id/source-review` supports exact-quote review of legacy fragments.
+- `POST /reviews/:type/:id` replaces an output from verified sources or retires it; stale revisions are rejected.
+
+The API is the current review interface. It deliberately does not auto-approve old summaries, and it does not claim that a valid quotation proves the model's interpretation is correct. See [docs/memory-pipeline-integrity.md](docs/memory-pipeline-integrity.md).
 
 ### Entity three-field model
 

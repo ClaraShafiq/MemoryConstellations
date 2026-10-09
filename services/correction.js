@@ -247,9 +247,9 @@ async function processChatCorrection({ wrongStatement, correction, memoryId, cha
     // 1. 收集候选记忆
     // 1a. 传了 memoryId → 查 DB
     if (memoryId) {
-        let record = db.prepare('SELECT id, content, \'memory\' AS source_table FROM memories WHERE id = ?').get(memoryId);
+        let record = db.prepare('SELECT id, content, \'memory\' AS source_table FROM memory_valid_episodes AS memories WHERE id = ?').get(memoryId);
         if (!record) {
-            record = db.prepare('SELECT id, content, \'fragment\' AS source_table FROM memory_fragments WHERE id = ?').get(memoryId);
+            record = db.prepare('SELECT id, content, \'fragment\' AS source_table FROM memory_visible_fragments AS memory_fragments WHERE id = ?').get(memoryId);
         }
         if (record) {
             candidates.push(record);
