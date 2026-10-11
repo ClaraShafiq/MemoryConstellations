@@ -7,6 +7,7 @@ const { searchMemoriesByHardTrigger } = require('./memory');
 const { getUserSetting } = require('../utils/settings');
 const { fillPrompt, USER, AI } = require('./nameResolver');
 const { getTriggeredIntuition } = require('./intuition');
+const { formatUtcInAppTimeZone } = require('../utils/time');
 
 // =================================================================
 // 健康数据简报生成器
@@ -231,8 +232,7 @@ ${libText}
         if (weatherCacheSetting?.value && weatherCacheSetting.value !== 'null') {
             const wCache = JSON.parse(weatherCacheSetting.value);
             if (wCache.summary && wCache.updated_at) {
-                const updatedAt = new Date(wCache.updated_at).toLocaleString('zh-CN', {
-                    timeZone: 'Asia/Shanghai',
+                const updatedAt = formatUtcInAppTimeZone(wCache.updated_at, 'zh-CN', {
                     month: 'numeric', day: 'numeric',
                     hour: '2-digit', minute: '2-digit'
                 });
@@ -309,8 +309,8 @@ ${libText}
             const tickGroups = [...tickMap.entries()].slice(-5);
 
             const lines = tickGroups.map(([tid, group]) => {
-                const time = new Date(group.timestamp).toLocaleString('zh-CN', {
-                    timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric',
+                const time = formatUtcInAppTimeZone(group.timestamp, 'zh-CN', {
+                    month: 'numeric', day: 'numeric',
                     hour: '2-digit', minute: '2-digit'
                 });
                 const actionLabels = group.entries.map(e => e.label);

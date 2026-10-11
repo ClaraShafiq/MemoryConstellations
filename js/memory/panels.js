@@ -6,6 +6,7 @@
 import { universe, conById, decideMergeProposal } from './data.js';
 import { view, breadcrumb, gotoConstellation } from './state.js';
 import { bridgesOfCon } from './layout.js';
+import { MEMORY_API } from './api.js';
 
 const TOKEN = () => localStorage.getItem('token');
 const authHeaders = () => {
@@ -104,7 +105,7 @@ export function showStarPanel(star, viewConId) {
             unlink.disabled = true;
             unlink.textContent = '…';
             try {
-                const r = await fetch('/api/memory/unlink-fragment', {
+                const r = await fetch(MEMORY_API.unlinkFragment, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', ...authHeaders() },
                     body: JSON.stringify({ entity_id: entityId, fragment_id: fragId }),
@@ -542,7 +543,7 @@ export function renderMergeProposals() {
 // ── v5.0: 核心洞察编辑 ──
 async function loadCoreInsight() {
     try {
-        const r = await fetch('/api/memory/core-insight', { headers: authHeaders() });
+        const r = await fetch(MEMORY_API.coreInsight, { headers: authHeaders() });
         const d = await r.json();
         if (d.ok) {
             $('ci-editor').value = d.insight || '';
@@ -560,7 +561,7 @@ export async function renderCoreInsight() {
         $('ci-save').disabled = true;
         $('ci-save').textContent = '保存中…';
         try {
-            const r = await fetch('/api/memory/core-insight', {
+            const r = await fetch(MEMORY_API.coreInsight, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...authHeaders() },
                 body: JSON.stringify({ insight }),
@@ -602,7 +603,7 @@ export function initPanelEvents() {
 async function loadPipelineStatus() {
     try {
         const token = localStorage.getItem('token');
-        const res = await fetch('/api/memory/pipeline-status', { headers: { 'Authorization': 'Bearer ' + token } });
+        const res = await fetch(MEMORY_API.pipelineStatus, { headers: { 'Authorization': 'Bearer ' + token } });
         if (!res.ok) return;
         const s = await res.json();
         if (!$('tb-count')) return;

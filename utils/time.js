@@ -1,38 +1,60 @@
 // =================================================================
-// 时间工具函数（某城市时区 UTC+8）
+// 时间工具函数
 // =================================================================
 
-const getShanghaiTime = () => {
+function validTimeZone(value) {
+    if (!value) return false;
     try {
-        const now = new Date();
-        const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
-        const shanghaiTime = new Date(utc + (8 * 3600000));
-        
-        const year = shanghaiTime.getFullYear();
-        const month = String(shanghaiTime.getMonth() + 1).padStart(2, '0');
-        const day = String(shanghaiTime.getDate()).padStart(2, '0');
-        const hour = String(shanghaiTime.getHours()).padStart(2, '0');
-        const minute = String(shanghaiTime.getMinutes()).padStart(2, '0');
-        const second = String(shanghaiTime.getSeconds()).padStart(2, '0');
-        
-        return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+        new Intl.DateTimeFormat('en', { timeZone: value }).format(new Date(0));
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
+function resolveAppTimeZone() {
+    if (validTimeZone(process.env.TZ)) return process.env.TZ;
+    const systemTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return validTimeZone(systemTimeZone) ? systemTimeZone : 'UTC';
+}
+
+const APP_TIME_ZONE = resolveAppTimeZone();
+
+function partsInAppTimeZone(date = new Date()) {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: APP_TIME_ZONE,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hourCycle: 'h23',
+    }).formatToParts(date);
+    return Object.fromEntries(parts.map(part => [part.type, part.value]));
+}
+
+const getAppTime = () => {
+    try {
+        const parts = partsInAppTimeZone();
+        return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
     } catch (error) {
-        console.error('getShanghaiTime failed:', error);
-        return new Date().toLocaleString('zh-CN', {
-            timeZone: 'Asia/Shanghai',
-            year: 'numeric', month: '2-digit', day: '2-digit',
-            hour: '2-digit', minute: '2-digit', second: '2-digit',
-            hour12: false
-        }).replace(/\//g, '-').replace(/,/g, '');
+        console.error('getAppTime failed:', error);
+        return sqlNow();
     }
 };
 
+function parseUtcTimestamp(value) {
+    if (value instanceof Date) return value;
+    const text = String(value || '');
+    return new Date(text + (/[zZ]|[+-]\d\d:?\d\d$/.test(text) ? '' : 'Z'));
+}
+
+function formatUtcInAppTimeZone(value, locale = 'zh-CN', options = {}) {
+    const date = parseUtcTimestamp(value);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleString(locale, { ...options, timeZone: APP_TIME_ZONE });
+}
+
 const getTimeOfDay = () => {
     try {
-        const now = new Date();
-        const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
-        const shanghaiTime = new Date(utc + (8 * 3600000));
-        const hour = shanghaiTime.getHours();
+        const hour = Number(partsInAppTimeZone().hour);
         
         if (hour >= 5 && hour < 11) return '早上';
         if (hour >= 11 && hour < 13) return '中午';
@@ -66,4 +88,14 @@ const sqlDaysAgo = (days) => sqlTimeAgo(days * DAY_MS);
 /** N 毫秒后，同上格式（有效期上限之类的未来时间点） */
 const sqlTimeAhead = (ms) => sqlTimeAgo(-ms);
 
-module.exports = { getShanghaiTime, getTimeOfDay, sqlNow, sqlTimeAgo, sqlDaysAgo, sqlTimeAhead, DAY_MS };
+module.exports = {
+    APP_TIME_ZONE,
+    getAppTime,
+    getTimeOfDay,
+    formatUtcInAppTimeZone,
+    sqlNow,
+    sqlTimeAgo,
+    sqlDaysAgo,
+    sqlTimeAhead,
+    DAY_MS,
+};

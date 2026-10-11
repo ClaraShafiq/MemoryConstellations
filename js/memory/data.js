@@ -3,6 +3,8 @@
 // fetch universe API、星系定义、颜色分配（hash hue 偏移）、跨星系桥推导
 // ========================================
 
+import { MEMORY_API } from './api.js';
+
 const TOKEN = () => localStorage.getItem('token');
 const AUTH = () => ({ headers: { 'Authorization': `Bearer ${TOKEN()}` } });
 
@@ -154,7 +156,7 @@ function deriveBridgesFromSharedFragments(cons) {
 }
 
 export async function loadUniverse() {
-    const resp = await fetch('/api/memory/universe', AUTH());
+    const resp = await fetch(MEMORY_API.universe, AUTH());
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
 
@@ -200,14 +202,14 @@ export function conById(id) {
 // 碎片访问打点（刷新 decay 亮度），fire-and-forget
 export function bumpAccess(starId) {
     if (starId && starId.startsWith('f')) {
-        fetch('/api/memory/trace/' + starId.slice(1), AUTH()).catch(() => {});
+        fetch(MEMORY_API.trace(starId.slice(1)), AUTH()).catch(() => {});
     }
 }
 
 // 合并提案裁决（CSRF 由页面 meta 注入；memory.html 不走 api.js 的 fetch 补丁）
 export async function decideMergeProposal(proposalId, decision) {
     const csrfMeta = document.querySelector('meta[name="csrf-token"]');
-    const resp = await fetch('/api/memory/merge-proposal/' + proposalId, {
+    const resp = await fetch(MEMORY_API.mergeProposal(proposalId), {
         method: 'POST',
         credentials: 'include',
         headers: {

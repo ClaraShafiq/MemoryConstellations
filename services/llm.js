@@ -49,7 +49,7 @@ async function fetchWithRetry(url, options, maxRetries = 3) {
     }
 }
 const { encryption } = require('../encryption');
-const { getShanghaiTime } = require('../utils/time');
+const { getAppTime } = require('../utils/time');
 const { validateEndpoint, buildSafeUrl } = require('../utils/ssrf-guard');
 
 const enc = get_encoding('cl100k_base');
@@ -541,7 +541,7 @@ const recordApiUsage = (chatId, inputTokens, outputTokens, modelName, requestTyp
             (timestamp, api_calls, input_tokens, output_tokens, total_tokens, model_name, chat_id, request_type)
             VALUES (?, 1, ?, ?, ?, ?, ?, ?)
         `);
-        stmt.run(getShanghaiTime(), inputTokens, outputTokens, totalTokens, modelName, chatId, requestType);
+        stmt.run(getAppTime(), inputTokens, outputTokens, totalTokens, modelName, chatId, requestType);
         console.log(`recordApiUsage: ${requestType}, ${inputTokens}+${outputTokens}=${totalTokens} tokens`);
     } catch (error) {
         console.error('recordApiUsage failed:', error);

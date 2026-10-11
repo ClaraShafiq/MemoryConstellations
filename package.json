@@ -9,7 +9,8 @@
     "test:memory-modern": "node tests/modern_memory_pipeline.js",
     "check:docs": "node scripts/check_docs.js",
     "check:privacy": "node scripts/check_public_privacy.js",
-    "test:ssrf": "node tests/ssrf_validation.js"
+    "test:ssrf": "node tests/ssrf_validation.js",
+    "test:contracts": "node --experimental-vm-modules tests/runtime_contracts.js"
   },
   "keywords": [],
   "author": "",

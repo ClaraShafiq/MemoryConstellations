@@ -15,6 +15,8 @@ import {
     showTooltip, hideTooltip, renderArchlog, renderModelPanel, initPanelEvents,
     renderMergeProposals, renderCoreInsight,
 } from './panels.js';
+import { MEMORY_API } from './api.js';
+import { formatUtcTimestamp } from './time.js';
 
 const mc = document.getElementById('mc');
 let hovered = null;
@@ -266,7 +268,7 @@ async function loadFragmentConstellations(fragIds) {
     if (!fragIds.length) return {};
     const token = localStorage.getItem('token');
     try {
-        const res = await fetch('/api/memory/universe', { headers: { Authorization: 'Bearer ' + token } });
+        const res = await fetch(MEMORY_API.universe, { headers: { Authorization: 'Bearer ' + token } });
         if (!res.ok) return {};
         const data = await res.json();
         const map = {};
@@ -292,8 +294,9 @@ function renderStardustEntries(frags, conMap) {
         const typeInfo = TYPE_MAP[f.type] || TYPE_MAP.observation;
         const time = (() => {
             const t = f.created_at || '';
-            try { const d = new Date(t + (t.endsWith('Z') ? '' : 'Z')); if (!isNaN(d.getTime())) return d.toLocaleString('zh-CN', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', timeZone:'Asia/Shanghai' }); } catch(_){}
-            return t.slice(5, 16) || '';
+            return formatUtcTimestamp(t, { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' })
+                || t.slice(5, 16)
+                || '';
         })();
         const cons = conMap[f.id] || [];
         const conStr = cons.length

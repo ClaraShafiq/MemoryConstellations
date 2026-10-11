@@ -13,11 +13,16 @@
 
 - `DB_PATH`：SQLite 路径；默认 `sanctuary.db`。
 - `PORT`：HTTP 端口；默认 3000。
+- `TZ`：部署使用的 IANA 时区（例如 `Europe/Paris`）；未设置时使用系统时区，无法识别时回退到 `UTC`。服务端定时任务、后端时间格式化和星图页面均从这一处读取。
 - `MEMORY_SCRIBE_BATCH_SIZE`：现代 Scribe 每批消息上限；默认 60。
 - `MEMORY_SCRIBE_MIN_MESSAGES`：现代 Scribe 最小积压；默认 1。
 - `ALLOW_MEMORY_CODEX_CLI=1`：显式允许启动 Codex CLI 运行期适配器；仍必须由调用方提供隔离工作目录。
 
 不要把 `.env`、登录状态或密钥写入 `memory_config.json`。
+
+## 运行期合同
+
+星图 UI 与服务端共同使用 `shared/memoryRoutes.js` 中的路由合同。增加或修改由星图调用的 `/api/memory` 端点时，同时更新该合同，不要在前端重新手写路径。
 
 ## `memory_config.json`
 

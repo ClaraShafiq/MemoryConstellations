@@ -11,11 +11,10 @@
 // =================================================================
 
 const cron = require('node-cron');
+const { APP_TIME_ZONE } = require('../utils/time');
 
-// 时区统一走 TZ 环境变量（docker-compose 里已设）。不设就用系统时区——
-// generateDailyEntityStatus 判「昨天」用的也是同一套口径，别在这儿单独写死。
-const TZ = process.env.TZ;
-const TZ_OPT = TZ ? { timezone: TZ } : {};
+// 所有运行期时区都由 utils/time.js 解析；这里不保留第二份默认值。
+const TZ_OPT = { timezone: APP_TIME_ZONE };
 
 let registered = false;
 

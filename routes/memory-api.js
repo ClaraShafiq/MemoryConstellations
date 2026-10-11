@@ -8,18 +8,18 @@ const { encryption } = require('../encryption');
 const { requireAuth } = require('./auth');
 const { getEmbedding, getEmbeddingAPIKey } = require('../services/llm');
 const { chromaDBOperation } = require('../services/memory');
-const { sqlNow } = require('../utils/time');
+const { sqlNow, formatUtcInAppTimeZone } = require('../utils/time');
 const { validateEndpoint, buildSafeUrl } = require('../utils/ssrf-guard');
+const MEMORY_API = require('../shared/memoryRoutes');
 
 const router = express.Router();
 
-// ── 时区转换：UTC → 某城市时间 HH:MM ──
-function toShanghaiHHMM(utcStr) {
+// ── 时区转换：UTC → 部署配置时区 HH:MM ──
+function toAppHHMM(utcStr) {
     if (!utcStr) return '';
     try {
-        const d = new Date(utcStr + (utcStr.endsWith('Z') ? '' : 'Z'));
-        if (isNaN(d.getTime())) return utcStr.slice(11, 16) || '';
-        return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Shanghai' });
+        const formatted = formatUtcInAppTimeZone(utcStr, 'zh-CN', { hour: '2-digit', minute: '2-digit' });
+        return formatted || utcStr.slice(11, 16) || '';
     } catch (_) {
         return utcStr.slice(11, 16) || '';
     }
@@ -28,7 +28,7 @@ function toShanghaiHHMM(utcStr) {
 // ========== 记忆 CRUD ==========
 
 // POST /api/memory - 新增记忆
-router.post('/api/memory', requireAuth, async (req, res) => {
+router.post(MEMORY_API.memory, requireAuth, async (req, res) => {
     const db = getDb();
     const { title, content, tags, status, valid_from, valid_to } = req.body;
     console.log('📥 收到的请求数据:', { title, content, tags, status });
@@ -106,7 +106,7 @@ router.post('/api/memory', requireAuth, async (req, res) => {
 });
 
 // PUT /api/memory/:id - 编辑记忆（智能向量更新）
-router.put('/api/memory/:id', requireAuth, async (req, res) => {
+router.put(MEMORY_API.memoryItemPattern, requireAuth, async (req, res) => {
     const db = getDb();
     const memoryId = req.params.id;
     const { title, content, tags, status, valid_from, valid_to } = req.body;
@@ -258,7 +258,7 @@ router.get('/api/memories/months', requireAuth, (req, res) => {
 // GET /api/memory/universe — 星空可视化全量数据
 // 必须在 /api/memory/:id 之前注册，否则 Express 把 "universe" 当作 :id
 // ═══════════════════════════════════════════════════════
-router.get('/api/memory/universe', requireAuth, (req, res) => {
+router.get(MEMORY_API.universe, requireAuth, (req, res) => {
     try {
         const db = getDb();
 
@@ -553,7 +553,7 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
                     color = '#8ab4ff';
             }
             return {
-                time: toShanghaiHHMM(r.time),
+                time: toAppHHMM(r.time),
                 color,
                 text,
                 fullTime: r.time,
@@ -597,7 +597,7 @@ router.get('/api/memory/universe', requireAuth, (req, res) => {
 });
 
 // GET /api/memory/pipeline-status — 管线状态总览（memory.html 顶部状态条用）
-router.get('/api/memory/pipeline-status', requireAuth, (req, res) => {
+router.get(MEMORY_API.pipelineStatus, requireAuth, (req, res) => {
     try {
         const db = getDb();
         const frags = db.prepare(`SELECT COUNT(*) as total,
@@ -629,7 +629,7 @@ router.get('/api/memory/pipeline-status', requireAuth, (req, res) => {
 });
 
 // GET /api/memory/:id - 获取单个记忆详情
-router.get('/api/memory/:id', requireAuth, async (req, res, next) => {
+router.get(MEMORY_API.memoryItemPattern, requireAuth, async (req, res, next) => {
     // 具名路由（/api/memory/core-insight 等）注册在这个通配路由之后，
     // 不挡一下会被它整个吃掉，变成 "Memory not found" 404。
     if (!/^\d+$/.test(req.params.id)) return next();
@@ -669,7 +669,7 @@ router.get('/api/memory/:id', requireAuth, async (req, res, next) => {
 // POST /api/memory/merge-proposal/:id  body: { decision: 'approve' | 'reject' }
 // ═══════════════════════════════════════════════════════
 
-router.post('/api/memory/merge-proposal/:id', requireAuth, (req, res) => {
+router.post(MEMORY_API.mergeProposalPattern, requireAuth, (req, res) => {
     const db = getDb();
     const proposalId = parseInt(req.params.id);
     const { decision } = req.body || {};
@@ -711,7 +711,7 @@ router.post('/api/memory/merge-proposal/:id', requireAuth, (req, res) => {
 // v5.0: 核心洞察 — 用户手动编辑
 // ═══════════════════════════════════════════════════════
 
-router.get('/api/memory/core-insight', requireAuth, async (req, res) => {
+router.get(MEMORY_API.coreInsight, requireAuth, async (req, res) => {
     try {
         const { getUserSetting } = require('../utils/settings');
         const insight = await getUserSetting('user_core_insight') || '';
@@ -722,7 +722,7 @@ router.get('/api/memory/core-insight', requireAuth, async (req, res) => {
     }
 });
 
-router.post('/api/memory/core-insight', requireAuth, async (req, res) => {
+router.post(MEMORY_API.coreInsight, requireAuth, async (req, res) => {
     try {
         const { insight } = req.body || {};
         if (typeof insight !== 'string') return res.status(400).json({ error: 'insight required' });
@@ -748,7 +748,7 @@ router.post('/api/memory/core-insight', requireAuth, async (req, res) => {
 // v5.0: 手动解除碎片-实体链接
 // ═══════════════════════════════════════════════════════
 
-router.post('/api/memory/unlink-fragment', requireAuth, (req, res) => {
+router.post(MEMORY_API.unlinkFragment, requireAuth, (req, res) => {
     try {
         const { entity_id, fragment_id } = req.body || {};
         if (!entity_id || !fragment_id) return res.status(400).json({ error: 'entity_id and fragment_id required' });
@@ -772,7 +772,7 @@ router.post('/api/memory/unlink-fragment', requireAuth, (req, res) => {
 // GET /api/memory/trace/:fragmentId
 // ═══════════════════════════════════════════════════════
 
-router.get('/api/memory/trace/:fragmentId', requireAuth, (req, res) => {
+router.get(MEMORY_API.tracePattern, requireAuth, (req, res) => {
     const db = getDb();
     const fragmentId = parseInt(req.params.fragmentId);
 
@@ -859,7 +859,7 @@ router.get('/api/memory/trace/:fragmentId', requireAuth, (req, res) => {
 });
 
 // DELETE /api/memory/:id - 删除记忆
-router.delete('/api/memory/:id', requireAuth, async (req, res) => {
+router.delete(MEMORY_API.memoryItemPattern, requireAuth, async (req, res) => {
     const db = getDb();
     const memoryId = req.params.id;
     

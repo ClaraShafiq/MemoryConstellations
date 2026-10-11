@@ -9,6 +9,8 @@ const path = require('path');
 const { initDatabase } = require('./database');
 const { CONFIG } = require('./config');
 const { registerCronJobs } = require('./tasks/cron');
+const { APP_TIME_ZONE } = require('./utils/time');
+const { config: memoryConfig } = require('./services/memoryConfig');
 
 const db = initDatabase();
 
@@ -66,12 +68,12 @@ app.post('/logout', (req, res) => {
 
 // ── Memory page (主页面) ──
 app.get('/memory.html', requireAuth, (req, res) => {
-  const memoryConfig = require('./memory_config.json');
   const csrfToken = req.app.get('generateCsrfToken')(req, res);
   const html = require('fs').readFileSync(path.join(__dirname, 'memory.html'), 'utf8');
   const configScript = `<script>window.MEMORY_UI_CONFIG = ${JSON.stringify({
     user: { name: memoryConfig.user.name, color: memoryConfig.ui.user_color },
     ai:   { name: memoryConfig.ai.name,   color: memoryConfig.ui.ai_color },
+    timeZone: APP_TIME_ZONE,
   })};</script>`;
   const injected = html
     .replace('</head>', `<meta name="csrf-token" content="${csrfToken}">\n${configScript}\n</head>`);
