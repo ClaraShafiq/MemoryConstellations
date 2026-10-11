@@ -89,6 +89,9 @@ app.use('/api', require('./routes/ingest'));
 // ── Memory recall API（外部机器人回复前查记忆）──
 app.use('/api', require('./routes/recall'));
 
+// ── Health check (contains counts and modes only; never returns memory content) ──
+app.use('/api', require('./routes/health'));
+
 // ── Import/Export API（memory.html 前端导入导出）──
 app.use('/api', require('./routes/import'));
 

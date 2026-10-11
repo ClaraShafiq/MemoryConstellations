@@ -40,6 +40,7 @@ function initDatabase() {
     db = new Database(process.env.DB_PATH || 'sanctuary.db');
     db.pragma('journal_mode = WAL');
     db.pragma('busy_timeout = 5000');
+    db.pragma('foreign_keys = ON');
 
     // ── v5.15: 命名统一——表/列/设置键 全部收敛到 user_* / companion_* ──
     // 早期版本沿用了旧项目的内部标识符（clara_* / draco_*）。新库直接按新名建表；
@@ -1166,6 +1167,38 @@ function initDatabase() {
     // 都会报 no such column。单开一条迁移补上（列已存在时自动跳过）。
     runMigration(103, 'v5.17: 补 memory_fragments.insight（v63 整块被跳过导致漏建）',
         `ALTER TABLE memory_fragments ADD COLUMN insight TEXT;`);
+
+    // v104-v108: modern pipeline cursor and frozen observation fields.
+    // Keep one ALTER per migration: runMigration records duplicate-column migrations as complete.
+    runMigration(104, 'modern memory: messages pickup cursor',
+        `ALTER TABLE messages ADD COLUMN picked_up_at TEXT;`, { critical: true });
+    runMigration(105, 'modern memory: scribe composite cursor',
+        `ALTER TABLE scribe_runs ADD COLUMN processed_until_id INTEGER DEFAULT 0;`, { critical: true });
+    runMigration(106, 'modern memory: frozen observation contract',
+        `ALTER TABLE memory_fragments ADD COLUMN observation_json TEXT;`, { critical: true });
+    runMigration(107, 'modern memory: observation state',
+        `ALTER TABLE memory_fragments ADD COLUMN observation_state TEXT DEFAULT 'legacy';`, { critical: true });
+    runMigration(108, 'modern memory: constellation scope',
+        `ALTER TABLE entity_profiles ADD COLUMN memory_scope TEXT DEFAULT 'default';`, { critical: true });
+
+    const modernSchemas = [
+        require('./services/memoryProtocol').SCHEMA,
+        require('./services/memoryClassification').SCHEMA,
+        require('./services/memoryEvidenceResolution').SCHEMA,
+        require('./services/memoryConstellationIdentity').SCHEMA,
+        require('./services/memoryEpisodeCandidates').SCHEMA,
+        require('./services/episodeWriter').SCHEMA,
+        require('./services/memorySagaProjection').SCHEMA,
+        require('./services/memoryProfileFields').SCHEMA,
+        require('./services/memorySearchProjection').SCHEMA,
+    ].join('\n');
+    runMigration(109, 'modern memory: controlled pipeline tables', modernSchemas, { critical: true });
+    runMigration(110, 'modern memory: safe rollout defaults', `
+        INSERT OR IGNORE INTO user_settings(setting_key,setting_value)
+            VALUES('memory_chat_read_mode','legacy');
+        INSERT OR IGNORE INTO user_settings(setting_key,setting_value)
+            VALUES('memory_semantic_maintenance_mode','backfill');
+    `, { critical: true });
 
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {

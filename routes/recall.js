@@ -12,6 +12,10 @@
 
 const express = require('express');
 const { searchHybrid, formatHybridContext } = require('../services/librarian');
+const { getDb } = require('../database');
+const readMode = require('../services/memoryReadMode');
+const verifiedSearch = require('../services/memorySearchProjection');
+const chatPacket = require('../services/memoryChatPacket');
 const router = express.Router();
 
 router.post('/recall', async (req, res) => {
@@ -23,6 +27,12 @@ router.post('/recall', async (req, res) => {
 
     try {
         const n = Math.min(parseInt(limit, 10) || 8, 20);
+        const db = getDb();
+        if (readMode.get(db) === 'verified') {
+            const packet = chatPacket.build(verifiedSearch.search(db, q, n));
+            return res.json({ success: true, query: q, count: packet.units.length,
+                formatted: chatPacket.format(packet), packet });
+        }
         const memories = await searchHybrid(q, n);
 
         const formatted = memories.length > 0

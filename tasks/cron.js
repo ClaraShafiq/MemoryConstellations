@@ -23,13 +23,25 @@ function registerCronJobs() {
     if (registered) return;
     registered = true;
 
+    const { config } = require('../services/memoryConfig');
+    const modern = config.pipeline?.mode === 'modern';
     const { start: startArchivist } = require('../services/archivist');
 
     // ── Archivist Agent：自主循环（2min tick + 事件驱动）──
     // 启动即生效，不是定时任务；没这一步后面的 Scribe/分类/整合都不会发生。
-    startArchivist()
-        .then(() => console.log('[Cron] Archivist Agent started (2min tick loop + event-driven)'))
-        .catch(err => console.error('[Cron] Archivist Agent start error:', err));
+    if (!modern) {
+        startArchivist()
+            .then(() => console.log('[Cron] Archivist Agent started (2min tick loop + event-driven)'))
+            .catch(err => console.error('[Cron] Archivist Agent start error:', err));
+    } else {
+        cron.schedule('*/2 * * * *', () => {
+            const { getDb } = require('../database');
+            require('../services/memoryPipeline').tick(getDb()).catch(err => {
+                console.error('[Cron] Modern memory pipeline error:', err.message);
+            });
+        }, TZ_OPT);
+        console.log('[Cron] Modern controlled pipeline registered: every 2 minutes');
+    }
 
     // ── Scribe：每 5 分钟去问一次「该不该提取了」──
     // 门槛（沉默 ≥20min + 积压 ≥60 条，或积压 ≥100 条）在 checkAndRunScribe 里面，
@@ -45,20 +57,24 @@ function registerCronJobs() {
     // ── 每日主角状态：写主角星座的「X月X日：…」日志行 ──
     // 主角不在 regenerateEntityOverviews 的扫描范围里（SKIP_NAMES），这一条是她
     // current_status 的唯一写入方。
-    cron.schedule('0 3 * * *', () => {
-        require('../services/archivist').generateDailyEntityStatus().catch(err => {
-            console.error('[Cron] Daily entity status error:', err.message);
-        });
-    }, TZ_OPT);
-    console.log('[Cron] Daily entity status registered: 03:00');
+    if (!modern) {
+        cron.schedule('0 3 * * *', () => {
+            require('../services/archivist').generateDailyEntityStatus().catch(err => {
+                console.error('[Cron] Daily entity status error:', err.message);
+            });
+        }, TZ_OPT);
+        console.log('[Cron] Daily entity status registered: 03:00');
+    }
 
     // ── 生命周期引擎：碎片冷却/冻结/清空、episode 衰减 ──
-    cron.schedule('47 4 * * *', () => {
-        require('../services/lifecycle').runLifecycleMaintenance().catch(err => {
-            console.error('[Cron] Lifecycle maintenance error:', err.message);
-        });
-    }, TZ_OPT);
-    console.log('[Cron] Lifecycle maintenance registered: 04:47');
+    if (!modern) {
+        cron.schedule('47 4 * * *', () => {
+            require('../services/lifecycle').runLifecycleMaintenance().catch(err => {
+                console.error('[Cron] Lifecycle maintenance error:', err.message);
+            });
+        }, TZ_OPT);
+        console.log('[Cron] Lifecycle maintenance registered: 04:47');
+    }
 }
 
 module.exports = { registerCronJobs };

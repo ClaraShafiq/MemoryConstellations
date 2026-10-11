@@ -5,11 +5,14 @@
   "scripts": {
     "start": "node index.js",
     "setup": "bash scripts/setup.sh",
-    "vacuum": "node scripts/vacuum.js"
+    "vacuum": "node scripts/vacuum.js",
+    "test:memory-modern": "node tests/modern_memory_pipeline.js",
+    "check:docs": "node scripts/check_docs.js",
+    "check:privacy": "node scripts/check_public_privacy.js"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "description": "A self-organizing memory system for AI companions",
   "dependencies": {
     "axios": "^1.13.5",

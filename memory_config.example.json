@@ -28,6 +28,17 @@
     "_comment": "Minutes of user inactivity before deep memory integration runs. Default 60.",
     "deep_cycle_idle_minutes": 60
   },
+  "pipeline": {
+    "_comment": "Safe rollout defaults. Switch only after focused tests and a real end-to-end acceptance run.",
+    "mode": "legacy",
+    "chat_read_mode": "legacy",
+    "semantic_maintenance": "backfill",
+    "persona_writer": {
+      "enabled": false,
+      "provider": "",
+      "model": ""
+    }
+  },
   "librarian": {
     "_comment": "Exclude specific fragment sources from search results.",
     "exclude_sources": []

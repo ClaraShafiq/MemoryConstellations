@@ -434,6 +434,10 @@ function hasHighEmotionSignal(messages) {
 // 检查是否需要触发Scribe
 async function checkAndRunScribe() {
     const db = getDb();
+    const { config } = require('./memoryConfig');
+    if (config.pipeline?.mode === 'modern') {
+        return require('./memoryScribe').checkAndRun();
+    }
 
     // 上次处理到的时间点
     const lastRun = db.prepare(`
