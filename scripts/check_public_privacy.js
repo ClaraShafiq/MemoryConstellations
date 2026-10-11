@@ -28,7 +28,9 @@ const checks = [
     ['GitHub token', /\b(?:ghp|github_pat)_[A-Za-z0-9_]{20,}\b/],
     ['Google API key', /\bAIza[A-Za-z0-9_-]{20,}\b/],
 ];
-const hits = checks.filter(([, pattern]) => pattern.test(additions)).map(([name]) => name);
+// RFC 2606 example domains are intentionally safe fixtures, not private contact data.
+const scanText = additions.replace(/\b[A-Z0-9._%+-]+@example\.(?:com|org|net)\b/gi, '<example-email>');
+const hits = checks.filter(([, pattern]) => pattern.test(scanText)).map(([name]) => name);
 if (forbiddenFiles.length || hits.length) {
     if (forbiddenFiles.length) console.error(`Forbidden database artifacts: ${forbiddenFiles.join(', ')}`);
     if (hits.length) console.error(`Potential private additions: ${hits.join(', ')}`);

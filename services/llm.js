@@ -50,6 +50,7 @@ async function fetchWithRetry(url, options, maxRetries = 3) {
 }
 const { encryption } = require('../encryption');
 const { getShanghaiTime } = require('../utils/time');
+const { validateEndpoint, buildSafeUrl } = require('../utils/ssrf-guard');
 
 const enc = get_encoding('cl100k_base');
 
@@ -160,32 +161,40 @@ async function getEmbedding(text, embeddingConfig) {
         const apiKey = embeddingConfig.api_key;
         const modelName = embeddingConfig.model_name;
         const provider = embeddingConfig.provider || 'gemini';
-        
+
+        const validatedEndpoint = await validateEndpoint(embeddingConfig.endpoint);
+
         let requestUrl, requestBody, headers;
-        
+
         if (provider === 'gemini') {
-            requestUrl = `${embeddingConfig.endpoint}/models/${modelName}:embedContent?key=${apiKey}`;
+            requestUrl = buildSafeUrl(validatedEndpoint, 'models', `${encodeURIComponent(modelName)}:embedContent`);
+            requestUrl.searchParams.set('key', apiKey);
             requestBody = {
                 model: modelName,
                 content: { parts: [{ text: text }] }
             };
             headers = { 'Content-Type': 'application/json' };
         } else {
-            requestUrl = `${embeddingConfig.endpoint}/embeddings`;
+            requestUrl = buildSafeUrl(validatedEndpoint, 'embeddings');
             requestBody = { input: text, model: modelName };
             headers = {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${apiKey}`
             };
         }
-        
-        const useProxy = needsProxy(requestUrl);
-        const response = await fetchWithRetry(requestUrl, {
+
+        const useProxy = needsProxy(requestUrl.toString());
+        const response = await fetchWithRetry(requestUrl.toString(), {
             method: 'POST',
+            redirect: 'manual',
             headers: headers,
             body: JSON.stringify(requestBody),
             ...(useProxy ? { dispatcher: proxyDispatcher } : {})
         });
+
+        if (response.status >= 300 && response.status < 400) {
+            throw new Error('Embedding API 返回重定向，已阻止（不允许重定向到其他地址）');
+        }
 
         if (!response.ok) {
             const errorText = await response.text();
@@ -288,18 +297,27 @@ async function callGeminiAPI(geminiMessages, systemPrompt, tools, generationConf
 
     let baseUrl = apiConfig.endpoint;
     if (!baseUrl || baseUrl.trim() === '') {
-        baseUrl = 'https://generativelanguage.googleapis.com/v1beta/models/';
+        baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
     }
-    if (!baseUrl.endsWith('/')) baseUrl += '/';
-    const url = `${baseUrl}${modelToUse}:generateContent?key=${apiConfig.api_key}`;
-    
-    const safeUrlLog = url.replace(/key=([^&]+)/, 'key=******');
+
+    const validatedEndpoint = await validateEndpoint(baseUrl);
+    const url = buildSafeUrl(validatedEndpoint, 'models', `${encodeURIComponent(modelToUse)}:generateContent`);
+    url.searchParams.set('key', apiConfig.api_key);
+
+    const safeUrlLog = url.toString().replace(/key=([^&]+)/, 'key=******');
     console.log(`callGeminiAPI: ${safeUrlLog}`);
 
     let response;
     try {
-        response = await axios.post(url, requestBody, { proxy: needsProxy(url) ? { host: '127.0.0.1', port: 7890, protocol: 'http' } : false });
+        response = await axios.post(url.toString(), requestBody, {
+            proxy: needsProxy(url.toString()) ? { host: '127.0.0.1', port: 7890, protocol: 'http' } : false,
+            maxRedirects: 0
+        });
     } catch (error) {
+        if (error.response && error.response.status >= 300 && error.response.status < 400) {
+            console.error('callGeminiAPI: 检测到跳转，已阻止');
+            throw new Error('LLM API 返回重定向，已阻止（不允许重定向到其他地址）');
+        }
         console.error('callGeminiAPI error:', JSON.stringify(error.response?.data, null, 2));
         throw error;
     }
@@ -344,10 +362,12 @@ async function callGeminiAPI(geminiMessages, systemPrompt, tools, generationConf
 // =================================================================
 
 async function callOpenAICompatibleAPI(geminiMessages, systemPrompt, tools, generationConfig, apiConfig) {
-    let url = apiConfig.endpoint;
-    if (!url.endsWith('/')) url += '/';
-    if (!url.includes('chat/completions')) {
-        url += 'chat/completions';
+    const validatedEndpoint = await validateEndpoint(apiConfig.endpoint);
+    let url;
+    if (validatedEndpoint.pathname.includes('chat/completions')) {
+        url = validatedEndpoint.toString();
+    } else {
+        url = buildSafeUrl(validatedEndpoint, 'chat/completions').toString();
     }
 
     console.log(`callOpenAICompatibleAPI: ${url}`);
@@ -445,7 +465,8 @@ async function callOpenAICompatibleAPI(geminiMessages, systemPrompt, tools, gene
             'Content-Type': 'application/json'
         },
         proxy: needsProxy(url) ? { host: '127.0.0.1', port: 7890, protocol: 'http' } : false,
-        timeout: 30000
+        timeout: 30000,
+        maxRedirects: 0
     };
 
     let response;
@@ -455,6 +476,10 @@ async function callOpenAICompatibleAPI(geminiMessages, systemPrompt, tools, gene
             response = await axios.post(url, requestBody, axiosConfig);
             break;
         } catch (err) {
+            if (err.response && err.response.status >= 300 && err.response.status < 400) {
+                console.error('callOpenAICompatibleAPI: 检测到跳转，已阻止');
+                throw new Error('LLM API 返回重定向，已阻止（不允许重定向到其他地址）');
+            }
             const isTimeout = err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT' ||
                             err.message?.includes('aborted') ||
                             err.message?.includes('ConnectTimeout') || err.message?.includes('Timeout');
