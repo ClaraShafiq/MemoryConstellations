@@ -1,24 +1,20 @@
-# 行尾归一（2026-10-11）
+# 行尾归一
 #
-# 现状（实测于 7dcf3fc）：123 个受版本控制的文件里
-#   · 115 个是 LF
-#   · 6 个是 CRLF —— services/llm.js · openai-compat.js · services/summary.js
-#                   services/context.js · utils/time.js · utils/settings.js
-#   · 2 个按内容被判定为非文本 —— utils/text.js（该文件有意用 NUL 作哈希分隔符）
-#                                deploy/astrbot-plugin/__pycache__/main.cpython-312.pyc
-# 此前没有 .gitattributes ⇒ 入库行尾随各人本机工具浮动。
+# 目标：**入库一律 LF**；工作区由 Git 按各人环境在 checkout 时还原。
 #
-# 本文件的目标：**入库一律 LF**；工作区由 Git 按各人环境在 checkout 时还原。
-# 已有的 6 个 CRLF 文件不在本次范围内 —— 它们会在下次被改动时自然归一。
+# 只保留长期有效的原因与规则 —— 带日期的盘点（当时哪些文件是什么行尾）
+# 属于「一次性的现状快照」，放在 PR 描述里，不放这里（否则数据一变就过期）。
 
-# 默认：让 Git 判断哪些是文本，入库时统一成 LF
-* text=auto eol=lf
+# 默认：让 Git 判断哪些是文本，入库时统一成 LF。
+# 不带 eol：只在入库那一刻归一，不改变任何人工作区的检出形态。
+* text=auto
 
-# 容器文件：没有扩展名，必须 LF。
-# 用 Dockerfile* 而不是 Dockerfile，以便同时覆盖 Dockerfile.chroma 这类变体
+# 以下三类对行尾敏感，无论是存储还是检出都钉死 —— 它们出错的方式是静默的。
+
+# 容器文件：没有扩展名，必须 LF
 Dockerfile* text eol=lf
 
-# shell 脚本：CRLF 会让 shebang 行尾多出一个 CR，解释器找不到路径（且这种失效是静默的）
+# shell 脚本：CRLF 会让 shebang 行尾多出一个 CR，解释器找不到路径
 *.sh text eol=lf
 
 # Windows 批处理在工作区必须是 CRLF，否则 cmd 解析出错
