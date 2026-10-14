@@ -98,7 +98,6 @@ const SCRIBE_CONFIG = {
     STALE_MIN_MESSAGES: 30,     // 时间兜底触发的最少消息数
     MAX_BATCH: 60,              // 单次最多处理消息数，防止请求过大导致API断连
     CONTEXT_BUFFER: 10,         // 往前取的缓冲消息数
-    API_CONFIG_ID: 52,          // gemini-3.1-flash-lite (was [openrouter]3.1flash-lite, 省一半输入成本)
     HIGH_EMOTION_KEYWORDS: [
         '崩溃','崩了','受不了','好难','好累','撑不住','哭了','哭','气死',
         '害怕','后悔','对不起','我决定','我不想再','我突然','没想到'
@@ -642,7 +641,7 @@ async function runScribe(messages, since) {
                     systemPrompt,
                     null,
                     { temperature: 0.3, maxOutputTokens: 4096 },
-                    SCRIBE_CONFIG.API_CONFIG_ID
+                    null
                 );
 
                 const clean = raw.reply.replace(/```json|```/g, '').trim();
@@ -676,7 +675,7 @@ async function runScribe(messages, since) {
                 if (colMatch) {
                     try {
                         const bodyToDump = JSON.stringify({
-                            model: db.prepare('SELECT model_name FROM api_configs WHERE id = ?').get(SCRIBE_CONFIG.API_CONFIG_ID)?.model_name || 'unknown',
+                            model: db.prepare('SELECT model_name FROM api_configs WHERE is_default = 1 ORDER BY id DESC LIMIT 1').get()?.model_name || 'unknown',
                             messages: [
                                 { role: 'system', content: systemPrompt },
                                 { role: 'user', content: fillPrompt(fullText) }

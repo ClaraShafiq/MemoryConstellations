@@ -1,38 +1,40 @@
-# Cost Reference
+# 模型费用与预算方法
 
-## Memory pipeline only (excluding chat)
+本项目不提供固定日价，也不维护按某个中转渠道抄录的模型报价。模型名称、地区可用性、缓存计费、免费额度和单价都会变化；同一模型经不同渠道调用，最终账单也可能不同。
 
-| Module | Calls/day | Model | Cost/day |
-|--------|-----------|-------|----------|
-| Agent Loop decisions | ~40 | flash-lite | ~$0.05 |
-| Scribe extraction | ~8 | flash-lite | ~$0.05 |
-| Deep cycle (classify/rematch/graduate) | ~15 | flash-lite | ~$0.03 |
-| Snitch/news bots | ~5 | flash-lite | ~$0.01 |
-| Music/book extraction | ~3 | flash-lite | ~$0.01 |
-| User Model (read/validate/detect) | ~5 | flash-lite | ~$0.02 |
-| Seed merge & emergence | ~3 | flash-lite | ~$0.01 |
-| **Total** | **~80** | | **~$0.22/day** |
+## 先区分四类调用
 
-**~¥1.5/day, ~¥50/month**
+| 职责 | 典型工作 | 是否必须与聊天模型相同 |
+|---|---|---|
+| Scribe | 从新消息提取带精确引文的原子观察 | 否 |
+| 客观维护者 | Claim 审核、分类、证据组装、星座与客观字段维护 | 否 |
+| 人格写作者 | 在证据充分时生成非空第一人称 Judgment | 否；必须绑定目标人格 |
+| 聊天主模型 | 消费已发布记忆并回复 | 否 |
 
-## Model pricing (OpenRouter, June 2026)
+部署者可以为这些职责选择不同连接，但不能牺牲证据闭集、版本/CAS、租约、唯一写入者和失败保旧合同。便宜模型若不能稳定遵守 schema，重试和人工复核反而会增加总成本。
 
-| Model | Input / 1M tokens | Output / 1M tokens |
-|-------|-------------------|-------------------|
-| DeepSeek V4 Flash | $0.14 | $0.28 |
-| Gemini 3.1 Flash Lite | $0.25 | $1.50 |
-| DeepSeek V4 Pro | $0.44 | $0.87 |
-| Gemini 3 Flash Preview | $0.50 | $3.00 |
-| Gemini 3.1 Pro Preview | $2.00 | $12.00 |
+## 用自己的数据估算
 
-## Chat costs (separate)
+对每个实际渠道分别记录：
 
-Chat responses use better models (Flash or Pro) and carry full context windows.
-Budget ~$0.50-1.00/day for active conversation, depending on model choice and message volume.
+1. 未缓存输入 token；
+2. 缓存输入 token，以及供应商实际采用的缓存计费规则；
+3. 输出 token；
+4. 请求次数、失败次数和重试次数；
+5. 供应商当日官方单价、币种、税费和汇率日期。
 
-## Optimization tips
+然后按供应商账单规则计算：
 
-- Set Scribe to flash-lite (default in this repo)
-- Deep cycle tasks are already flash-lite by default
-- Chat is the main cost driver — use Flash for casual conversation, Pro for deep talks
-- All embedding runs locally (Jina + fastembed), zero API cost
+```text
+总费用 = 未缓存输入费用 + 缓存输入费用 + 输出费用 + 其他渠道费用
+```
+
+`api_usage_stats` 会记录本项目能够取得的请求数和 token 回执，可用于按 `request_type` 分组观察；它不是供应商账单，缺少回执时也不能把未知用量当成零。建议先用虚构消息跑一个小样本，再按真实日调用量外推，并保留至少一周的实测区间。
+
+## 网络与向量费用边界
+
+- `HTTPS_PROXY` / `HTTP_PROXY` 只是可选网络路径；未配置时项目直连实际 endpoint。代理或中转本身可能另行收费，本项目无法代算。
+- legacy 本地向量路径会消耗本机 CPU、内存和磁盘，并可能在首次使用时下载模型；使用远端 embedding 时按对应渠道结算。
+- modern 已发布向量、人格写作和聊天调用是否启用，取决于部署配置及 rollout 状态，不能用测试调用量代替生产预算。
+
+最终预算请以所选供应商的官方价格页和实际账单为准，并在记录中注明查询日期。不要把 API key、完整请求或私人记忆贴到公开 Issue 里。

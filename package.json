@@ -5,9 +5,11 @@
   "scripts": {
     "start": "node index.js",
     "setup": "bash scripts/setup.sh",
+    "setup:llm": "node scripts/setup_llm.js",
     "vacuum": "node scripts/vacuum.js",
     "test:memory-modern": "node tests/modern_memory_pipeline.js",
     "test:memory-lanes": "node tests/memory_lane_contracts.js",
+    "test:llm-config": "node tests/public_model_configuration.js",
     "check:docs": "node scripts/check_docs.js",
     "check:privacy": "node scripts/check_public_privacy.js",
     "test:ssrf": "node tests/ssrf_validation.js",

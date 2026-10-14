@@ -61,11 +61,12 @@ cp .env.example .env
 cp memory_config.example.json memory_config.json
 cp core-prompt.example.txt core-prompt.txt
 npm install
+npm run setup:llm
 npm run test:memory-modern
 npm start
 ```
 
-先用 `openssl rand -hex 32` 生成密钥并填写 `.env`。打开 `http://localhost:3000/memory.html`；健康检查为 `GET /api/health`。首次启动会从空库迁移到 schema v112，不需要任何生产数据。详细步骤见 [OSS_SETUP.md](OSS_SETUP.md)。
+先用 `openssl rand -hex 32` 生成密钥并填写 `.env`，其中 `MEMORY_LLM_PROVIDER`、`MEMORY_LLM_ENDPOINT`、`MEMORY_LLM_MODEL` 和 `MEMORY_LLM_API_KEY` 必须来自你实际使用的渠道；再运行上面的模型配置命令。打开 `http://localhost:3000/memory.html`；健康检查为 `GET /api/health`。首次启动会从空库迁移到 schema v112，不需要任何生产数据。详细步骤见 [OSS_SETUP.md](OSS_SETUP.md)。
 
 ## 两种部署路径
 
@@ -87,6 +88,7 @@ DB_PATH=/tmp/memory-constellations-test.sqlite \
 SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 npm run test:memory-modern
 npm run test:memory-lanes
+npm run test:llm-config
 npm run check:docs
 npm run check:privacy
 curl http://localhost:3000/api/health
@@ -100,7 +102,7 @@ curl http://localhost:3000/api/health
 - 原始消息、Claim 证据和现代发布记录使用 AES-256-GCM 加密；旧 UI 的兼容投影仍沿用既有表约定。请离线备份密钥与 SQLite 数据库。
 - Agent 没有任意 SQL 写权限；`memoryCodexExecutor.js` 只接受 allowlist action。
 - 示例 fixture 是虚构、中性数据。
-- 模型费用由所选供应商决定；本项目不承诺固定价格、额度或特定模型行为。部署前查供应商官方资料。
+- 模型费用由所选供应商、模型、缓存规则和实际 token 量决定；本项目不提供会迅速过期的固定报价。请按 [费用核算方法](docs/COST.md) 记录自己的实测用量，并以供应商当日官方资料结算。
 - 启用现代读侧前先备份并完成真实消息端到端验收。
 
 ## Current status / Roadmap

@@ -238,16 +238,9 @@ ${conversationText}`;
 
         // 5. 调用LLM生成总结
         console.log('generateChatSummary: calling LLM...');
-        const summaryApiConfig = db.prepare("SELECT id FROM api_configs WHERE name = 'gemini-3.1-flash-lite' LIMIT 1").get();
-        const summaryApiConfigId = summaryApiConfig?.id || null;
-        if (summaryApiConfigId) {
-            console.log('generateChatSummary: using gemini-3.1-flash-lite config');
-        } else {
-            console.log('generateChatSummary: gemini-3.1-flash-lite not found, using default');
-        }
         const result = await callLLM([
             { role: 'user', parts: [{ text: fillPrompt(summaryPrompt) }] }
-        ], '', null, {}, summaryApiConfigId);
+        ], '', null, {}, null);
         
         if (!result || !result.reply) {
             console.error('generateChatSummary: API returned no content');

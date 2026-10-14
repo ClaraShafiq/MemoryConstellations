@@ -15,12 +15,19 @@
     environment:
       - TZ=${TZ:-UTC}
       # ── 必填：下面两个用 `openssl rand -hex 32` 生成 ──
-      - SANCTUARY_ENCRYPTION_KEY=改成64位hex
-      - SESSION_SECRET=改成64位hex
-      - LOGIN_PASSWORD=改成你的登录密码
-      # ── 必填：至少配一个 LLM API key（记忆管线用）──
-      - API_KEY=改成你的LLMkey
-      # - GEMINI_API_KEY=或填Gemini的key
+      - SANCTUARY_ENCRYPTION_KEY=${SANCTUARY_ENCRYPTION_KEY}
+      - SESSION_SECRET=${SESSION_SECRET}
+      - LOGIN_PASSWORD=${LOGIN_PASSWORD}
+      # ── 必填：明确指定记忆管线使用的协议、endpoint、模型和 key ──
+      - MEMORY_LLM_PROVIDER=${MEMORY_LLM_PROVIDER}
+      - MEMORY_LLM_ENDPOINT=${MEMORY_LLM_ENDPOINT}
+      - MEMORY_LLM_MODEL=${MEMORY_LLM_MODEL}
+      - MEMORY_LLM_API_KEY=${MEMORY_LLM_API_KEY}
+      - MEMORY_LLM_NAME=${MEMORY_LLM_NAME:-memory-pipeline}
+      # 可选代理；未设置时直连 MEMORY_LLM_ENDPOINT
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1}
       - CHROMA_URL=http://chroma:7707     # 向量检索服务地址（chroma 容器）
       - DB_PATH=/app/data/sanctuary.db   # 数据库文件落到持久化目录
     volumes:

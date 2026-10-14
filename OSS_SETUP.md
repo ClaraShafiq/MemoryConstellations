@@ -21,7 +21,18 @@ cp core-prompt.example.txt core-prompt.txt
 npm install
 ```
 
-用 `openssl rand -hex 32` 生成两个不同值。编辑 `.env`，设置 `SANCTUARY_ENCRYPTION_KEY`、`SESSION_SECRET`、`LOGIN_PASSWORD` 和实际使用的后台模型渠道。不要提交 `.env`；加密密钥丢失后无法解密旧数据。
+用 `openssl rand -hex 32` 生成两个不同值。编辑 `.env`，设置 `SANCTUARY_ENCRYPTION_KEY`、`SESSION_SECRET`、`LOGIN_PASSWORD`，再填写实际使用的后台模型连接：
+
+```dotenv
+MEMORY_LLM_PROVIDER=openai_compatible
+MEMORY_LLM_ENDPOINT=https://your-provider.example/v1
+MEMORY_LLM_MODEL=your-model-id
+MEMORY_LLM_API_KEY=replace-me
+```
+
+这里的 provider 只描述请求协议，不代表项目推荐某个供应商。模型名、可用地区、价格和 API 行为必须以所选供应商当日官方资料为准。不要提交 `.env`；加密密钥丢失后无法解密旧数据。
+
+如果部署环境需要出站代理，再设置 `HTTPS_PROXY` 或 `HTTP_PROXY`；未设置时程序直接连接 endpoint。不要照抄维护者机器上的代理地址。
 
 编辑 `memory_config.json`，至少替换 `user`、`ai`、`relationship` 与 `project` 下的占位内容。保持以下安全默认值：
 
@@ -38,13 +49,13 @@ npm install
 
 ## 3. 初始化空库
 
-数据库路径默认为项目根的 `sanctuary.db`，可用 `DB_PATH` 覆盖。推荐为此服务设置独立路径：
+数据库路径默认为项目根的 `sanctuary.db`，可用 `DB_PATH` 覆盖。推荐为此服务设置独立路径，并先把模型连接写入该数据库：
 
 ```bash
-DB_PATH=./memory_constellations.db node -e "require('dotenv').config(); require('./database').initDatabase()"
+DB_PATH=./memory_constellations.db npm run setup:llm
 ```
 
-以后启动时使用相同的 `DB_PATH`。迁移会从空库创建 legacy 表并应用目标仓库自己的 v104–v112；它不会读取外部生产数据库。
+该命令会初始化空库，把 API key 加密保存，并将这条连接设为默认值；Scribe 不依赖任何维护者私有的数据库编号。以后启动时使用相同的 `DB_PATH`。迁移会从空库创建 legacy 表并应用目标仓库自己的 v104–v112；它不会读取外部生产数据库。
 
 ## 4. 运行聚焦测试
 
@@ -55,6 +66,7 @@ DB_PATH=/tmp/memory-constellations-test.sqlite \
 SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 npm run test:memory-modern
 npm run test:memory-lanes
+npm run test:llm-config
 
 npm run check:docs
 npm run check:privacy

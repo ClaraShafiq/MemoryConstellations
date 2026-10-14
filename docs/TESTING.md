@@ -20,6 +20,14 @@ npm run test:memory-lanes
 
 该测试覆盖：实时/回补租约隔离、Claim Review 后 Duty/Classify 继承车道、被拒 Claim 零模型结束、Scribe 失败不推进游标、60→30→15 缩批与冷却，以及现代模式下旧 Skills/Archivist 入口 fail-closed。
 
+## 公共模型配置
+
+```bash
+npm run test:llm-config
+```
+
+该测试使用虚构 endpoint、模型名和临时空库，覆盖：未配置代理时直连、显式代理与 `NO_PROXY`、`MEMORY_LLM_*` 写入默认连接、API key 加密、空配置不播种虚假模型，以及 legacy Scribe 不再依赖维护者数据库 ID。不会发起模型请求。
+
 ## 文档与隐私
 
 ```bash

@@ -259,16 +259,31 @@ function initDatabase() {
     try {
         const existingConfig = db.prepare('SELECT COUNT(*) as count FROM api_configs').get();
         if (existingConfig.count === 0) {
-            db.prepare(`
-                INSERT INTO api_configs (name, provider, endpoint, api_key, model_name, is_default, supports_tools)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            `).run(
-                'Gemini官方', 'gemini',
-                'https://generativelanguage.googleapis.com/v1beta',
-                process.env.GEMINI_API_KEY || '',
-                'gemini-2.0-flash-exp', 1, 1
-            );
-            console.log('[DB] 已插入默认API配置');
+            const seed = {
+                name: process.env.MEMORY_LLM_NAME || 'memory-pipeline',
+                provider: process.env.MEMORY_LLM_PROVIDER,
+                endpoint: process.env.MEMORY_LLM_ENDPOINT,
+                apiKey: process.env.MEMORY_LLM_API_KEY,
+                model: process.env.MEMORY_LLM_MODEL,
+            };
+            const supplied = [seed.provider, seed.endpoint, seed.apiKey, seed.model].filter(Boolean).length;
+            if (supplied === 4 && ['gemini', 'openai_compatible'].includes(seed.provider)) {
+                db.prepare(`
+                    INSERT INTO api_configs (name, provider, endpoint, api_key, model_name, is_default, supports_tools)
+                    VALUES (?, ?, ?, ?, ?, 1, 1)
+                `).run(
+                    seed.name,
+                    seed.provider,
+                    seed.endpoint,
+                    encryption.encrypt(seed.apiKey),
+                    seed.model
+                );
+                console.log('[DB] 已从 MEMORY_LLM_* 环境变量建立默认 API 配置');
+            } else if (supplied > 0) {
+                console.warn('[DB] MEMORY_LLM_* 配置不完整或 provider 无效，未建立默认 API 配置');
+            } else {
+                console.log('[DB] 尚未配置记忆模型；请运行 npm run setup:llm 或设置 MEMORY_LLM_*');
+            }
         }
     } catch (e) { console.error('[DB] 默认API配置失败:', e.message); }
 

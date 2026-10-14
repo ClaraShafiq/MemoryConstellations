@@ -1,36 +1,20 @@
-// scripts/setup_llm.js — 引导配置轻量模型（记忆管线用的后台模型）
-//
-// 用法：
-//   node scripts/setup_llm.js                      （交互式，推荐）
-//   node scripts/setup_llm.js --provider openrouter --key sk-xxx --model "deepseek/deepseek-chat"
-//
-// 说明：
-//   记忆管线（Scribe 提取碎片 / Archivist 分类整合 / Consolidator 编叙事）
-//   需要调用 LLM，但都是后台批量任务，用「轻量模型」（flash / flash-lite 级别）
-//   即可，便宜够用。聊天用的主力模型不在这里配。
-//
-//   本脚本在 api_configs 表里建一条 is_default=1 的配置，后台管线在
-//   找不到专属配置时会自动回落到这条默认配置。
-//
-// 提供商预设（endpoint 自动填）：
-//   openrouter   OpenAI 兼容，https://openrouter.ai/api/v1
-//   deepseek     OpenAI 兼容，https://api.deepseek.com/v1
-//   gemini       Gemini 原生，https://generativelanguage.googleapis.com/v1beta/models/
+// 配置记忆管线使用的默认模型连接。
+// 推荐把 MEMORY_LLM_* 写入 .env 后运行 `npm run setup:llm`。
+// 也支持交互式输入或 --provider/--endpoint/--model/--key/--name 参数。
+
+require('dotenv').config();
 
 const readline = require('readline');
 const { initDatabase, getDb } = require('../database');
+const { encryption } = require('../encryption');
 
-const PROVIDERS = {
-    openrouter: { provider: 'openai_compatible', endpoint: 'https://openrouter.ai/api/v1', model: 'deepseek/deepseek-chat', label: 'OpenRouter' },
-    deepseek:   { provider: 'openai_compatible', endpoint: 'https://api.deepseek.com/v1',      model: 'deepseek-chat',        label: 'DeepSeek' },
-    gemini:     { provider: 'gemini',             endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/', model: 'gemini-2.5-flash', label: 'Gemini 官方' },
-};
+const VALID_PROVIDERS = new Set(['gemini', 'openai_compatible']);
 
 function parseArgs(argv) {
     const a = {};
     for (let i = 0; i < argv.length; i++) {
         if (argv[i] === '--provider') a.provider = argv[++i];
-        else if (argv[i] === '--key' || argv[i] === '--api-key') a.key = argv[++i];
+        else if (argv[i] === '--key' || argv[i] === '--api-key') a.apiKey = argv[++i];
         else if (argv[i] === '--model') a.model = argv[++i];
         else if (argv[i] === '--endpoint') a.endpoint = argv[++i];
         else if (argv[i] === '--name') a.name = argv[++i];
@@ -39,67 +23,102 @@ function parseArgs(argv) {
 }
 
 function ask(rl, q) {
-    return new Promise(res => rl.question(q, res));
+    return new Promise(res => rl.question(q, value => res(value.trim())));
+}
+
+function normalizeProvider(value) {
+    const normalized = String(value || '').trim().toLowerCase().replace(/-/g, '_');
+    return normalized === 'openai' ? 'openai_compatible' : normalized;
+}
+
+function validateEndpoint(value) {
+    let parsed;
+    try { parsed = new URL(value); } catch { throw new Error('MEMORY_LLM_ENDPOINT 必须是完整 URL'); }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+        throw new Error('MEMORY_LLM_ENDPOINT 只支持 http:// 或 https://');
+    }
+    return parsed.toString().replace(/\/$/, '');
+}
+
+async function collectConfig() {
+    const flags = parseArgs(process.argv.slice(2));
+    const config = {
+        provider: normalizeProvider(flags.provider || process.env.MEMORY_LLM_PROVIDER),
+        endpoint: flags.endpoint || process.env.MEMORY_LLM_ENDPOINT || '',
+        model: flags.model || process.env.MEMORY_LLM_MODEL || '',
+        apiKey: flags.apiKey || process.env.MEMORY_LLM_API_KEY || '',
+        name: flags.name || process.env.MEMORY_LLM_NAME || 'memory-pipeline',
+    };
+
+    if (config.provider && config.endpoint && config.model && config.apiKey) return config;
+
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    try {
+        console.log('\n配置记忆管线默认模型连接');
+        config.provider = normalizeProvider(await ask(
+            rl,
+            `传输协议 [gemini/openai_compatible]${config.provider ? ` (回车=${config.provider})` : ''}: `
+        ) || config.provider);
+        config.endpoint = await ask(
+            rl,
+            `API endpoint${config.endpoint ? ` (回车=${config.endpoint})` : ''}: `
+        ) || config.endpoint;
+        config.model = await ask(
+            rl,
+            `模型标识${config.model ? ` (回车=${config.model})` : ''}: `
+        ) || config.model;
+        config.apiKey = await ask(
+            rl,
+            config.apiKey ? 'API key（回车使用 .env 中的值）: ' : 'API key: '
+        ) || config.apiKey;
+        config.name = await ask(rl, `配置名称 (回车=${config.name}): `) || config.name;
+    } finally {
+        rl.close();
+    }
+    return config;
 }
 
 async function main() {
-    const flags = parseArgs(process.argv.slice(2));
-
-    let providerKey, apiKey, model, endpoint, name;
-
-    if (flags.provider && flags.key) {
-        // 非交互模式
-        providerKey = flags.provider;
-        apiKey = flags.key;
-        model = flags.model || PROVIDERS[providerKey]?.model;
-        endpoint = flags.endpoint || PROVIDERS[providerKey]?.endpoint;
-        name = flags.name || `轻量模型 (${providerKey})`;
-    } else {
-        // 交互模式
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        console.log('\n🌟 配置记忆管线用的轻量模型\n');
-        console.log('可选提供商：');
-        for (const [k, v] of Object.entries(PROVIDERS)) {
-            console.log(`   ${k.padEnd(12)} ${v.label}  (${v.endpoint})`);
-        }
-        console.log('（默认 openrouter）\n');
-
-        const p = (await ask(rl, '提供商 [openrouter/deepseek/gemini] (回车=openrouter): ')).trim().toLowerCase() || 'openrouter';
-        providerKey = PROVIDERS[p] ? p : 'openrouter';
-        apiKey = (await ask(rl, `API Key (${PROVIDERS[providerKey].label}): `)).trim();
-        if (!apiKey) { console.error('❌ API Key 不能为空'); process.exit(1); }
-        const dm = PROVIDERS[providerKey].model;
-        model = (await ask(rl, `模型名 (回车=${dm}): `)).trim() || dm;
-        endpoint = (await ask(rl, `Endpoint (回车=${PROVIDERS[providerKey].endpoint}): `)).trim() || PROVIDERS[providerKey].endpoint;
-        name = (await ask(rl, '这条配置的名字 (回车=轻量模型): ')).trim() || '轻量模型';
-        rl.close();
+    const config = await collectConfig();
+    if (!VALID_PROVIDERS.has(config.provider)) {
+        throw new Error('provider 必须是 gemini 或 openai_compatible');
     }
-
-    if (!apiKey) { console.error('❌ 缺少 API Key'); process.exit(1); }
-    if (!model) { console.error('❌ 缺少模型名'); process.exit(1); }
-
-    const preset = PROVIDERS[providerKey];
-    if (!preset) { console.error(`❌ 未知提供商: ${providerKey}（可选 openrouter/deepseek/gemini）`); process.exit(1); }
+    if (!config.model) throw new Error('缺少 MEMORY_LLM_MODEL');
+    if (!config.apiKey) throw new Error('缺少 MEMORY_LLM_API_KEY');
+    config.endpoint = validateEndpoint(config.endpoint);
 
     initDatabase();
     const db = getDb();
+    const encryptedKey = encryption.encrypt(config.apiKey);
+    const save = db.transaction(() => {
+        db.prepare('UPDATE api_configs SET is_default = 0 WHERE is_default = 1').run();
+        const existing = db.prepare('SELECT id FROM api_configs WHERE name = ? ORDER BY id DESC LIMIT 1').get(config.name);
+        if (existing) {
+            db.prepare(`
+                UPDATE api_configs
+                SET provider = ?, endpoint = ?, api_key = ?, model_name = ?, is_default = 1, supports_tools = 1
+                WHERE id = ?
+            `).run(config.provider, config.endpoint, encryptedKey, config.model, existing.id);
+            return existing.id;
+        }
+        return db.prepare(`
+            INSERT INTO api_configs (name, provider, endpoint, api_key, model_name, is_default, supports_tools)
+            VALUES (?, ?, ?, ?, ?, 1, 1)
+        `).run(config.name, config.provider, config.endpoint, encryptedKey, config.model).lastInsertRowid;
+    });
 
-    // 若已有默认配置，先取消默认（避免冲突），再插入新的默认配置
-    db.prepare('UPDATE api_configs SET is_default = 0 WHERE is_default = 1').run();
-    const info = db.prepare(`
-        INSERT INTO api_configs (name, provider, endpoint, api_key, model_name, is_default, supports_tools)
-        VALUES (?, ?, ?, ?, ?, 1, 1)
-    `).run(name, preset.provider, endpoint, apiKey, model);
-
-    console.log(`\n✅ 轻量模型已配置（api_configs #${info.lastInsertRowid}）`);
-    console.log(`   名字:     ${name}`);
-    console.log(`   提供商:   ${preset.provider}`);
-    console.log(`   模型:     ${model}`);
-    console.log(`   Endpoint: ${endpoint}`);
-    console.log(`   已设为默认（is_default=1）`);
-    console.log('\n后台记忆管线（Scribe/Archivist/Consolidator）会自动使用这条配置。');
-    console.log('如需更改，重新运行本脚本即可。');
-    process.exit(0);
+    const id = save();
+    console.log(`\n默认记忆模型连接已保存（api_configs #${id}）`);
+    console.log(`名称: ${config.name}`);
+    console.log(`传输协议: ${config.provider}`);
+    console.log(`模型: ${config.model}`);
+    console.log(`Endpoint: ${config.endpoint}`);
+    console.log('API key 已加密保存；后台 Scribe/Archivist 使用 is_default=1 的连接。');
 }
 
-main().catch(e => { console.error('❌ 配置失败:', e); process.exit(1); });
+main()
+    .then(() => process.exit(0))
+    .catch(error => {
+        console.error(`配置失败: ${error.message}`);
+        process.exit(1);
+    });

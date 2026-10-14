@@ -9,14 +9,33 @@ const path = require('path');
 const { get_encoding } = require('tiktoken');
 const { getDb } = require('../database');
 
-// 共享代理连接池：复用 TCP+TLS 连接，避免每次请求重新握手
-const proxyDispatcher = new ProxyAgent({
-    uri: 'http://127.0.0.1:7890',
+function readProxyUrl() {
+    const raw = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '';
+    if (!raw.trim()) return null;
+
+    try {
+        const parsed = new URL(raw);
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+            console.warn(`[LLM] 忽略不支持的代理协议: ${parsed.protocol}`);
+            return null;
+        }
+        return parsed;
+    } catch {
+        console.warn('[LLM] HTTPS_PROXY/HTTP_PROXY 不是有效 URL，已禁用出站代理');
+        return null;
+    }
+}
+
+const configuredProxyUrl = readProxyUrl();
+
+// 只有部署者显式设置 HTTPS_PROXY/HTTP_PROXY 时才创建代理连接池。
+const proxyDispatcher = configuredProxyUrl ? new ProxyAgent({
+    uri: configuredProxyUrl.toString(),
     connections: 8,
     headersTimeout: 120000,
     bodyTimeout: 300000,
     connectTimeout: 30000,
-});
+}) : null;
 function getProxyDispatcher() { return proxyDispatcher; }
 
 // 连接超时重试：代理/中转偶尔抽风，给第二次机会
@@ -54,18 +73,47 @@ const { validateEndpoint, buildSafeUrl } = require('../utils/ssrf-guard');
 
 const enc = get_encoding('cl100k_base');
 
-// 判断是否需要走代理：国内站点直连，海外站点走 127.0.0.1:7890
-const DOMESTIC_DOMAINS = ['api.deepseek.com', 'dashscope.aliyuncs.com', 'api.dzzi.ai'];
-const DOMESTIC_IPS = ['162.14.124.108'];  // 国内中转站IP，直连不走代理
+function matchesNoProxy(hostname) {
+    const entries = (process.env.NO_PROXY || process.env.no_proxy || '')
+        .split(',')
+        .map(item => item.trim().toLowerCase())
+        .filter(Boolean);
+
+    return entries.some(entry => {
+        if (entry === '*') return true;
+        const host = entry.split(':')[0].replace(/^\./, '');
+        return hostname === host || hostname.endsWith(`.${host}`);
+    });
+}
+
 function needsProxy(url) {
-    if (url.includes('127.0.0.1') || url.includes('localhost') || url.includes('192.168')) return false;
+    if (!configuredProxyUrl) return false;
     try {
-        const host = new URL(url).hostname;
-        if (host.endsWith('.cn')) return false;
-        if (DOMESTIC_DOMAINS.some(d => host === d || host.endsWith('.' + d))) return false;
-        if (DOMESTIC_IPS.includes(host)) return false;
-    } catch {}
-    return true;
+        const host = new URL(url).hostname.toLowerCase();
+        if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return false;
+        return !matchesNoProxy(host);
+    } catch {
+        return false;
+    }
+}
+
+function getAxiosProxy(url) {
+    if (!needsProxy(url)) return false;
+
+    const proxy = {
+        protocol: configuredProxyUrl.protocol.replace(':', ''),
+        host: configuredProxyUrl.hostname,
+        port: configuredProxyUrl.port
+            ? Number(configuredProxyUrl.port)
+            : (configuredProxyUrl.protocol === 'https:' ? 443 : 80),
+    };
+    if (configuredProxyUrl.username) {
+        proxy.auth = {
+            username: decodeURIComponent(configuredProxyUrl.username),
+            password: decodeURIComponent(configuredProxyUrl.password),
+        };
+    }
+    return proxy;
 }
 
 // =================================================================
@@ -310,7 +358,7 @@ async function callGeminiAPI(geminiMessages, systemPrompt, tools, generationConf
     let response;
     try {
         response = await axios.post(url.toString(), requestBody, {
-            proxy: needsProxy(url.toString()) ? { host: '127.0.0.1', port: 7890, protocol: 'http' } : false,
+            proxy: getAxiosProxy(url.toString()),
             maxRedirects: 0
         });
     } catch (error) {
@@ -464,7 +512,7 @@ async function callOpenAICompatibleAPI(geminiMessages, systemPrompt, tools, gene
             'Authorization': `Bearer ${apiConfig.api_key}`,
             'Content-Type': 'application/json'
         },
-        proxy: needsProxy(url) ? { host: '127.0.0.1', port: 7890, protocol: 'http' } : false,
+        proxy: getAxiosProxy(url),
         timeout: 30000,
         maxRedirects: 0
     };
@@ -567,5 +615,6 @@ module.exports = {
     getEncoder,
     fetchWithRetry,
     getProxyDispatcher,
-    needsProxy
+    needsProxy,
+    getAxiosProxy,
 };

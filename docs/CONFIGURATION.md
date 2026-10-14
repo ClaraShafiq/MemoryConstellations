@@ -7,7 +7,11 @@
 - `SANCTUARY_ENCRYPTION_KEY`：64 位十六进制 AES-256-GCM 密钥。
 - `SESSION_SECRET`：Web session 随机密钥。
 - `LOGIN_PASSWORD`：本地 UI 登录密码。
-- 一个实际使用的 LLM 渠道密钥。
+- 一组完整的记忆管线模型连接：
+  - `MEMORY_LLM_PROVIDER`：请求协议，只接受 `gemini` 或 `openai_compatible`。
+  - `MEMORY_LLM_ENDPOINT`：所选渠道提供的完整 API endpoint。
+  - `MEMORY_LLM_MODEL`：该渠道实际提供的模型标识。
+  - `MEMORY_LLM_API_KEY`：该渠道的密钥。
 
 可选：
 
@@ -18,8 +22,18 @@
 - `MEMORY_SCRIBE_MIN_MESSAGES`：现代 Scribe 最小积压；默认 1。
 - 现代 Scribe 连续失败的 60→30→15 缩批与一小时冷却是安全合同，不由部署配置关闭；受控人工重试可显式传 `forceRetry`。
 - `ALLOW_MEMORY_CODEX_CLI=1`：显式允许启动 Codex CLI 运行期适配器；仍必须由调用方提供隔离工作目录。
+- `MEMORY_LLM_NAME`：写入 `api_configs` 的本地名称；默认 `memory-pipeline`。
+- `HTTPS_PROXY` / `HTTP_PROXY`：可选出站代理；没有设置时直连。`NO_PROXY` 可列出不走代理的主机。
 
 不要把 `.env`、登录状态或密钥写入 `memory_config.json`。
+
+填写 `.env` 后运行：
+
+```bash
+DB_PATH=./memory_constellations.db npm run setup:llm
+```
+
+该命令只把一条默认连接写入指定数据库，API key 会先加密。也可不写环境变量，直接运行命令后交互输入。不要在 Issue、日志或命令截图中公开 key。
 
 ## 运行期合同
 
@@ -43,4 +57,6 @@
 
 ## 模型配置原则
 
-模型名、价格、额度和 API 行为可能变化，本仓库不写死推荐。Scribe 模型必须遵守原子观察和精确引文合同；结构化审查模型/维护 Agent 必须能稳定返回闭集 JSON action；人格写作者必须与所需 companion persona 显式绑定并独占非空第一人称 Judgment；聊天主模型由集成方选择。所有实现都必须遵守证据、版本、租约、闭集和唯一写入者合同。
+模型名、价格、额度和 API 行为可能变化，本仓库不写死推荐，也不会按维护者数据库中的私有 ID 选择模型。legacy Scribe/Archivist 使用 `api_configs.is_default=1` 的连接；modern 适配器可以另行配置，但必须维持相同安全合同。
+
+Scribe 模型必须遵守原子观察和精确引文合同；结构化审查模型/维护 Agent 必须能稳定返回闭集 JSON action；人格写作者必须与所需 companion persona 显式绑定并独占非空第一人称 Judgment；聊天主模型由集成方选择。所有实现都必须遵守证据、版本、租约、闭集和唯一写入者合同。

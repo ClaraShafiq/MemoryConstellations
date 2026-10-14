@@ -33,8 +33,14 @@ for tmpl in .env memory_config.json core-prompt.txt; do
     fi
 done
 
-if [ ! -f .env ] || ! grep -q 'SANCTUARY_ENCRYPTION_KEY=.' .env 2>/dev/null; then
-    echo "⚠️  请编辑 .env 填入必填项（SANCTUARY_ENCRYPTION_KEY, SESSION_SECRET, LOGIN_PASSWORD, API_KEY）后重新运行。"
+missing_config=""
+for config_name in SANCTUARY_ENCRYPTION_KEY SESSION_SECRET LOGIN_PASSWORD MEMORY_LLM_PROVIDER MEMORY_LLM_ENDPOINT MEMORY_LLM_MODEL MEMORY_LLM_API_KEY; do
+    if [ ! -f .env ] || ! grep -q "^${config_name}=." .env 2>/dev/null; then
+        missing_config="${missing_config} ${config_name}"
+    fi
+done
+if [ -n "$missing_config" ]; then
+    echo "⚠️  请编辑 .env 填入以下必填项后重新运行：${missing_config}"
     exit 0
 fi
 
@@ -43,21 +49,15 @@ echo ""
 echo "📦 安装依赖..."
 npm install
 
-# 4. Check Python (for ChromaDB embedding)
+# 4. Check optional Python runtime
 echo ""
 if command -v python3 &> /dev/null; then
     echo "✅ Python3 $(python3 --version)"
 else
-    echo "⚠️  Python3 未安装。向量检索功能需要 Python3 + ChromaDB。"
-    echo "   安装: sudo apt install python3 python3-pip  (或 brew install python3)"
+    echo "ℹ️  Python3 未安装；只有启用 legacy 本地向量路径时才需要。"
 fi
 
-# 5. Install ChromaDB
-echo ""
-echo "📦 安装 ChromaDB..."
-pip3 install chromadb 2>/dev/null || pip install chromadb 2>/dev/null || echo "⚠️  ChromaDB 安装失败，跳过。向量功能将不可用。"
-
-# 6. Initialize database
+# 5. Initialize database
 echo ""
 echo "🗄️  初始化数据库..."
 node -e "
@@ -68,23 +68,10 @@ console.log('✅ 数据库初始化完成');
 process.exit(0);
 "
 
-# 7. Download embedding model (first run will auto-download)
+# 6. Save the explicitly configured default model connection
 echo ""
-echo "🧠 预热 embedding 模型（首次运行会下载 Jina embeddings）..."
-node -e "
-require('dotenv').config();
-const { initDatabase } = require('./database');
-const { initSettings } = require('./routes/settings');
-initDatabase(); initSettings();
-const { getEmbedding } = require('./services/llm');
-getEmbedding('hello world').then(() => {
-    console.log('✅ Embedding 模型就绪');
-    process.exit(0);
-}).catch(e => {
-    console.log('⚠️  Embedding 预热失败:', e.message, '(首次聊天时会自动重试)');
-    process.exit(0);
-});
-" 2>/dev/null || echo "⚠️  Embedding 预热跳过"
+echo "🔌 保存记忆管线模型连接..."
+node scripts/setup_llm.js
 
 echo ""
 echo "══════════════════════════════════════════"
