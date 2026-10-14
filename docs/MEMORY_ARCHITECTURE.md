@@ -9,16 +9,30 @@
 5. Facts、Status、Judgment 独立发布、独立版本、独立回滚。
 6. 非空 Judgment 只能来自已绑定 persona 的伴侣人格写作者。
 7. 读侧只消费正式发布投影；legacy 与 verified 可回滚切换。
+8. 实时任务与历史回补使用不同车道；正式在线 runner 只消费实时车道。
+9. 现代协议启用后，旧分类、Skills、Insight、Flash 和认知融合入口必须 fail-closed。
 
 ## 写入链路
 
 `memoryScribe.js` 用复合游标读取消息，把精确引文冻结到 observation 和 `memory_claim_sources`。消息内容、说话人、时间或状态变化会改变 source fingerprint。
+
+Scribe 的模型可替换，但输出合同不可替换。失败时不推进复合游标：同一游标连续失败会把批量从 60 收窄到 30、再到 15；15 条仍失败后自动冷却一小时，显式人工重试可绕过冷却。成功推进到新游标后恢复正常批量。
 
 Claim 随后经过三类独立判断：
 
 - `memoryClaimReview.js`：证据是否支持、归属是否支持、时间状态。
 - `memoryClaimDuty.js`：stable fact、current state、event、preference、opinion 等职责。
 - `memoryClassification.js` / `memoryNodeReview.js`：是否关联星座，以及关联扮演的角色。
+
+Claim Review 创建下游任务时，Duty 与 Classify 都继承上游 priority。已拒、失效、来源变化或尚未支持的 Claim 会以 `classification_no_supported_claims` 零模型结束；公共实现直接以 Claim 为分类材料，不读取派生 Fragment 正文作后备。
+
+## 实时与回补车道
+
+- priority 100 及以上：新自然消息产生的实时任务。
+- priority 100 以下：导入、存量修复和显式历史回补。
+- `memoryPipeline.tick()` 与运行期受控 Agent 默认只租用实时车道。
+- 只有显式传入 `priorityBand=backfill` 的维护操作才能消费历史车道。
+- 从 Claim Review 到 Duty、Classify、证据池、Episode、Profile、Judgment 和检索投影，任务始终继承来源车道。
 
 `memoryEvidenceResolution.js` 汇总这些结论，并记录明确的阻断原因。`needs_resolution` 在证据指纹不变时进入 `deferred`；只有新输入才重开。
 
@@ -51,6 +65,8 @@ Claim 随后经过三类独立判断：
 
 `memoryCodexReviewPolicy.js` 是 action allowlist。`memoryCodexBackend.js` 只负责把 job 交给只读提案者；`memoryCodexExecutor.js` 校验 action 并调用具体宿主函数。它不接受 SQL、shell 或自由写库命令，并显式阻止 Codex 生成非空 Judgment。
 
+Codex 只是当前已实现的一个适配器。任何能调用工具并稳定输出本项目类型化 action 的 Agent 都可按接口接入；它不能因此获得 SQL 或绕过宿主校验。Scribe、客观维护者、人格写作者和聊天主模型是四种职责，不要求由同一供应商提供。
+
 租约保证只有当前持有者能完成 job；CAS 保证 action 针对的 revision 与 input hash 仍然有效。
 
 ## 检索
@@ -59,4 +75,4 @@ Claim 随后经过三类独立判断：
 
 ## 当前边界
 
-现代控制面已有聚焦测试，但默认未切换生产消费者。宏观认知/直觉、最终检索路由和完整消费者切换属于后续阶段；真实自然聊天的最终验收仍需在具体部署中完成。
+现代控制面已有聚焦测试，但默认未切换生产消费者。`maintenance=running` 表示写入/审核链在跑；`chat_read_mode=verified` 才表示聊天消费者已切换。参考部署目前是 running / legacy，仍在等待真实自然消息贯穿并被角色模型召回。宏观认知/直觉、最终检索路由和完整消费者切换属于后续阶段。

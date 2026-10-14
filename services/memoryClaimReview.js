@@ -21,6 +21,7 @@ function commit(db, decision) {
         temporalState: decision.temporalState,
         reviewer: decision.reviewer,
         reason: decision.reason,
+        priority: decision.priority,
     });
 }
 

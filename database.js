@@ -1199,6 +1199,12 @@ function initDatabase() {
         INSERT OR IGNORE INTO user_settings(setting_key,setting_value)
             VALUES('memory_semantic_maintenance_mode','backfill');
     `, { critical: true });
+    runMigration(111, 'modern memory: isolate live and backfill job lanes', `
+        UPDATE memory_jobs SET priority=-1
+        WHERE priority<100 AND status IN('queued','retry','skipped');
+    `, { critical: true });
+    runMigration(112, 'modern memory: preserve Judgment source lane',
+        require('./services/memoryProfileFields').SOURCE_PRIORITY_SCHEMA, { critical: true });
 
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {

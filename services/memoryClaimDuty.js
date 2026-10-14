@@ -17,6 +17,7 @@ function commit(db, decision) {
         basis: decision.basis,
         state: decision.state,
         reviewer: decision.reviewer,
+        priority: decision.priority,
     });
 }
 

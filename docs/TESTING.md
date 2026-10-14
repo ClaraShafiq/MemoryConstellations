@@ -8,7 +8,17 @@ SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 npm run test:memory-modern
 ```
 
-测试使用虚构人物 River，覆盖：空库 v110、Scribe 精确引文、Claim 审查、证据池 grounded、实体关联、Episode 发布、Facts/Status 独立发布、Judgment 证据门、Codex Judgment 禁令、检索投影、CAS 和租约。
+测试使用虚构人物 River，覆盖：空库 v112、Scribe 精确引文、Claim 审查、证据池 grounded、实体关联、Episode 发布、Facts/Status 独立发布、Judgment 证据门、Codex Judgment 禁令、检索投影、CAS 和租约。
+
+## 车道与失败关闭
+
+```bash
+DB_PATH=/tmp/memory-constellations-lanes.sqlite \
+SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+npm run test:memory-lanes
+```
+
+该测试覆盖：实时/回补租约隔离、Claim Review 后 Duty/Classify 继承车道、被拒 Claim 零模型结束、Scribe 失败不推进游标、60→30→15 缩批与冷却，以及现代模式下旧 Skills/Archivist 入口 fail-closed。
 
 ## 文档与隐私
 
@@ -37,4 +47,4 @@ npm run test:contracts
 4. verified 检索生成正确聊天包。
 5. 实际伴侣人格模型在新一轮聊天中召回正确内容。
 
-当前仓库不宣称这一步已在参考部署完成。
+当前仓库不宣称这一步已在参考部署完成。参考部署的正式维护链虽已 running，聊天读侧仍为 legacy。

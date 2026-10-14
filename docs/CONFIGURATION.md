@@ -16,6 +16,7 @@
 - `TZ`：部署使用的 IANA 时区（例如 `Europe/Paris`）；未设置时使用系统时区，无法识别时回退到 `UTC`。服务端定时任务、后端时间格式化和星图页面均从这一处读取。
 - `MEMORY_SCRIBE_BATCH_SIZE`：现代 Scribe 每批消息上限；默认 60。
 - `MEMORY_SCRIBE_MIN_MESSAGES`：现代 Scribe 最小积压；默认 1。
+- 现代 Scribe 连续失败的 60→30→15 缩批与一小时冷却是安全合同，不由部署配置关闭；受控人工重试可显式传 `forceRetry`。
 - `ALLOW_MEMORY_CODEX_CLI=1`：显式允许启动 Codex CLI 运行期适配器；仍必须由调用方提供隔离工作目录。
 
 不要把 `.env`、登录状态或密钥写入 `memory_config.json`。
@@ -38,6 +39,8 @@
 
 安装不会自动把数据库设置切到 verified/running。这样迁移表和测试不会误触发消费者切换。
 
+`running` 只开启正式维护 runner；该 runner 默认只消费实时车道。`verified` 独立控制聊天读侧。历史回补必须显式选择 backfill 车道，不能通过启动在线 runner 顺带消费。
+
 ## 模型配置原则
 
-模型名、价格、额度和 API 行为可能变化，本仓库不写死推荐。结构化审查模型必须能稳定返回 JSON；人格写作者必须与所需 companion persona 显式绑定；聊天主模型由集成方选择。部署时查各供应商官方文档。
+模型名、价格、额度和 API 行为可能变化，本仓库不写死推荐。Scribe 模型必须遵守原子观察和精确引文合同；结构化审查模型/维护 Agent 必须能稳定返回闭集 JSON action；人格写作者必须与所需 companion persona 显式绑定并独占非空第一人称 Judgment；聊天主模型由集成方选择。所有实现都必须遵守证据、版本、租约、闭集和唯一写入者合同。

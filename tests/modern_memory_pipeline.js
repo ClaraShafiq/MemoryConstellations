@@ -110,7 +110,7 @@ async function main() {
     assert.throws(() => classification.commit(db, { claimId: claim.id, expectedRevision: 99,
         inputHash: claim.input_hash, outcome: 'no_independent_node', reviewer: 'test-reviewer' }), /classification_cas_failed/);
 
-    console.log(JSON.stringify({ ok: true, schema: 110, claim_id: claim.id, entity_id: entityId,
+    console.log(JSON.stringify({ ok: true, schema: 112, claim_id: claim.id, entity_id: entityId,
         episode_id: publication.memory_id, search_results: found.length }));
 }
 

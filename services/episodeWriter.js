@@ -64,7 +64,7 @@ function publish(db, candidateId, draft, meta) {
         db.prepare("UPDATE memory_episode_candidates SET status='published',updated_at=? WHERE id=? AND input_hash=?")
             .run(now, candidateId, checked.input.input_hash);
         protocol.enqueueJob(db, { stage: 'search_projection', targetType: 'memory', targetId: memoryId,
-            inputRevision: revision, inputHash: checked.input.input_hash });
+            inputRevision: revision, inputHash: checked.input.input_hash, priority: meta.priority });
         return db.prepare('SELECT * FROM memory_episode_publications WHERE candidate_id=?').get(candidateId);
     })();
 }

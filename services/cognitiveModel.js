@@ -17,6 +17,19 @@ const { fillPrompt, USER, AI } = require('./nameResolver');
 const { encryption } = require('../encryption');
 const { getCompanionPersonaBase } = require('./companionPersona');
 const { sqlNow, sqlTimeAhead, DAY_MS } = require('../utils/time');
+const { config: memoryConfig } = require('./memoryConfig');
+
+function modernProtocolEnabled() {
+    return memoryConfig.pipeline?.mode === 'modern';
+}
+
+function legacyOnly(fn, fallback = { skipped: true, reason: 'modern_memory_protocol' }) {
+    return function guardedLegacyEntry(...args) {
+        if (!modernProtocolEnabled()) return fn(...args);
+        const value = typeof fallback === 'function' ? fallback() : fallback;
+        return fn.constructor.name === 'AsyncFunction' ? Promise.resolve(value) : value;
+    };
+}
 
 // v5.10: 增强版 system prompt — Companion 人格 + User 画像
 // 供 detectNewTraits / readUserRawMessages 等需要深度理解 {{user.name}} 的 LLM 调用使用
@@ -3239,56 +3252,37 @@ function manageCurrentState(content, opts = {}) {
 // ══════════════════════════════════════════════════════════════
 
 module.exports = {
-    createEntry, updateEntry, manageCurrentState,
-    // CRUD
-    createEntry,
-    updateEntry,
-    resolveEntry,
-    abandonEntry,
-    supersedeEntry,
-    correctEntry,
-
-    // Evidence
-    addEvidence,
-    matchEvidenceFromFragments,
-    harvestFacts,  // v4.8 退役，保留兼容
-    bridgeStarMapToModel,
-
-    // Decay & validation
-    processModelDecay,
-    validateHypotheses,
-    detectNewTraits,
-    reviewFlaggedTraits,
-    resolveExpiredStates,
-    reviewStableTraits,
-    seedAnchorOrphanEntries,
-    anchorEntriesToFragments,
-
-    // Profile integration (v5.10)
-    integrateProfileTraits,
-
-    // Dedup (v4.9)
-    detectModelOverlaps,
-    mergeModelEntries,
-
-    // Cross-reference (v5.0)
-    crossRefStateWithEntities,
-
-    // Core insight (v5.0)
-    synthesizeCoreInsight,
-
-    // Context
-    getModelContext,
-    getWhisperRelevant,
-
-    // Migration
-    seedFromExisting,
-
-    // Evidence
-    backfillModelEvidence,
-
-    // Deep cycle
-    runUserModelCycle,
-    readUserRawMessages,
+    // 现代协议启用后，旧用户模型的所有公共读写入口均 fail-closed；内部函数只会
+    // 由这些受控入口到达，避免直接 import 绕过 Archivist 调度门禁。
+    createEntry: legacyOnly(createEntry, null),
+    updateEntry: legacyOnly(updateEntry, false),
+    manageCurrentState: legacyOnly(manageCurrentState, null),
+    resolveEntry: legacyOnly(resolveEntry, false),
+    abandonEntry: legacyOnly(abandonEntry, false),
+    supersedeEntry: legacyOnly(supersedeEntry, false),
+    correctEntry: legacyOnly(correctEntry, false),
+    addEvidence: legacyOnly(addEvidence, false),
+    matchEvidenceFromFragments: legacyOnly(matchEvidenceFromFragments),
+    harvestFacts: legacyOnly(harvestFacts),
+    bridgeStarMapToModel: legacyOnly(bridgeStarMapToModel),
+    processModelDecay: legacyOnly(processModelDecay),
+    validateHypotheses: legacyOnly(validateHypotheses),
+    detectNewTraits: legacyOnly(detectNewTraits),
+    reviewFlaggedTraits: legacyOnly(reviewFlaggedTraits),
+    resolveExpiredStates: legacyOnly(resolveExpiredStates),
+    reviewStableTraits: legacyOnly(reviewStableTraits),
+    seedAnchorOrphanEntries: legacyOnly(seedAnchorOrphanEntries),
+    anchorEntriesToFragments: legacyOnly(anchorEntriesToFragments),
+    integrateProfileTraits: legacyOnly(integrateProfileTraits),
+    detectModelOverlaps: legacyOnly(detectModelOverlaps),
+    mergeModelEntries: legacyOnly(mergeModelEntries),
+    crossRefStateWithEntities: legacyOnly(crossRefStateWithEntities),
+    synthesizeCoreInsight: legacyOnly(synthesizeCoreInsight),
+    getModelContext: legacyOnly(getModelContext, ''),
+    getWhisperRelevant: legacyOnly(getWhisperRelevant, ''),
+    seedFromExisting: legacyOnly(seedFromExisting),
+    backfillModelEvidence: legacyOnly(backfillModelEvidence),
+    runUserModelCycle: legacyOnly(runUserModelCycle),
+    readUserRawMessages: legacyOnly(readUserRawMessages),
     MIN_GAP_USER_MODEL,
 };

@@ -21,8 +21,10 @@ function commit(db, decision) {
         claim_revision=excluded.claim_revision,input_hash=excluded.input_hash,quote_enc=excluded.quote_enc,
         reviewer=excluded.reviewer,updated_at=CURRENT_TIMESTAMP`).run(claim.id, decision.entityId, decision.role,
         decision.verdict, claim.revision, claim.input_hash, quote ? protocol.encrypt(quote) : null, decision.reviewer);
+    const priority = protocol.resolveJobPriority(db, 'node_review', claim.id,
+        claim.revision, claim.input_hash, decision.priority);
     protocol.enqueueJob(db, { stage: 'evidence_resolution', targetType: 'claim', targetId: claim.id,
-        inputRevision: claim.revision, inputHash: claim.input_hash });
+        inputRevision: claim.revision, inputHash: claim.input_hash, priority });
     return { claim_id: claim.id, entity_id: decision.entityId, verdict: decision.verdict };
 }
 

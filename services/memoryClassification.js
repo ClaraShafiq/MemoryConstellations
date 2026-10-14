@@ -29,14 +29,28 @@ CREATE TABLE IF NOT EXISTS memory_node_reviews (
 
 const ROLES = new Set(['subject','participant','location','organization','work','mention']);
 
-function snapshot(db, claimId) {
+function availability(db, claimId) {
     const claim = protocol.readClaim(db, claimId);
+    if (!protocol.sourcesCurrent(db, claim)) return { available: false, reason: 'classification_source_changed' };
+    if (claim.source_state !== 'supported' || claim.support_state !== 'supported'
+        || claim.attribution_state !== 'supported') {
+        return { available: false, reason: 'classification_no_supported_claims' };
+    }
+    return { available: true, claim };
+}
+
+function snapshot(db, claimId) {
+    const checked = availability(db, claimId);
+    if (!checked.available) protocol.fail(checked.reason);
+    const claim = checked.claim;
     return { claim_id: claim.id, revision: claim.revision, input_hash: claim.input_hash,
         body: claim.body, domain: claim.domain, temporal_state: claim.temporal_state, sources: claim.sources };
 }
 
 function commit(db, decision) {
-    const claim = protocol.readClaim(db, decision.claimId);
+    const checked = availability(db, decision.claimId);
+    if (!checked.available) protocol.fail(checked.reason);
+    const claim = checked.claim;
     if (decision.expectedRevision !== claim.revision || decision.inputHash !== claim.input_hash) protocol.fail('classification_cas_failed');
     if (!protocol.sourcesCurrent(db, claim)) protocol.fail('classification_source_changed');
     const outcomes = ['linked','topic_only','no_independent_node','needs_resolution'];
@@ -53,10 +67,12 @@ function commit(db, decision) {
             claim.id, claim.revision, claim.input_hash, decision.outcome, JSON.stringify(links),
             JSON.stringify(decision.topics || []), decision.reviewer,
         );
+        const priority = protocol.resolveJobPriority(db, 'claim_classification', claim.id,
+            claim.revision, claim.input_hash, decision.priority);
         protocol.enqueueJob(db, { stage: 'evidence_resolution', targetType: 'claim', targetId: claim.id,
-            inputRevision: claim.revision, inputHash: claim.input_hash });
+            inputRevision: claim.revision, inputHash: claim.input_hash, priority });
     })();
     return { claim_id: claim.id, outcome: decision.outcome, links };
 }
 
-module.exports = { SCHEMA, ROLES, snapshot, commit };
+module.exports = { SCHEMA, ROLES, availability, snapshot, commit };

@@ -14,8 +14,14 @@
 | 受控维护 Agent | `memoryCodexReviewPolicy.js`、`memoryCodexExecutor.js`、`memoryCodexBackend.js` | Codex CLI 只读提案适配器已实现；默认禁用；其他 Agent 按协议接入 |
 | 检索投影与聊天包 | `memorySearchProjection.js`、`memoryChatPacket.js`、`routes/recall.js` | 已移植；默认仍读 legacy |
 | 健康检查 | `routes/health.js` | 已移植；只返回模式和计数 |
+| 实时/回补车道与 current-only runner | `memoryProtocol.js`、`memoryPipeline.js`、v111–v112 | 已适配；开源任务粒度为 Claim，不复制私有 Fragment revision 触发器 |
+| Scribe 自适应停点 | `memoryScribe.js` | 已适配 60→30→15 与一小时冷却；失败不推进复合游标 |
+| 被拒 Claim 分类门禁 | `memoryClassification.js`、`memoryCodexExecutor.js` | 已适配为调用模型前零模型结束；开源实现没有 Fragment 正文回退 |
+| 旧语义旁路封锁 | `archivist.js`、`skillManager.js`、`cognitiveModel.js` | 已封锁仓库实际存在的旧分类、Skills、Insight、Flash、Pattern/Profile 与用户认知模型入口；Whisper 与私有版 cognitiveEvolution 模块不在公共仓库，未制造空实现 |
 | 生产 backfill 编排和成本治理 | 无 | 未移植；部署专属且可能包含生产状态 |
 | 私人角色 prompt、真实案例、请求/响应、数据库和日志 | 无 | 明确禁止公开 |
 | 宏观认知/直觉模块 | 无 | 阶段 6，尚未完成 |
 | 最终检索路由与完整消费者切换 | 仅有可回滚开关 | 阶段 7，尚未完成 |
 | 新自然消息到实际人格模型召回 | 无自动宣称 | 必须由具体部署完成最终验收 |
+
+参考部署当前是“正式维护链 running、聊天读侧 legacy”。这两种状态分别描述写入/审核和消费切换，不能合并成一个“现代管线已上线”的结论。

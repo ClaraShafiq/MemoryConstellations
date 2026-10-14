@@ -66,7 +66,7 @@ function derive(db, claimId, now = Date.now()) {
     return { state: 'grounded', reason: 'grounded', entityIds: [...new Set(supported.map(row => row.entity_id))] };
 }
 
-function reconcile(db, claimId, { now = Date.now() } = {}) {
+function reconcile(db, claimId, { now = Date.now(), priority = protocol.BACKFILL_JOB_PRIORITY } = {}) {
     const claim = protocol.readClaim(db, claimId);
     const fingerprint = evidenceFingerprint(db, claimId);
     const next = derive(db, claimId, now);
@@ -91,11 +91,11 @@ function reconcile(db, claimId, { now = Date.now() } = {}) {
     }
     if (next.state === 'grounded' || next.state === 'unassigned') {
         protocol.enqueueJob(db, { stage: 'episode_candidate', targetType: 'claim', targetId: claimId,
-            inputRevision: claim.revision, inputHash: claim.input_hash });
+            inputRevision: claim.revision, inputHash: claim.input_hash, priority });
     }
     if (next.state === 'grounded') {
         for (const entityId of next.entityIds) protocol.enqueueJob(db, { stage: 'profile_projection', targetType: 'entity',
-            targetId: entityId, inputRevision: claim.revision, inputHash: fingerprint });
+            targetId: entityId, inputRevision: claim.revision, inputHash: fingerprint, priority });
     }
     return { claim_id: claimId, state: next.state, reason_code: next.reason, entity_ids: next.entityIds };
 }

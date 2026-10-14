@@ -44,7 +44,7 @@ npm install
 DB_PATH=./memory_constellations.db node -e "require('dotenv').config(); require('./database').initDatabase()"
 ```
 
-以后启动时使用相同的 `DB_PATH`。迁移会从空库创建 legacy 表并应用目标仓库自己的 v104–v110；它不会读取外部生产数据库。
+以后启动时使用相同的 `DB_PATH`。迁移会从空库创建 legacy 表并应用目标仓库自己的 v104–v112；它不会读取外部生产数据库。
 
 ## 4. 运行聚焦测试
 
@@ -54,6 +54,7 @@ DB_PATH=./memory_constellations.db node -e "require('dotenv').config(); require(
 DB_PATH=/tmp/memory-constellations-test.sqlite \
 SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 npm run test:memory-modern
+npm run test:memory-lanes
 
 npm run check:docs
 npm run check:privacy
@@ -99,13 +100,17 @@ curl -X POST http://localhost:3000/api/recall \
 
 现代提取由 `pipeline.mode=modern` 控制。语义 job 默认仍因数据库设置 `memory_semantic_maintenance_mode=backfill` 暂停；聊天召回默认读 legacy。
 
+`memory_semantic_maintenance_mode=running` 只表示正式写入/审核链运行。在线 runner 只租用 priority 100 的实时任务；历史导入和显式回补留在低优先级车道，必须由明确的 backfill 操作消费。`memory_chat_read_mode=verified` 是另一个独立开关，表示聊天消费者改读现代发布物。不得用前者的运行状态代替后者的验收。
+
 切换前必须备份数据库和密钥、运行隔离库测试、配置结构化审查适配器、配置独立人格写作者，并完成虚构消息和一条新自然消息的端到端验收。结构化 Agent 不得获得 SQL 凭据。回滚时恢复 `backfill` 与 `legacy`；字段历史不会丢失。
 
 ## 9. Codex 与其他 agentic IDE
 
 Codex 或类似 IDE 可以作为部署助手。当前安装与登录步骤见 [Codex CLI](https://learn.chatgpt.com/docs/codex/cli) 和 [Codex IDE](https://learn.chatgpt.com/docs/codex/ide) 官方文档。
 
-运行期维护是另一种角色。`services/memoryCodexBackend.js` 提供 Codex CLI 只读提案适配器；`services/memoryCodexExecutor.js` 是唯一写入宿主，只接受 allowlist action。其他 Agent 只有实现相同协议后才能接入。不要提交登录目录、Cookie 或 token；实验性的 `codex app-server` 不作为生产依赖。
+运行期维护是另一种角色。`services/memoryCodexBackend.js` 提供 Codex CLI 只读提案适配器；`services/memoryCodexExecutor.js` 是唯一写入宿主，只接受 allowlist action。其他 Agent 只有实现相同协议后才能接入。不要提交登录目录、Cookie 或 token。
+
+模型选择不绑定某个供应商：Scribe 可以替换为任何能稳定遵守原子观察和精确引文合同的模型；客观分类、证据审核、星座维护可由支持工具调用的 Agent 承担；非空第一人称 Judgment 必须交给绑定当前角色 persona 的写作者。无论选什么模型，都必须保留证据闭集、版本/CAS、租约、唯一写入者和失败保旧边界。
 
 ## 10. 备份与恢复
 

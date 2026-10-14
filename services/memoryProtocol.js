@@ -6,6 +6,8 @@ const { createHash, randomUUID } = require('node:crypto');
 const { encryption } = require('../encryption');
 
 const SCOPE = 'default';
+const LIVE_JOB_PRIORITY = 100;
+const BACKFILL_JOB_PRIORITY = -1;
 const DOMAINS = Object.freeze([
     'user_statement', 'observed_activity', 'interaction', 'companion_opinion',
     'inference', 'fiction', 'third_party', 'legacy_unverified',
@@ -205,7 +207,8 @@ function createClaim(db, input) {
             claimId, source.message_id, source.message_fingerprint, encrypt(source.quote),
             source.speaker, source.source_time || null,
         );
-        enqueueJob(db, { stage: 'claim_review', targetType: 'claim', targetId: claimId, inputRevision: 1, inputHash });
+        enqueueJob(db, { stage: 'claim_review', targetType: 'claim', targetId: claimId, inputRevision: 1, inputHash,
+            priority: input.priority });
         return readClaim(db, claimId);
     })();
 }
@@ -252,7 +255,11 @@ function reviewClaim(db, claimId, decision) {
             decision.attribution, temporal, decision.reviewer, decision.reason || null);
         const after = readClaim(db, claimId);
         recordAction(db, 'claim', claimId, claim.revision, 'review', before, after, decision.reviewer);
-        enqueueJob(db, { stage: 'claim_duty', targetType: 'claim', targetId: claimId, inputRevision: claim.revision, inputHash: claim.input_hash });
+        const priority = resolveJobPriority(db, 'claim_review', claimId, claim.revision, claim.input_hash, decision.priority);
+        for (const stage of ['claim_duty', 'claim_classification']) enqueueJob(db, {
+            stage, targetType: 'claim', targetId: claimId, inputRevision: claim.revision,
+            inputHash: claim.input_hash, priority,
+        });
         return after;
     })();
 }
@@ -270,7 +277,9 @@ function setDuty(db, claimId, decision) {
         claimId, claim.revision, decision.duty, decision.contextScope || 'unknown',
         decision.basis || 'none', decision.state || 'supported', decision.reviewer,
     );
-    enqueueJob(db, { stage: 'evidence_resolution', targetType: 'claim', targetId: claimId, inputRevision: claim.revision, inputHash: claim.input_hash });
+    const priority = resolveJobPriority(db, 'claim_duty', claimId, claim.revision, claim.input_hash, decision.priority);
+    enqueueJob(db, { stage: 'evidence_resolution', targetType: 'claim', targetId: claimId,
+        inputRevision: claim.revision, inputHash: claim.input_hash, priority });
     return { claim_id: claimId, duty: decision.duty };
 }
 
@@ -286,22 +295,43 @@ function eligible(db, claimId) {
 
 function enqueueJob(db, job) {
     const now = Date.now();
-    db.prepare(`INSERT OR IGNORE INTO memory_jobs(
+    const priority = job.priority != null && Number.isFinite(Number(job.priority))
+        ? Number(job.priority) : BACKFILL_JOB_PRIORITY;
+    db.prepare(`INSERT INTO memory_jobs(
         stage,target_type,target_id,input_revision,input_hash,status,priority,created_at,updated_at)
-        VALUES(?,?,?,?,?,'queued',?,?,?)`).run(
+        VALUES(?,?,?,?,?,'queued',?,?,?)
+        ON CONFLICT(stage,target_type,target_id,input_revision,input_hash) DO UPDATE SET
+            priority=excluded.priority,updated_at=excluded.updated_at
+        WHERE memory_jobs.status IN('queued','retry','skipped')`).run(
         job.stage, job.targetType, job.targetId, job.inputRevision, job.inputHash,
-        Number(job.priority || 0), now, now,
+        priority, now, now,
     );
     return db.prepare(`SELECT * FROM memory_jobs WHERE stage=? AND target_type=? AND target_id=?
         AND input_revision=? AND input_hash=?`).get(job.stage, job.targetType, job.targetId, job.inputRevision, job.inputHash);
 }
 
-function leaseJobs(db, stage, { limit = 20, leaseMs = 120000, now = Date.now() } = {}) {
+function resolveJobPriority(db, stage, targetId, inputRevision, inputHash, explicit) {
+    if (explicit != null && Number.isFinite(Number(explicit))) return Number(explicit);
+    const row = db.prepare(`SELECT priority FROM memory_jobs WHERE stage=? AND target_id=?
+        AND input_revision=? AND input_hash=? ORDER BY id DESC LIMIT 1`).get(stage, targetId, inputRevision, inputHash);
+    if (row?.priority != null && Number.isFinite(Number(row.priority))) return Number(row.priority);
+    const upstream = db.prepare(`SELECT MAX(priority) priority FROM memory_jobs WHERE target_id=?
+        AND input_revision=? AND input_hash=?`).get(targetId, inputRevision, inputHash);
+    return upstream?.priority != null && Number.isFinite(Number(upstream.priority))
+        ? Number(upstream.priority) : BACKFILL_JOB_PRIORITY;
+}
+
+function leaseJobs(db, stage, { limit = 20, leaseMs = 120000, now = Date.now(), priorityBand = 'all' } = {}) {
+    if (!['all', 'current', 'backfill'].includes(priorityBand)) fail('memory_priority_band_invalid');
     const token = randomUUID();
     return db.transaction(() => {
+        const bandSql = priorityBand === 'current' ? 'AND priority>=?'
+            : priorityBand === 'backfill' ? 'AND priority<?' : '';
+        const bandParams = priorityBand === 'all' ? [] : [LIVE_JOB_PRIORITY];
         const rows = db.prepare(`SELECT * FROM memory_jobs WHERE stage=? AND status IN('queued','retry')
             AND next_attempt_at<=? AND (lease_until IS NULL OR lease_until<?)
-            ORDER BY priority DESC,created_at LIMIT ?`).all(stage, now, now, Math.max(1, Math.min(limit, 100)));
+            ${bandSql} ORDER BY priority DESC,created_at LIMIT ?`).all(
+            stage, now, now, ...bandParams, Math.max(1, Math.min(limit, 100)));
         const claim = db.prepare(`UPDATE memory_jobs SET status='running',lease_token=?,lease_until=?,attempts=attempts+1,updated_at=?
             WHERE id=? AND status IN('queued','retry') AND (lease_until IS NULL OR lease_until<?)`);
         return rows.filter(row => claim.run(token, now + leaseMs, now, row.id, now).changes === 1)
@@ -310,7 +340,7 @@ function leaseJobs(db, stage, { limit = 20, leaseMs = 120000, now = Date.now() }
 }
 
 function finishJob(db, job, outcome, errorCode = null) {
-    const allowed = ['done','retry','needs_review','failed','skipped'];
+    const allowed = ['done','no_change','retry','needs_review','failed','skipped'];
     if (!allowed.includes(outcome)) fail('memory_job_outcome_invalid');
     const changed = db.prepare(`UPDATE memory_jobs SET status=?,error_code=?,lease_token=NULL,lease_until=NULL,
         next_attempt_at=?,updated_at=? WHERE id=? AND status='running' AND lease_token=? AND input_hash=?`).run(
@@ -340,8 +370,8 @@ function tracked(db, stage, fn) {
 }
 
 module.exports = {
-    SCHEMA, SCOPE, DOMAINS, TEMPORAL_STATES, fail, hash, encrypt, decrypt,
+    SCHEMA, SCOPE, LIVE_JOB_PRIORITY, BACKFILL_JOB_PRIORITY, DOMAINS, TEMPORAL_STATES, fail, hash, encrypt, decrypt,
     messageText, messageFingerprint, captureSource, createClaim, readClaim,
-    sourcesCurrent, reviewClaim, setDuty, eligible, enqueueJob, leaseJobs,
+    sourcesCurrent, reviewClaim, setDuty, eligible, enqueueJob, resolveJobPriority, leaseJobs,
     finishJob, recordAction, tracked,
 };

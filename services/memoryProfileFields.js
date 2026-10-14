@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS memory_judgment_queue (
     updated_at INTEGER NOT NULL
 );
 `;
+const SOURCE_PRIORITY_SCHEMA = `ALTER TABLE memory_judgment_queue
+    ADD COLUMN source_priority INTEGER NOT NULL DEFAULT ${protocol.BACKFILL_JOB_PRIORITY};`;
 
 function assertProducer(field, value, meta) {
     if (!meta?.producer || !meta?.modelRole) protocol.fail('profile_actor_required');
@@ -91,29 +93,29 @@ function publish(db, entityId, field, draft, meta) {
             state='published',lease_token=NULL,lease_until=NULL,error_code=NULL,updated_at=excluded.updated_at`)
             .run(entityId, checked.input.input_hash, now);
         protocol.enqueueJob(db, { stage: 'search_projection', targetType: 'entity', targetId: entityId,
-            inputRevision: revision, inputHash: checked.input.input_hash });
+            inputRevision: revision, inputHash: checked.input.input_hash, priority: meta.priority });
         return { entity_id: entityId, field, revision, value: checked.value };
     })();
 }
 
-function enqueueJudgment(db, entityId) {
+function enqueueJudgment(db, entityId, { priority = protocol.BACKFILL_JOB_PRIORITY } = {}) {
     const input = projection.snapshot(db, entityId);
     const evidence = input.claims.filter(claim => ['companion_opinion', 'interaction', 'user_statement'].includes(claim.domain));
     const state = evidence.length ? 'queued' : 'insufficient_evidence';
-    db.prepare(`INSERT INTO memory_judgment_queue(entity_id,input_hash,state,updated_at) VALUES(?,?,?,?)
+    db.prepare(`INSERT INTO memory_judgment_queue(entity_id,input_hash,state,updated_at,source_priority) VALUES(?,?,?,?,?)
         ON CONFLICT(entity_id) DO UPDATE SET input_hash=excluded.input_hash,state=excluded.state,
-        lease_token=NULL,lease_until=NULL,error_code=NULL,updated_at=excluded.updated_at`).run(
-        entityId, input.input_hash, state, Date.now());
+        lease_token=NULL,lease_until=NULL,error_code=NULL,updated_at=excluded.updated_at,
+        source_priority=excluded.source_priority`).run(entityId, input.input_hash, state, Date.now(), priority);
     return { entity_id: entityId, input_hash: input.input_hash, state };
 }
 
-function enqueueFields(db, entityId) {
+function enqueueFields(db, entityId, { priority = protocol.BACKFILL_JOB_PRIORITY } = {}) {
     const input = projection.snapshot(db, entityId);
     protocol.enqueueJob(db, { stage: 'profile_facts', targetType: 'entity', targetId: entityId,
-        inputRevision: 1, inputHash: input.input_hash });
+        inputRevision: 1, inputHash: input.input_hash, priority });
     protocol.enqueueJob(db, { stage: 'profile_status', targetType: 'entity', targetId: entityId,
-        inputRevision: 1, inputHash: input.input_hash });
-    return { ...enqueueJudgment(db, entityId), objective_fields: ['facts', 'status'] };
+        inputRevision: 1, inputHash: input.input_hash, priority });
+    return { ...enqueueJudgment(db, entityId, { priority }), objective_fields: ['facts', 'status'] };
 }
 
-module.exports = { SCHEMA, OBJECTIVE_PRODUCERS, publish, enqueueJudgment, enqueueFields };
+module.exports = { SCHEMA, SOURCE_PRIORITY_SCHEMA, OBJECTIVE_PRODUCERS, publish, enqueueJudgment, enqueueFields };

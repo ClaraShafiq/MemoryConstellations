@@ -15,11 +15,16 @@ const { getDb } = require('../database');
 const { callLLM } = require('./llm');
 const { WORLD_CONTEXT } = require('./worldContext');
 const { USER, AI } = require('./nameResolver');
+const { config: memoryConfig } = require('./memoryConfig');
 
 const SKILL_LLM_CONFIG = 38;  // flash model, cheap — skill evaluation
 const SKILL_CREATE_MIN_OBSERVATIONS = 3;   // 至少3个数据点才创建
 const SKILL_EVAL_MIN_OBSERVATIONS = 5;      // 至少5个观察才自评估
 const SKILL_INITIAL_CONFIDENCE = 0.25;      // 初始置信度
+
+function modernProtocolEnabled() {
+    return memoryConfig.pipeline?.mode === 'modern';
+}
 
 // ═══════════════════════════════════════════════════════
 // Skill Creation — 机械筛选 + LLM 判断
@@ -35,6 +40,7 @@ const SKILL_INITIAL_CONFIDENCE = 0.25;      // 初始置信度
  * @returns {number|null} skill id or null if not created
  */
 async function createSkill(params) {
+    if (modernProtocolEnabled()) return null;
     const db = getDb();
     const { domain, sourcePattern, entityIds = [], triggerConfig = {}, analysisConfig = {} } = params;
 
@@ -125,6 +131,7 @@ ${sourcePattern}
  * @returns {number} number of skills triggered
  */
 async function triggerSkills(context = {}) {
+    if (modernProtocolEnabled()) return 0;
     const db = getDb();
     const skills = db.prepare(
         "SELECT * FROM archivist_skills WHERE status = 'active' AND type IN ('hypothesis','monitor') ORDER BY last_triggered_at ASC NULLS FIRST"
@@ -335,6 +342,9 @@ function _recordObservation(skillId, observation) {
  * @returns {{ evaluated: number, upgraded: number, falsified: number }}
  */
 async function evaluateSkills() {
+    if (modernProtocolEnabled()) {
+        return { evaluated: 0, upgraded: 0, falsified: 0, skipped: true, reason: 'macro_insight_not_published' };
+    }
     const db = getDb();
     const skills = db.prepare(`
         SELECT * FROM archivist_skills
@@ -479,6 +489,7 @@ async function _feedLessonToCorrection(skill, evalResult) {
  * Called during deep work cycle
  */
 async function scanForPatterns() {
+    if (modernProtocolEnabled()) return { scanned: 0, skipped: true, reason: 'macro_insight_not_published' };
     const db = getDb();
 
     // 1. Check for entities with fragment growth but low confidence

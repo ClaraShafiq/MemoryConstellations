@@ -29,7 +29,7 @@ flowchart LR
 
 | 层 | 唯一职责 |
 |---|---|
-| Scribe observation | 忠实拆出带精确引文的原子观察；不提前创建星座，不判断人格 |
+| Scribe observation | 由可替换的提取模型忠实拆出带精确引文的原子观察；不提前创建星座，不判断人格 |
 | Claim / evidence pool | 保存来源、主体归属、时间状态、支持度和阻断原因 |
 | Constellation | 管理可持续识别的实体、身份、别名、准入和关系 |
 | Episode | 将已准入 Claim 组织成一次有边界的叙事 |
@@ -46,7 +46,7 @@ Facts、Status、Judgment 是三个独立发布流：各自有版本、来源、
 | 角色 | 允许做什么 | 不允许做什么 |
 |---|---|---|
 | 确定性代码 | 指纹、精确引文、状态机、租约、CAS、写库、检索准入 | 猜测语义 |
-| 结构化轻量模型 / 维护 Agent | Claim 分类、证据组装、主体与时间判断、Facts、Status、候选身份与别名 | 任意 SQL；第一人称 Judgment |
+| 结构化轻量模型 / 维护 Agent | Claim 分类、证据组装、主体与时间判断、Facts、Status、候选身份与别名；也可协助管线工程 | 任意 SQL；第一人称 Judgment |
 | 第一人称人格模型 | 在证据充分且 persona 已绑定时生成非空 Judgment | 修改 Facts / Status；证据不足时硬写 |
 | 聊天主模型 | 消费有边界的记忆包并回复用户 | 直接绕过发布协议改正式记忆 |
 
@@ -65,7 +65,7 @@ npm run test:memory-modern
 npm start
 ```
 
-先用 `openssl rand -hex 32` 生成密钥并填写 `.env`。打开 `http://localhost:3000/memory.html`；健康检查为 `GET /api/health`。首次启动会从空库迁移到 schema v110，不需要任何生产数据。详细步骤见 [OSS_SETUP.md](OSS_SETUP.md)。
+先用 `openssl rand -hex 32` 生成密钥并填写 `.env`。打开 `http://localhost:3000/memory.html`；健康检查为 `GET /api/health`。首次启动会从空库迁移到 schema v112，不需要任何生产数据。详细步骤见 [OSS_SETUP.md](OSS_SETUP.md)。
 
 ## 两种部署路径
 
@@ -78,7 +78,7 @@ Agent 辅助部署：任何能读取仓库、修改文件并运行命令的 agen
 - 部署助手只需要操作仓库和命令。
 - 运行期维护者必须实现本项目的类型化 JSON action、证据校验、租约和 CAS 协议。
 - 当前仓库实现了 Codex CLI 的只读提案适配器与受控宿主；其他 Agent 可按接口接入，但不是开箱即用的原生支持。
-- `codex app-server` 官方仍标记为实验性且不建议生产使用；本项目不把它作为生产依赖。见 [官方说明](https://learn.chatgpt.com/docs/app-server)。
+- 具体产品的安装、登录、支持环境和额度可能变化；请以供应商官方资料为准。
 
 ## 验证
 
@@ -86,6 +86,7 @@ Agent 辅助部署：任何能读取仓库、修改文件并运行命令的 agen
 DB_PATH=/tmp/memory-constellations-test.sqlite \
 SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 npm run test:memory-modern
+npm run test:memory-lanes
 npm run check:docs
 npm run check:privacy
 curl http://localhost:3000/api/health
@@ -104,18 +105,18 @@ curl http://localhost:3000/api/health
 
 ## Current status / Roadmap
 
-阶段 1–5 的基础设施和受控写入架构已实现：原子观察、Claim 证据池、准入阻断原因、类型化审查动作、星座身份/别名、Episode、Saga、字段级 Profile 发布和检索投影均有公共实现与聚焦测试。
+阶段 1–5 的基础设施和受控写入架构已实现：原子观察、Claim 证据池、准入阻断原因、实时/回补车道、类型化审查动作、星座身份/别名、Episode、Saga、字段级 Profile 发布和检索投影均有公共实现与聚焦测试。
 
 但“实现”不等于“已完成生产切换”：
 
-- 参考部署仍保持 `memory_chat_read_mode=legacy`。
-- 语义维护仍为 `backfill` 暂停状态。
+- 参考部署的正式写入/审核链（maintenance）已经是 `running`，且在线 runner 只消费实时车道；历史回补不会被自然在线调度。
+- 参考部署的聊天读取（verified read mode）仍保持 `memory_chat_read_mode=legacy`。写入链 running 不等于聊天消费者已经切换。
 - 新 Profile 字段表已迁移，但还没有来自全新自然聊天链路的完整生产发布样本。
 - 单案验收中，证据不足时 Judgment 留空表现正确，但 Status 动作判断未通过。
 - 阶段 6（宏观认知/直觉模块）与阶段 7（最终检索路由和完整消费者切换）尚未完成。
 - 尚未完成“新真实消息 → 全链路写入 → 人格模型实际召回”的最终验收。
 
-默认配置因此继续使用 legacy / backfill。测试通过只证明协议回归，不代表真实生产链路已经验收。
+开源默认配置仍使用 legacy / backfill，避免安装即触发模型调用。参考部署的 running / legacy 状态与这个安全安装默认值并不矛盾。测试通过只证明协议回归，不代表真实生产链路已经验收。
 
 ## 文档
 

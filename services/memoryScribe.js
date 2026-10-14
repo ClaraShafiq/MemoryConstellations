@@ -6,6 +6,8 @@ const { WORLD_CONTEXT } = require('./worldContext');
 const protocol = require('./memoryProtocol');
 
 const CONTRACT = 'atomic-observation-v1';
+const MIN_RECOVERY_BATCH = 15;
+const FAILURE_BACKOFF_SECONDS = 60 * 60;
 
 function decodeMessage(row) {
     return { ...row, content: protocol.messageText(row) };
@@ -124,6 +126,7 @@ async function runBatch(messages, cursor, { extractEntries = extract } = {}) {
             protocol.createClaim(db, {
                 fragmentId: Number(fragmentResult.lastInsertRowid), claimKey: `scribe:${identity}`,
                 body: entry.body, domain: entry.domain, temporal: entry.temporal, sources: entry.sources,
+                priority: protocol.LIVE_JOB_PRIORITY,
             });
             written++;
         }
@@ -134,14 +137,35 @@ async function runBatch(messages, cursor, { extractEntries = extract } = {}) {
     return result;
 }
 
-async function checkAndRun() {
+function recoveryState(db, cursor, maxBatch) {
+    const row = db.prepare(`SELECT COUNT(*) failures,
+        COALESCE(CAST(strftime('%s','now') AS INTEGER)-CAST(strftime('%s',MAX(run_at)) AS INTEGER),0) age_seconds
+        FROM scribe_runs WHERE status='failed' AND processed_until=? AND COALESCE(processed_until_id,0)=?
+          AND id>COALESCE((SELECT MAX(id) FROM scribe_runs WHERE status='done'),0)`).get(cursor.at, cursor.id);
+    const failures = Number(row?.failures || 0);
+    const divisor = 2 ** Math.min(failures, 2);
+    return {
+        failures,
+        ageSeconds: Number(row?.age_seconds || 0),
+        batchLimit: Math.max(Math.min(MIN_RECOVERY_BATCH, maxBatch), Math.floor(maxBatch / divisor)),
+    };
+}
+
+async function checkAndRun(options = {}) {
     const db = getDb();
     const cursor = lastCursor(db);
-    const messages = pendingMessages(db, cursor, Number(process.env.MEMORY_SCRIBE_BATCH_SIZE || 60));
+    const configured = Math.max(1, Number(process.env.MEMORY_SCRIBE_BATCH_SIZE || 60));
+    const recovery = recoveryState(db, cursor, configured);
+    if (recovery.failures >= 3 && recovery.ageSeconds < FAILURE_BACKOFF_SECONDS && options.forceRetry !== true) {
+        return { outcome: 'skipped', reason: 'failure_backoff',
+            retry_after_seconds: FAILURE_BACKOFF_SECONDS - recovery.ageSeconds };
+    }
+    const messages = pendingMessages(db, cursor, recovery.batchLimit);
     if (!messages.length) return { outcome: 'no_change' };
     const min = Number(process.env.MEMORY_SCRIBE_MIN_MESSAGES || 1);
     if (messages.length < min) return { outcome: 'skipped', reason: 'below_minimum' };
     return protocol.tracked(db, 'scribe', () => runBatch(messages, cursor));
 }
 
-module.exports = { CONTRACT, lastCursor, pendingMessages, buildPrompt, parseEntries, validateEntry, runBatch, checkAndRun };
+module.exports = { CONTRACT, MIN_RECOVERY_BATCH, FAILURE_BACKOFF_SECONDS, lastCursor, pendingMessages,
+    buildPrompt, parseEntries, validateEntry, runBatch, recoveryState, checkAndRun };

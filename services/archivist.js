@@ -16,9 +16,21 @@ const { callLLM } = require('./llm');
 const { chromaDBOperation } = require('./memory');
 const { WORLD_CONTEXT } = require('./worldContext');
 const { getTagRouting } = require('./tagRouting');
-const { SKIP_NAMES, USER, AI } = require('./memoryConfig');
+const { config: memoryConfig, SKIP_NAMES, USER, AI } = require('./memoryConfig');
 const SKIP_PH = SKIP_NAMES.map(() => '?').join(', '); // SQL placeholder string for NOT IN clauses
 const { runUserModelCycle, matchEvidenceFromFragments, harvestFacts, processModelDecay, resolveExpiredStates, MIN_GAP_USER_MODEL } = require('./cognitiveModel');
+
+function modernProtocolEnabled() {
+    return memoryConfig.pipeline?.mode === 'modern';
+}
+
+function legacyOnly(fn, fallback = { skipped: true, reason: 'modern_memory_protocol' }) {
+    return function guardedLegacyEntry(...args) {
+        if (!modernProtocolEnabled()) return fn(...args);
+        const value = typeof fallback === 'function' ? fallback() : fallback;
+        return fn.constructor.name === 'AsyncFunction' ? Promise.resolve(value) : value;
+    };
+}
 
 // ═══════════════════════════════════════════════════════
 // Event Bus — Scribe 发事件，Archivist 监听
@@ -243,6 +255,7 @@ function setCompanionActive(active) {
 }
 
 async function start() {
+    if (modernProtocolEnabled()) return { skipped: true, reason: 'modern_memory_protocol' };
     if (agentState.running) return;
     agentState.running = true;
     agentState.companionLastActive = Date.now();
@@ -286,6 +299,7 @@ function getStatus() {
 
 async function onNewFragments({ fragmentIds, sourceMsgIds }) {
     if (!fragmentIds || fragmentIds.length === 0) return;
+    if (modernProtocolEnabled()) return { skipped: true, reason: 'modern_memory_protocol' };
 
     // Just set flags — Agent loop picks these up on next tick
     agentState.newFragmentsSinceLastTick += fragmentIds.length;
@@ -320,6 +334,7 @@ const FLASH_EW_THRESHOLD = 0.85;
 const FLASH_SPIKE_THRESHOLD = 0.92;
 
 function maybeTriggerFlashConsolidation(newFragmentIds, sourceMsgIds) {
+    if (modernProtocolEnabled()) return { skipped: true, reason: 'modern_memory_protocol' };
     if (!newFragmentIds || newFragmentIds.length < FLASH_MIN_COUNT) return;
 
     const db = getDb();
@@ -1411,6 +1426,7 @@ function buildLandscapeIndex() {
 // ═══════════════════════════════════════════════════════
 
 async function classifyFragments(opts = {}) {
+    if (modernProtocolEnabled()) return { classified: 0, skipped: true, reason: 'modern_memory_protocol' };
     const { lightweight = false } = opts;
     const db = getDb();
 
@@ -3958,6 +3974,7 @@ function refreshPatternStates() {
 
 // ── v5.9: maintainPatterns — 每6h，bigram匹配碎片到全部非archived pattern，含复活+漂移检测 ──
 async function maintainPatterns() {
+    if (modernProtocolEnabled()) return { maintained: 0, skipped: true, reason: 'macro_insight_not_published' };
     const db = getDb();
 
     // 1. 获取最近 observation + preference 碎片
@@ -4140,6 +4157,7 @@ async function clusterObservations() {
 const CATEGORY_CONSOLIDATE_MAX_FRAGS = 30;   // max fragments to fetch per category
 
 async function consolidateCategory() {
+    if (modernProtocolEnabled()) return { consolidated: 0, skipped: true, reason: 'modern_memory_protocol' };
     const db = getDb();
 
     // v5.3: 从 entity_profiles 星座读取（替代旧的 memory_ontology 知识树）
@@ -4421,6 +4439,7 @@ ${buildLandscapeIndex()}
 // ═══════════════════════════════════════════════════════
 
 async function regenerateEntityOverviews() {
+    if (modernProtocolEnabled()) return { updated: 0, skipped: true, reason: 'modern_memory_protocol' };
     const db = getDb();
 
     // Fetch all entities with fragments
@@ -5000,6 +5019,7 @@ const EN_STOPLIST = new Set([
 ]);
 
 async function scanContentForNewEntities() {
+    if (modernProtocolEnabled()) return { scanned: 0, skipped: true, reason: 'modern_memory_protocol' };
     const db = getDb();
 
     const knownNames = new Set(SKIP_NAMES);
@@ -5480,6 +5500,7 @@ ${fragmentTexts}
 // ═══════════════════════════════════════════════════════
 
 async function extractFragmentInsights(batchSize = INSIGHT_BATCH_MAX) {
+    if (modernProtocolEnabled()) return { extracted: 0, skipped: true, reason: 'macro_insight_not_published' };
     const db = getDb();
 
     const fragments = db.prepare(`
@@ -5926,9 +5947,9 @@ ${examplesBlock}
 
 module.exports = {
     // 按值标路由的聚合星座（测试/脚本要用）
-    ensureTagEntities,
-    linkTaggedFragment,
-    linkTaggedFragments,
+    ensureTagEntities: legacyOnly(ensureTagEntities),
+    linkTaggedFragment: legacyOnly(linkTaggedFragment),
+    linkTaggedFragments: legacyOnly(linkTaggedFragments),
     // 守卫规则（导出供回归测试复用；改名单/哨兵词表时先看 archivistGuards.test.js）
     isTimePhraseName,
     isPeriodPhraseName,
@@ -5958,31 +5979,31 @@ module.exports = {
     listTools,
 
     // Individual tools (direct access)
-    classifyFragments,
-    classifyFragmentBatch,
-    rematchFragmentsForSeeds,
-    semanticRematchForSeeds,
-    mergeDuplicateSeeds,
-    executeEntityMerge,
-    discoverRelatedEntities,
-    detectEmergentPlacesAndEvents,
-    refreshIntuitionStopwords,
+    classifyFragments: legacyOnly(classifyFragments),
+    classifyFragmentBatch: legacyOnly(classifyFragmentBatch),
+    rematchFragmentsForSeeds: legacyOnly(rematchFragmentsForSeeds),
+    semanticRematchForSeeds: legacyOnly(semanticRematchForSeeds),
+    mergeDuplicateSeeds: legacyOnly(mergeDuplicateSeeds),
+    executeEntityMerge: legacyOnly(executeEntityMerge),
+    discoverRelatedEntities: legacyOnly(discoverRelatedEntities),
+    detectEmergentPlacesAndEvents: legacyOnly(detectEmergentPlacesAndEvents),
+    refreshIntuitionStopwords: legacyOnly(refreshIntuitionStopwords),
     // 仅供独立脚本（classifyBacklog/growFromScratch）逐轮重置 tick 预算，服务进程不要调
     resetTickBudget: () => { agentState.tickLLMCalls = 0; },
-    graduateSeedsAndPrune,
+    graduateSeedsAndPrune: legacyOnly(graduateSeedsAndPrune),
 
     // User behavior patterns (v5.10)
-    maintainPatterns,
-    clusterObservations,
-    spotCheckClassifications,
-    reviewConstellationAfterClassification,
-    discoverEntityRelationships,
-    extractFragmentInsights,
-    regenerateEntityOverviews,
-    consolidateCategory,
-    scanContentForNewEntities,
+    maintainPatterns: legacyOnly(maintainPatterns),
+    clusterObservations: legacyOnly(clusterObservations),
+    spotCheckClassifications: legacyOnly(spotCheckClassifications),
+    reviewConstellationAfterClassification: legacyOnly(reviewConstellationAfterClassification),
+    discoverEntityRelationships: legacyOnly(discoverEntityRelationships),
+    extractFragmentInsights: legacyOnly(extractFragmentInsights),
+    regenerateEntityOverviews: legacyOnly(regenerateEntityOverviews),
+    consolidateCategory: legacyOnly(consolidateCategory),
+    scanContentForNewEntities: legacyOnly(scanContentForNewEntities),
 
     // 每日主角状态（cron 调用；entityProfile/lifecycle 靠「跳过主角」避让，别改成
     // 只在这儿写——两处都写会互相漂移）
-    generateDailyEntityStatus,
+    generateDailyEntityStatus: legacyOnly(generateDailyEntityStatus),
 };

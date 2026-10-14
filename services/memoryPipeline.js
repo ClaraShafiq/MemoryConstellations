@@ -7,8 +7,8 @@ const profiles = require('./memoryProfileFields');
 const search = require('./memorySearchProjection');
 const readMode = require('./memoryReadMode');
 
-function processStage(db, stage, handler, limit = 30) {
-    const jobs = protocol.leaseJobs(db, stage, { limit });
+function processStage(db, stage, handler, limit = 30, { priorityBand = 'current' } = {}) {
+    const jobs = protocol.leaseJobs(db, stage, { limit, priorityBand });
     const results = [];
     for (const job of jobs) {
         try {
@@ -26,9 +26,11 @@ function processStage(db, stage, handler, limit = 30) {
 async function tick(db) {
     if (readMode.semanticMode(db) !== 'running') return { state: 'paused', reason: 'backfill' };
     return protocol.tracked(db, 'deterministic_pipeline', () => {
-        const resolved = processStage(db, 'evidence_resolution', job => evidence.reconcile(db, job.target_id));
+        const resolved = processStage(db, 'evidence_resolution', job => evidence.reconcile(db, job.target_id,
+            { priority: job.priority }));
         const episodeCandidates = processStage(db, 'episode_candidate', job => candidates.create(db, [job.target_id]));
-        const profileQueue = processStage(db, 'profile_projection', job => profiles.enqueueFields(db, job.target_id));
+        const profileQueue = processStage(db, 'profile_projection', job => profiles.enqueueFields(db, job.target_id,
+            { priority: job.priority }));
         const projected = processStage(db, 'search_projection', job => {
             if (job.target_type === 'claim') return search.refreshClaim(db, job.target_id);
             if (job.target_type === 'memory') return search.refreshEpisode(db, job.target_id);

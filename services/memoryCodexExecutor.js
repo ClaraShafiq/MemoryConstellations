@@ -11,19 +11,19 @@ const constellation = require('./memoryConstellation');
 const episodes = require('./episodeWriter');
 const profileFields = require('./memoryProfileFields');
 
-function apply(db, proposed) {
+function apply(db, proposed, { priority = protocol.BACKFILL_JOB_PRIORITY } = {}) {
     const action = policy.validate(proposed);
     switch (action.type) {
-    case 'review_claim': return claimReview.commit(db, action);
-    case 'set_claim_duty': return claimDuty.commit(db, action);
-    case 'classify_claim': return classification.commit(db, action);
-    case 'review_node': return nodeReview.commit(db, action);
+    case 'review_claim': return claimReview.commit(db, { ...action, priority });
+    case 'set_claim_duty': return claimDuty.commit(db, { ...action, priority });
+    case 'classify_claim': return classification.commit(db, { ...action, priority });
+    case 'review_node': return nodeReview.commit(db, { ...action, priority });
     case 'resolve_identity': return identity.resolveIdentity(db, action);
     case 'admit_constellation': return constellation.admit(db, action);
     case 'publish_episode': return episodes.publish(db, action.candidateId, action.draft,
-        { producer: action.producer, reviewer: action.reviewer });
+        { producer: action.producer, reviewer: action.reviewer, priority });
     case 'publish_profile_field': return profileFields.publish(db, action.entityId, action.field, action.draft,
-        { producer: action.producer, modelRole: action.modelRole, personaHash: action.personaHash });
+        { producer: action.producer, modelRole: action.modelRole, personaHash: action.personaHash, priority });
     default: protocol.fail('codex_action_not_allowed');
     }
 }
@@ -46,16 +46,24 @@ function assertMatchesJob(job, action) {
     if (proposedHash !== undefined && proposedHash !== job.input_hash) protocol.fail('codex_job_hash_mismatch');
 }
 
-async function runLeased(db, stage, backend, { limit = 10 } = {}) {
+async function runLeased(db, stage, backend, { limit = 10, priorityBand = 'current' } = {}) {
     if (!backend || typeof backend.propose !== 'function') protocol.fail('codex_backend_invalid');
-    const jobs = protocol.leaseJobs(db, stage, { limit });
+    const jobs = protocol.leaseJobs(db, stage, { limit, priorityBand });
     const results = [];
     for (const job of jobs) {
         try {
+            if (stage === 'claim_classification') {
+                const available = classification.availability(db, job.target_id);
+                if (!available.available) {
+                    protocol.finishJob(db, job, 'no_change', available.reason);
+                    results.push({ job_id: job.id, status: 'no_change', error: available.reason });
+                    continue;
+                }
+            }
             const action = await backend.propose(job);
             policy.validate(action);
             assertMatchesJob(job, action);
-            const result = apply(db, action);
+            const result = apply(db, action, { priority: job.priority });
             protocol.finishJob(db, job, 'done');
             results.push({ job_id: job.id, status: 'done', result });
         } catch (error) {
