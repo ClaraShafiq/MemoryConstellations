@@ -25,6 +25,7 @@
 - `MEMORY_CODEX_ISOLATED_CWD`：Codex CLI 的隔离只读工作目录；启用适配器时必需。
 - `MEMORY_CODEX_EXECUTABLE`：可选 Codex 可执行文件名，默认 `codex`。
 - `MEMORY_LLM_NAME`：保存到 `api_configs` 的本地连接名。
+- `MEMORY_LLM_ALLOW_LOOPBACK`：默认关闭。开启后允许 `MEMORY_LLM_ENDPOINT` 指向**本机回环**的 OpenAI 兼容服务（例如 `http://127.0.0.1:7863/v1`），用于把记忆管线接到本机模型或本机反代。这是管理员在部署时写死的端点入口，不是允许对话内容或模型输出提供任意 URL：开启后仍只放行解析结果**全部**为回环地址（`127.0.0.0/8`、`::1`）的目标；`10/8`、`172.16/12`、`192.168/16`、`169.254/16`、`100.64/10` 等私网与保留段、以及非回环的明文 `http:` 继续拒绝；`localhost` 只有在解析结果全为回环时才放行，混入任一非回环地址即整体拒绝。
 - `HTTPS_PROXY / HTTP_PROXY / NO_PROXY`：可选出站代理设置。
 
 模型调用预算默认是 0。未显式设置正整数时，Scribe 或维护 Agent 的 live 调用会以 `memory_model_calls_disabled` 失败，不会偷偷使用额度。项目不提供固定价格或额度估计。

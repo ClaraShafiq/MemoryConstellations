@@ -134,6 +134,54 @@ async function main() {
         if (!url.pathname.includes('/v1beta/models/')) throw new Error(`路径拼接错误，得到: ${url.pathname}`);
     });
 
+    console.log('\n── 7. MEMORY_LLM_ALLOW_LOOPBACK: 只给回环开一扇窄门 ──');
+    const dnsModule = require('dns');
+    const realLookup = dnsModule.promises.lookup;
+    const withSwitch = async (value, fn) => {
+        const prev = process.env.MEMORY_LLM_ALLOW_LOOPBACK;
+        if (value === undefined) delete process.env.MEMORY_LLM_ALLOW_LOOPBACK;
+        else process.env.MEMORY_LLM_ALLOW_LOOPBACK = value;
+        try { await fn(); } finally {
+            if (prev === undefined) delete process.env.MEMORY_LLM_ALLOW_LOOPBACK;
+            else process.env.MEMORY_LLM_ALLOW_LOOPBACK = prev;
+            dnsModule.promises.lookup = realLookup;
+        }
+    };
+    const expectAllowed = async (endpoint) => { await validateEndpoint(endpoint); };
+
+    await withSwitch(undefined, async () => {
+        await asyncTest('关闭（未设置）：http://127.0.0.1 仍拒绝', () => expectBlocked('http://127.0.0.1:7863/v1'));
+        await asyncTest('关闭（未设置）：https://127.0.0.1 仍拒绝', () => expectBlocked('https://127.0.0.1:7863/v1'));
+    });
+    await withSwitch('0', async () => {
+        await asyncTest('关闭（=0）：https://127.0.0.1 仍拒绝', () => expectBlocked('https://127.0.0.1:7863/v1'));
+    });
+    await withSwitch('1', async () => {
+        await asyncTest('开启：http://127.0.0.1:7863/v1 通过', () => expectAllowed('http://127.0.0.1:7863/v1'));
+        await asyncTest('开启：https://127.0.0.1:7863/v1 通过', () => expectAllowed('https://127.0.0.1:7863/v1'));
+        await asyncTest('开启：http://[::1]:7863/v1 通过', () => expectAllowed('http://[::1]:7863/v1'));
+        await asyncTest('开启：http://127.5.5.5:7863/v1（127/8 内）通过', () => expectAllowed('http://127.5.5.5:7863/v1'));
+        await asyncTest('开启：https://example.com/v1（公网 HTTPS）维持通过', () => expectAllowed('https://example.com/v1'));
+        await asyncTest('开启：http://example.com/v1（公网 HTTP）仍拒绝', () => expectBlocked('http://example.com/v1'));
+        await asyncTest('开启：https://10.0.0.5/v1（私网）仍拒绝', () => expectBlocked('https://10.0.0.5/v1'));
+        await asyncTest('开启：http://169.254.169.254/latest（云元数据）仍拒绝', () => expectBlocked('http://169.254.169.254/latest'));
+        await asyncTest('开启：http://100.64.0.1/v1（CGNAT）仍拒绝', () => expectBlocked('http://100.64.0.1/v1'));
+        await asyncTest('开启：http://192.168.1.1/v1（私网）仍拒绝', () => expectBlocked('http://192.168.1.1/v1'));
+        await asyncTest('开启：带用户名密码的回环地址仍拒绝', () => expectBlocked('http://user:pass@127.0.0.1:7863/v1'));
+        await asyncTest('开启：localhost 解析全为回环 -> 通过', async () => {
+            dnsModule.promises.lookup = async () => ([{ address: '127.0.0.1', family: 4 }, { address: '::1', family: 6 }]);
+            await validateEndpoint('http://localhost:7863/v1');
+        });
+        await asyncTest('开启：localhost 混入非回环 -> 整体拒绝', () => {
+            dnsModule.promises.lookup = async () => ([{ address: '127.0.0.1', family: 4 }, { address: '10.0.0.5', family: 4 }]);
+            return expectBlocked('http://localhost:7863/v1');
+        });
+        await asyncTest('开启：localhost 只解析到公网地址 -> 明文 http 仍拒绝', () => {
+            dnsModule.promises.lookup = async () => ([{ address: '93.184.216.34', family: 4 }]);
+            return expectBlocked('http://localhost:7863/v1');
+        });
+    });
+
     // ── 结果 ──
     console.log(`\n══════════════════`);
     console.log(`通过: ${passed}  失败: ${failed}`);
