@@ -522,7 +522,9 @@ async function agentTick() {
             try {
                 // 按值标路由的那几颗也跟着补链（正常情况下提取时已经链好了，
                 // 这里兜住"星座后建/当初写库失败"的尾巴以及存量）
-                linkTaggedFragments(db);
+                // 这里没有函数级 db；零状态引导块中的 const db 只有块级作用域。
+                // 每轮现取正式连接，避免错误被 catch 吞掉后聚合补链静默停摆。
+                linkTaggedFragments(getDb());
                 return linkAggregateFragments();
             } catch (e) {
                 console.error('[Archivist] aggregateLink 失败:', e.message);

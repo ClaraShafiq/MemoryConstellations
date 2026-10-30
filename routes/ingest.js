@@ -65,7 +65,7 @@ function normalizeMessage(obj) {
     return { sender, content: String(content), timestamp: normalizeTime(obj.timestamp ?? obj.time) };
 }
 
-router.post('/messages', (req, res) => {
+function ingestMessages(req, res) {
     const db = getDb();
     const body = req.body;
 
@@ -92,19 +92,31 @@ router.post('/messages', (req, res) => {
         }
     }
 
-    // 默认 chat_id=1（若没有独立 chat 概念）
-    const chatId = body.chat_id ?? body.group_id ?? 1;
+    // 默认 chat_id=1（若没有独立 chat 概念）。批量格式没有顶层元数据，
+    // 因此同样落到默认会话；需要分会话时应按会话分别调用本接口。
+    const envelope = Array.isArray(body) ? {} : body;
+    const chatId = Number(envelope.chat_id ?? envelope.group_id ?? 1);
+    if (!Number.isSafeInteger(chatId) || chatId <= 0) {
+        return res.status(400).json({ success: false, error: 'chat_id 必须是正整数' });
+    }
 
     const insert = db.prepare(`
         INSERT INTO messages (chat_id, sender, content, timestamp, is_encrypted, message_type, status)
         VALUES (?, ?, ?, ?, 0, 'text', 'sent')
     `);
     const tx = db.transaction((list) => {
+        // 空库没有任何 chats 行。父会话和消息必须在同一事务建立，避免首次
+        // 接入触发 messages.chat_id 外键错误；已有会话名称不会被覆盖。
+        db.prepare('INSERT OR IGNORE INTO chats (id, name) VALUES (?, ?)')
+            .run(chatId, `Ingest ${chatId}`);
         for (const m of list) insert.run(chatId, m.sender, m.content, m.timestamp);
     });
     tx(msgs);
 
-    res.json({ success: true, count: msgs.length });
-});
+    return res.json({ success: true, count: msgs.length, chat_id: chatId });
+}
+
+router.post('/messages', ingestMessages);
 
 module.exports = router;
+module.exports.ingestMessages = ingestMessages;
