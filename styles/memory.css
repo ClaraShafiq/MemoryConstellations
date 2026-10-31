@@ -525,3 +525,67 @@ canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
     to { opacity: 1; transform: translateY(0); }
 }
 
+
+/* ── 显示控制（亮度 / 字号 / 面板拉伸） ── */
+:root { --ui-bright: 1.35; --pbody-fs: 11.5px; --panel-w: 272px; --panel-mh: 72vh; --pbody-mh: 150px; }
+#bg, #mc { filter: brightness(var(--ui-bright)); }
+#panel, #topbar, #archlog, #model-panel, #model-detail, #core-insight-panel { filter: brightness(var(--ui-bright)); }
+#panel {
+    width: var(--panel-w); max-height: var(--panel-mh);
+    resize: none; overflow: auto;
+    min-width: 240px; min-height: 180px; max-width: 78vw;
+}
+.p-body { font-size: var(--pbody-fs); max-height: var(--pbody-mh); }
+.p-cs { font-size: calc(var(--pbody-fs) - 1px); }
+#display-controls {
+    position: fixed; right: 20px; bottom: 16px; z-index: 60;
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 12px; border-radius: 999px;
+    background: rgba(4, 7, 22, 0.72); border: 1px solid rgba(100, 120, 255, 0.18);
+    backdrop-filter: blur(16px);
+    font-size: 10px; color: rgba(170, 190, 240, 0.75);
+    opacity: .55; transition: opacity .2s;
+}
+#display-controls:hover { opacity: 1; }
+#display-controls label { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+#display-controls input[type=range] { width: 78px; height: 2px; accent-color: #7c9dff; cursor: pointer; }
+#display-controls .dc-val { min-width: 30px; text-align: right; color: rgba(200, 215, 255, 0.7); font-variant-numeric: tabular-nums; }
+#display-controls button {
+    background: none; border: 1px solid rgba(100, 120, 255, 0.18); border-radius: 999px;
+    color: rgba(160, 180, 230, 0.7); cursor: pointer; font-size: 10px; padding: 2px 8px;
+}
+#display-controls button:hover { color: rgba(220, 235, 255, 0.9); border-color: rgba(120, 140, 255, 0.4); }
+
+/* ── 自定义拉伸角（右下 + 左下） ── */
+#panel { position: absolute; }
+.p-resize { position: absolute; bottom: 0; width: 16px; height: 16px; opacity: 0; transition: opacity .15s; z-index: 5; }
+#panel:hover .p-resize { opacity: .5; }
+.p-resize:hover { opacity: 1 !important; }
+.p-resize-br { right: 0; cursor: nwse-resize; border-right: 2px solid rgba(124, 157, 255, .55); border-bottom: 2px solid rgba(124, 157, 255, .55); border-radius: 0 0 13px 0; }
+.p-resize-bl { left: 0; cursor: nesw-resize; border-left: 2px solid rgba(124, 157, 255, .55); border-bottom: 2px solid rgba(124, 157, 255, .55); border-radius: 0 0 0 13px; }
+#panel.dragging { transition: none !important; }
+
+/* ── 字号滑块要覆盖卡片下半部分（共享记忆 / 标签 / 碎片列表 / 日期） ── */
+.p-cat, .p-bridges-label, .p-episodes-label, .p-tps-label, .p-tab-btn, .p-mag-label, .p-date, .tag, .p-bridge-status {
+    font-size: calc(var(--pbody-fs) * 0.78);
+}
+.p-title { font-size: calc(var(--pbody-fs) * 1.22); }
+.p-cs, .p-tp-item, .p-bridge-link, .mag-val, .p-episode-date, .p-episode-weight {
+    font-size: calc(var(--pbody-fs) * 0.91);
+}
+.p-episode-content, .p-tab-content, .p-bridge-note, .p-tps-list {
+    font-size: calc(var(--pbody-fs) * 0.96);
+}
+#panel .p-date { margin-top: 10px; }
+
+/* ── 观星手记 / 认知模型：也支持拖拽把手 + 字号跟随 ── */
+#archlog.collapsed { height: 38px !important; }
+#model-panel.collapsed { height: 38px !important; }
+#archlog, #model-panel { resize: none; }
+#archlog .p-resize, #model-panel .p-resize { opacity: 0; }
+#archlog:hover .p-resize, #model-panel:hover .p-resize { opacity: .5; }
+#archlog .p-resize:hover, #model-panel .p-resize:hover { opacity: 1; }
+.arch-title, .mp-title { font-size: calc(var(--pbody-fs) * 0.87); }
+.arch-sub, .arch-time, .arch-chevron, .mp-chevron, .mp-count { font-size: calc(var(--pbody-fs) * 0.78); }
+.arch-text, .mp-label { font-size: calc(var(--pbody-fs) * 0.96); }
+#arch-body, #mp-body { max-height: calc(100% - 38px); }
