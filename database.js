@@ -1285,6 +1285,14 @@ function initDatabase() {
         require('./services/memoryDerivedStateHealth').SCHEMA,
         require('./services/memoryLegacyFts').triggerSql(),
     ].join('\n'), { critical: true });
+    // retrieval_rank 是可重建的检索投影列：只影响 librarian 排序，
+    // 不参与碎片状态流转，也不写消息 / Observation / Claim / 来源链。
+    // 重建方式：删列或整表重插后跑 refreshRetrievalRanks(db, Date.now()) 即可复原。
+    runMigration(120, 'retrieval projection: fragment retrieval_rank', `
+        ALTER TABLE memory_fragments ADD COLUMN retrieval_rank REAL DEFAULT 1.0;
+        CREATE INDEX IF NOT EXISTS idx_mf_retrieval_rank
+            ON memory_fragments(retrieval_rank);
+    `, { critical: true });
 
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {
