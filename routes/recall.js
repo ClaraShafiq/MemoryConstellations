@@ -16,6 +16,7 @@ const { getDb } = require('../database');
 const readMode = require('../services/memoryReadMode');
 const verifiedSearch = require('../services/memorySearchProjection');
 const chatPacket = require('../services/memoryChatPacket');
+const verifiedVectors = require('../services/memoryVectorProjection');
 const router = express.Router();
 
 router.post('/recall', async (req, res) => {
@@ -29,7 +30,11 @@ router.post('/recall', async (req, res) => {
         const n = Math.min(parseInt(limit, 10) || 8, 20);
         const db = getDb();
         if (readMode.get(db) === 'verified') {
-            const packet = chatPacket.build(verifiedSearch.search(db, q, n));
+            const vectorRows = await verifiedVectors.query(db, q, n);
+            const sqlRows = verifiedSearch.search(db, q, n);
+            const seen = new Set();
+            const rows = [...vectorRows, ...sqlRows].filter(row => !seen.has(row.projection_key) && seen.add(row.projection_key));
+            const packet = chatPacket.build(rows.slice(0, n));
             return res.json({ success: true, query: q, count: packet.units.length,
                 formatted: chatPacket.format(packet), packet });
         }

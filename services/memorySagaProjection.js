@@ -53,6 +53,8 @@ function publish(db, decision) {
             decision.sagaKey, sagaId, JSON.stringify(ids), inputHash, revision, decision.producer, payload, now);
         db.prepare(`INSERT INTO memory_saga_publication_history(saga_key,saga_id,input_hash,revision,payload_json,published_at)
             VALUES(?,?,?,?,?,?)`).run(decision.sagaKey, sagaId, inputHash, revision, payload, now);
+        protocol.enqueueJob(db, { stage: 'search_projection', targetType: 'saga', targetId: sagaId,
+            inputRevision: revision, inputHash, priority: decision.priority });
         return { saga_id: sagaId, revision, input_hash: inputHash };
     })();
 }

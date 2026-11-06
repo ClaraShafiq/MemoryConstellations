@@ -1206,6 +1206,12 @@ function initDatabase() {
         require('./services/memorySagaProjection').SCHEMA,
         require('./services/memoryProfileFields').SCHEMA,
         require('./services/memorySearchProjection').SCHEMA,
+        require('./services/memoryClaimRecovery').SCHEMA,
+        require('./services/memoryConstellationDiscovery').SCHEMA,
+        require('./services/memoryCorrection').SCHEMA,
+        require('./services/memoryModelBudget').SCHEMA,
+        require('./services/memoryVectorProjection').SCHEMA,
+        require('./services/memoryReleaseGate').SCHEMA,
     ].join('\n');
     runMigration(109, 'modern memory: controlled pipeline tables', modernSchemas, { critical: true });
     runMigration(110, 'modern memory: safe rollout defaults', `
@@ -1220,6 +1226,60 @@ function initDatabase() {
     `, { critical: true });
     runMigration(112, 'modern memory: preserve Judgment source lane',
         require('./services/memoryProfileFields').SOURCE_PRIORITY_SCHEMA, { critical: true });
+    runMigration(113, 'modern memory: typed claim subject',
+        `ALTER TABLE memory_claims ADD COLUMN subject_kind TEXT NOT NULL DEFAULT 'unknown'
+            CHECK(subject_kind IN('user','assistant','third_party','unknown'));`, { critical: true });
+    runMigration(114, 'modern memory: claim lifecycle',
+        `ALTER TABLE memory_claims ADD COLUMN claim_status TEXT NOT NULL DEFAULT 'active'
+            CHECK(claim_status IN('active','superseded'));`, { critical: true });
+    runMigration(115, 'modern memory: protect reviewed claims',
+        `ALTER TABLE memory_claims ADD COLUMN manual_locked INTEGER NOT NULL DEFAULT 0
+            CHECK(manual_locked IN(0,1));`, { critical: true });
+    runMigration(116, 'modern memory: normalize source speaker roles', `
+        ALTER TABLE memory_claim_sources RENAME TO memory_claim_sources_legacy;
+        CREATE TABLE memory_claim_sources (
+            claim_id INTEGER NOT NULL REFERENCES memory_claims(id) ON DELETE CASCADE,
+            message_id INTEGER NOT NULL REFERENCES messages(id),
+            message_fingerprint TEXT NOT NULL,
+            quote_enc TEXT NOT NULL,
+            speaker TEXT NOT NULL CHECK(speaker IN('user','assistant')),
+            source_time TEXT,
+            PRIMARY KEY(claim_id,message_id)
+        );
+        INSERT INTO memory_claim_sources(claim_id,message_id,message_fingerprint,quote_enc,speaker,source_time)
+            SELECT claim_id,message_id,message_fingerprint,quote_enc,
+                CASE WHEN speaker='user' THEN 'user' ELSE 'assistant' END,source_time
+            FROM memory_claim_sources_legacy;
+        DROP TABLE memory_claim_sources_legacy;
+    `, { critical: true });
+    runMigration(117, 'modern memory: recovery discovery correction budget and release controls', [
+        require('./services/memoryClaimRecovery').SCHEMA,
+        require('./services/memoryConstellationDiscovery').SCHEMA,
+        require('./services/memoryCorrection').SCHEMA,
+        require('./services/memoryProfileFields').SCHEMA,
+        require('./services/memoryModelBudget').SCHEMA,
+        require('./services/memoryVectorProjection').SCHEMA,
+        require('./services/memoryReleaseGate').SCHEMA,
+    ].join('\n'), { critical: true });
+    runMigration(118, 'modern memory: include Saga in search projection', `
+        ALTER TABLE memory_search_projection RENAME TO memory_search_projection_legacy;
+        CREATE TABLE memory_search_projection (
+            projection_key TEXT PRIMARY KEY,
+            target_type TEXT NOT NULL CHECK(target_type IN('claim','episode','saga','profile')),
+            target_id INTEGER NOT NULL,
+            field TEXT,
+            revision INTEGER NOT NULL,
+            input_hash TEXT NOT NULL,
+            text_enc TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata_json)),
+            updated_at INTEGER NOT NULL
+        );
+        INSERT INTO memory_search_projection
+            SELECT * FROM memory_search_projection_legacy;
+        DROP TABLE memory_search_projection_legacy;
+        CREATE INDEX idx_memory_search_projection_target
+            ON memory_search_projection(target_type,target_id);
+    `, { critical: true });
 
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {

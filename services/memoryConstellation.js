@@ -34,6 +34,10 @@ function admit(db, decision) {
 }
 
 function addRelation(db, decision) {
+    protocol.fail('constellation_relationship_publication_not_implemented');
+    /* Formal same_as / part_of / related publication remains a roadmap item.
+       Keeping the legacy table does not make it an authoritative writer. */
+    /* c8 ignore next 14 */
     if (!Number.isSafeInteger(decision.fromEntityId) || !Number.isSafeInteger(decision.toEntityId)
         || decision.fromEntityId === decision.toEntityId || !Array.isArray(decision.claimIds) || !decision.claimIds.length)
         protocol.fail('constellation_relation_invalid');

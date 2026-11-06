@@ -13,7 +13,7 @@ function snapshot(db, claimId) {
 }
 
 function commit(db, decision) {
-    return protocol.reviewClaim(db, decision.claimId, {
+    const result = protocol.reviewClaim(db, decision.claimId, {
         expectedRevision: decision.expectedRevision,
         inputHash: decision.inputHash,
         support: decision.support,
@@ -23,6 +23,14 @@ function commit(db, decision) {
         reason: decision.reason,
         priority: decision.priority,
     });
+    if (decision.support === 'rejected' || decision.attribution === 'rejected') {
+        const priority = protocol.resolveJobPriority(db, 'claim_review', result.id,
+            result.revision, result.input_hash, decision.priority);
+        const recoveryInput = require('./memoryClaimRecovery').snapshot(db, result.fragment_id);
+        protocol.enqueueJob(db, { stage: 'claim_recovery', targetType: 'fragment', targetId: result.fragment_id,
+            inputRevision: result.revision, inputHash: recoveryInput.input_hash, priority });
+    }
+    return result;
 }
 
 module.exports = { snapshot, commit };

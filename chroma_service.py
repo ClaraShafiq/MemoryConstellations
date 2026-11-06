@@ -108,6 +108,10 @@ class QueryMultiItem(BaseModel):
 class QueryMultiRequest(BaseModel):
     queries: list  # list of QueryMultiItem dicts
 
+class GetBatchRequest(BaseModel):
+    ids: list[str]
+    collection_name: str | None = 'memories_collection'
+
 
 # ── 路由（逻辑完全从 chroma_helper.py 搬移）──
 
@@ -364,6 +368,15 @@ def api_query_multi(req: QueryMultiRequest):
         })
 
     return {'results': all_results}
+
+@app.post("/get_batch")
+def api_get_batch(req: GetBatchRequest):
+    col = get_collection(req.collection_name)
+    raw = col.get(ids=req.ids, include=['metadatas'])
+    return {'items': [
+        {'id': item_id, 'metadata': raw['metadatas'][index] or {}}
+        for index, item_id in enumerate(raw.get('ids', []))
+    ]}
 
 
 # ── 健康检查 ──

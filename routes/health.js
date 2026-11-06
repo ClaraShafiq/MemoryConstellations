@@ -3,6 +3,9 @@
 const express = require('express');
 const { getDb } = require('../database');
 const readMode = require('../services/memoryReadMode');
+const release = require('../services/memoryReleaseGate');
+const vectors = require('../services/memoryVectorProjection');
+const runner = require('../services/memoryMaintenanceRunner');
 const router = express.Router();
 
 router.get('/health', (_req, res) => {
@@ -14,8 +17,12 @@ router.get('/health', (_req, res) => {
             ['episodes', 'memory_episode_publications'], ['profile_fields', 'memory_profile_field_publications'],
             ['search_units', 'memory_search_projection'],
         ].map(([key, table]) => [key, db.prepare(`SELECT COUNT(*) count FROM ${table}`).get().count]));
+        const manifest = vectors.manifest(db);
         res.json({ ok: true, schema_version: version, chat_read_mode: readMode.get(db),
-            semantic_maintenance: readMode.semanticMode(db), counts });
+            requested_chat_read_mode: readMode.requested(db),
+            semantic_maintenance: readMode.semanticMode(db), maintenance_runner: runner.status(),
+            verified_release: { ready: release.isReady(db), vector_manifest_ready: manifest.ready,
+                expected: manifest.expected, done: manifest.done, blockers: manifest.blockers }, counts });
     } catch (error) {
         res.status(503).json({ ok: false, error: 'memory_pipeline_unavailable' });
     }

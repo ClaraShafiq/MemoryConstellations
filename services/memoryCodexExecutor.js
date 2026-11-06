@@ -10,6 +10,49 @@ const identity = require('./memoryConstellationIdentity');
 const constellation = require('./memoryConstellation');
 const episodes = require('./episodeWriter');
 const profileFields = require('./memoryProfileFields');
+const recovery = require('./memoryClaimRecovery');
+const discovery = require('./memoryConstellationDiscovery');
+const corrections = require('./memoryCorrection');
+
+function publicJob(job) {
+    return Object.freeze({
+        id: job.id, stage: job.stage, target_type: job.target_type,
+        target_id: job.target_id, input_revision: job.input_revision,
+        input_hash: job.input_hash, priority: job.priority,
+    });
+}
+
+function snapshotForJob(db, job) {
+    let input;
+    switch (job.stage) {
+    case 'claim_review': input = claimReview.snapshot(db, job.target_id); break;
+    case 'claim_duty': input = claimDuty.snapshot(db, job.target_id); break;
+    case 'claim_classification': input = classification.snapshot(db, job.target_id); break;
+    case 'claim_recovery': input = recovery.snapshot(db, job.target_id); break;
+    case 'constellation_discovery': input = discovery.snapshot(db, job.target_id); break;
+    case 'constellation_identity':
+    case 'constellation_admission': input = identity.snapshot(db, job.target_id); break;
+    case 'episode_publish': input = require('./memoryEpisodeProjection').snapshot(db, job.target_id); break;
+    case 'profile_facts':
+    case 'profile_status': {
+        const field = job.stage === 'profile_facts' ? 'facts' : 'status';
+        input = { field, projection: require('./memoryProfileProjection').snapshot(db, job.target_id),
+            current: profileFields.readField(db, job.target_id, field) };
+        break;
+    }
+    case 'correction_review': input = corrections.snapshot(db, job.target_id); break;
+    case 'node_review': {
+        const claim = protocol.readClaim(db, job.target_id);
+        const row = db.prepare('SELECT links_json FROM memory_claim_classification WHERE claim_id=?').get(claim.id);
+        const links = row ? JSON.parse(row.links_json) : [];
+        input = { claim, offered_links: links.map(link => ({ ...link,
+            entity: db.prepare('SELECT id,name,category,status FROM entity_profiles WHERE id=?').get(link.entity_id) || null })) };
+        break;
+    }
+    default: protocol.fail('codex_job_snapshot_not_supported');
+    }
+    return Object.freeze({ job: publicJob(job), input });
+}
 
 function apply(db, proposed, { priority = protocol.BACKFILL_JOB_PRIORITY } = {}) {
     const action = policy.validate(proposed);
@@ -24,6 +67,9 @@ function apply(db, proposed, { priority = protocol.BACKFILL_JOB_PRIORITY } = {})
         { producer: action.producer, reviewer: action.reviewer, priority });
     case 'publish_profile_field': return profileFields.publish(db, action.entityId, action.field, action.draft,
         { producer: action.producer, modelRole: action.modelRole, personaHash: action.personaHash, priority });
+    case 'recover_claims': return recovery.commit(db, { ...action, priority });
+    case 'discover_constellation': return discovery.commit(db, { ...action, priority });
+    case 'review_correction': return corrections.review(db, action);
     default: protocol.fail('codex_action_not_allowed');
     }
 }
@@ -34,9 +80,11 @@ function assertMatchesJob(job, action) {
         node_review: 'review_node', constellation_identity: 'resolve_identity',
         constellation_admission: 'admit_constellation', episode_publish: 'publish_episode',
         profile_facts: 'publish_profile_field', profile_status: 'publish_profile_field',
+        claim_recovery: 'recover_claims', constellation_discovery: 'discover_constellation',
+        correction_review: 'review_correction',
     }[job.stage];
     if (!expectedType || action.type !== expectedType) protocol.fail('codex_job_action_mismatch');
-    const targetId = action.claimId ?? action.candidateId ?? action.entityId;
+    const targetId = action.claimId ?? action.candidateId ?? action.entityId ?? action.fragmentId ?? action.receiptId;
     if (Number(targetId) !== Number(job.target_id)) protocol.fail('codex_job_target_mismatch');
     if (job.stage === 'profile_facts' && action.field !== 'facts') protocol.fail('codex_job_field_mismatch');
     if (job.stage === 'profile_status' && action.field !== 'status') protocol.fail('codex_job_field_mismatch');
@@ -52,15 +100,18 @@ async function runLeased(db, stage, backend, { limit = 10, priorityBand = 'curre
     const results = [];
     for (const job of jobs) {
         try {
-            if (stage === 'claim_classification') {
-                const available = classification.availability(db, job.target_id);
+            if (stage === 'claim_classification' || stage === 'claim_duty') {
+                const available = stage === 'claim_classification'
+                    ? classification.availability(db, job.target_id)
+                    : claimDuty.availability(db, job.target_id);
                 if (!available.available) {
                     protocol.finishJob(db, job, 'no_change', available.reason);
                     results.push({ job_id: job.id, status: 'no_change', error: available.reason });
                     continue;
                 }
             }
-            const action = await backend.propose(job);
+            require('./memoryModelBudget').reserve(db, 'maintenance');
+            const action = await backend.propose(snapshotForJob(db, job));
             policy.validate(action);
             assertMatchesJob(job, action);
             const result = apply(db, action, { priority: job.priority });
@@ -74,4 +125,4 @@ async function runLeased(db, stage, backend, { limit = 10, priorityBand = 'curre
     return results;
 }
 
-module.exports = { apply, assertMatchesJob, runLeased };
+module.exports = { apply, assertMatchesJob, snapshotForJob, runLeased };

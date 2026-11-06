@@ -1,0 +1,5 @@
+chromadb
+fastapi
+fastembed
+pydantic
+uvicorn

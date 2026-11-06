@@ -28,12 +28,18 @@ async function tick(db) {
     return protocol.tracked(db, 'deterministic_pipeline', () => {
         const resolved = processStage(db, 'evidence_resolution', job => evidence.reconcile(db, job.target_id,
             { priority: job.priority }));
-        const episodeCandidates = processStage(db, 'episode_candidate', job => candidates.create(db, [job.target_id]));
+        const episodeCandidates = processStage(db, 'episode_candidate', job => {
+            const candidate = candidates.create(db, [job.target_id]);
+            protocol.enqueueJob(db, { stage: 'episode_publish', targetType: 'candidate', targetId: candidate.id,
+                inputRevision: 1, inputHash: candidate.input_hash, priority: job.priority });
+            return candidate;
+        });
         const profileQueue = processStage(db, 'profile_projection', job => profiles.enqueueFields(db, job.target_id,
             { priority: job.priority }));
         const projected = processStage(db, 'search_projection', job => {
             if (job.target_type === 'claim') return search.refreshClaim(db, job.target_id);
             if (job.target_type === 'memory') return search.refreshEpisode(db, job.target_id);
+            if (job.target_type === 'saga') return search.refreshSaga(db, job.target_id);
             if (job.target_type === 'entity') return search.refreshProfile(db, job.target_id);
             protocol.fail('search_projection_target_invalid');
         });

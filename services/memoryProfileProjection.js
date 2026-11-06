@@ -2,10 +2,12 @@
 
 const protocol = require('./memoryProtocol');
 const evidence = require('./memoryEvidenceResolution');
+const { isCoreIdentity } = require('./memoryConfig');
 
 function snapshot(db, entityId) {
     const entity = db.prepare('SELECT * FROM entity_profiles WHERE id=?').get(entityId);
     if (!entity) protocol.fail('profile_entity_missing');
+    if (isCoreIdentity(entity)) protocol.fail('profile_core_identity_managed_separately');
     const claimRows = db.prepare(`SELECT c.id FROM memory_claims c
         JOIN memory_evidence_pool p ON p.claim_id=c.id
         WHERE p.state='grounded' AND EXISTS (
@@ -14,7 +16,7 @@ function snapshot(db, entityId) {
     const claims = claimRows.map(row => protocol.readClaim(db, row.id)).filter(claim => protocol.eligible(db, claim.id));
     const inputHash = protocol.hash({ entity: { id: entity.id, name: entity.name }, claims: claims.map(claim => ({
         id: claim.id, revision: claim.revision, input_hash: claim.input_hash,
-        temporal_state: claim.temporal_state,
+        temporal_state: claim.temporal_state, subject_kind: claim.subject_kind,
     })) });
     return { entity, claims, input_hash: inputHash };
 }

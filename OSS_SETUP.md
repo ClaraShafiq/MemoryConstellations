@@ -1,16 +1,12 @@
 # Memory Constellations 部署指南
 
-本文从干净 clone 开始。所有示例都是通用占位信息；不要把真实聊天、私人画像或生产数据库复制进仓库。
+本文从干净 clone 开始。示例使用占位配置和虚构消息；不要把现有聊天、私人画像或其他部署的数据库复制进来。
 
-## 1. 环境
+## 1. 环境与下载
 
-- Node.js 18 或更高版本
-- npm
-- 可编译 `better-sqlite3` 的系统工具链
-- OpenSSL（生成随机密钥）
-- 可选：Python 3 + ChromaDB，仅供 legacy 向量检索
-
-## 2. 下载与最小配置
+- Node.js 18+
+- npm、OpenSSL、可编译 `better-sqlite3` 的工具链
+- 可选：Python 3.10+，用于 legacy 向量检索及 verified 向量发布/核验
 
 ```bash
 git clone https://github.com/ClaraShafiq/MemoryConstellations.git
@@ -21,20 +17,28 @@ cp core-prompt.example.txt core-prompt.txt
 npm install
 ```
 
-用 `openssl rand -hex 32` 生成两个不同值。编辑 `.env`，设置 `SANCTUARY_ENCRYPTION_KEY`、`SESSION_SECRET`、`LOGIN_PASSWORD`，再填写实际使用的后台模型连接：
+## 2. 最小配置
+
+用 `openssl rand -hex 32` 生成两个不同值，分别作为加密密钥和 session secret。编辑 `.env`：
 
 ```dotenv
+SANCTUARY_ENCRYPTION_KEY=replace-with-64-hex-characters
+SESSION_SECRET=replace-with-a-different-random-value
+LOGIN_PASSWORD=replace-with-a-strong-password
+
 MEMORY_LLM_PROVIDER=openai_compatible
-MEMORY_LLM_ENDPOINT=https://your-provider.example/v1
-MEMORY_LLM_MODEL=your-model-id
+MEMORY_LLM_ENDPOINT=https://provider.example/v1
+MEMORY_LLM_MODEL=provider-model-id
 MEMORY_LLM_API_KEY=replace-me
+
+# 默认 0：所有 modern 模型调用 fail-closed。按自己的预算显式填写整数。
+MEMORY_SCRIBE_DAILY_CALL_LIMIT=0
+MEMORY_MAINTENANCE_DAILY_CALL_LIMIT=0
 ```
 
-这里的 provider 只描述请求协议，不代表项目推荐某个供应商。模型名、可用地区、价格和 API 行为必须以所选供应商当日官方资料为准。不要提交 `.env`；加密密钥丢失后无法解密旧数据。
+`MEMORY_LLM_PROVIDER` 只描述传输协议，目前接受 `gemini` 或 `openai_compatible`；不代表推荐某个供应商。模型名、价格、额度和 API 行为以供应商当日官方资料为准。
 
-如果部署环境需要出站代理，再设置 `HTTPS_PROXY` 或 `HTTP_PROXY`；未设置时程序直接连接 endpoint。不要照抄维护者机器上的代理地址。
-
-编辑 `memory_config.json`，至少替换 `user`、`ai`、`relationship` 与 `project` 下的占位内容。保持以下安全默认值：
+编辑 `memory_config.json` 中的 `user`、`ai`、`relationship`、`project`。先保留安全默认值：
 
 ```json
 {
@@ -47,32 +51,32 @@ MEMORY_LLM_API_KEY=replace-me
 }
 ```
 
-## 3. 初始化空库
+不要提交 `.env`、`memory_config.json`、`core-prompt.txt`、数据库、token 或登录目录。加密密钥丢失后无法解密原数据。
 
-数据库路径默认为项目根的 `sanctuary.db`，可用 `DB_PATH` 覆盖。推荐为此服务设置独立路径，并先把模型连接写入该数据库：
+## 3. 初始化空库
 
 ```bash
 DB_PATH=./memory_constellations.db npm run setup:llm
 ```
 
-该命令会初始化空库，把 API key 加密保存，并将这条连接设为默认值；Scribe 不依赖任何维护者私有的数据库编号。以后启动时使用相同的 `DB_PATH`。迁移会从空库创建 legacy 表并应用目标仓库自己的 v104–v112；它不会读取外部生产数据库。
+该命令从空库迁移到 schema v118，把 API key 加密写入指定数据库，并设置为默认模型连接。之后所有启动、维护和发布命令都要使用相同 `DB_PATH`。
 
 ## 4. 运行聚焦测试
 
-测试只在 `/tmp` 创建虚构数据：
+每条命令使用不同的临时库：
 
 ```bash
-DB_PATH=/tmp/memory-constellations-test.sqlite \
-SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
-npm run test:memory-modern
-npm run test:memory-lanes
+DB_PATH=/tmp/memory-modern.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-modern
+DB_PATH=/tmp/memory-lanes.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-lanes
+DB_PATH=/tmp/memory-extensions.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-extensions
 npm run test:llm-config
-
+npm run test:contracts
+npm run test:ssrf
 npm run check:docs
 npm run check:privacy
 ```
 
-若临时库已存在，换一个文件名，保证测试从空库开始。
+如果临时文件已经存在，请换一个文件名，确保验收从空库开始。
 
 ## 5. 首次启动与健康检查
 
@@ -80,52 +84,98 @@ npm run check:privacy
 DB_PATH=./memory_constellations.db npm start
 ```
 
-打开 `http://localhost:3000/memory.html`，使用 `.env` 的登录密码。另一个终端执行：
+打开 `http://127.0.0.1:3000/memory.html` 并使用登录密码。另一个终端运行：
 
 ```bash
-curl http://localhost:3000/api/health
+curl http://127.0.0.1:3000/api/health
 ```
 
-应返回 `ok: true`、schema 版本、两个 rollout 模式和各阶段计数，不包含记忆正文。初始模式应为 `legacy` 与 `backfill`。
+初始响应应包含 `ok: true`、`schema_version: 118`、`chat_read_mode: legacy`、`semantic_maintenance: backfill`、各层计数和 verified 向量 blocker。健康接口不返回记忆正文。
 
-## 6. 接入消息与召回
+## 6. 接入消息与纠错证据
 
 ```bash
-curl -X POST http://localhost:3000/api/messages \
+curl -X POST http://127.0.0.1:3000/api/messages \
   -H 'content-type: application/json' \
-  -d '{"sender":"user","content":"这是一次本地测试消息","timestamp":"2026-01-02 10:00:00","chat_id":1}'
+  -d '{"sender":"user","content":"River is testing a local notebook.","timestamp":"2026-11-01 10:00:00","chat_id":1}'
 
-curl -X POST http://localhost:3000/api/recall \
+curl -X POST http://127.0.0.1:3000/api/recall \
   -H 'content-type: application/json' \
-  -d '{"query":"本地测试","limit":8}'
+  -d '{"query":"local notebook","limit":8}'
 ```
 
-这些路由假设运行在 loopback 或受信内网。对公网开放前必须加反向代理鉴权、TLS、速率限制和请求大小限制。
+`POST /api/memory/corrections` 只提交带消息 ID 和逐字引文的纠错证据，不直接改 Profile。受控审查通过后才创建 correction Claim 并让旧 Claim 失效。
 
-## 7. 验证每一层
+上述三个集成路由默认按 loopback/受信内网设计。公网开放前必须增加反向代理鉴权、TLS、速率限制和请求大小限制。
 
-`npm run test:memory-modern` 覆盖 Scribe 精确引文、Claim 审查、证据池、星座归属、Episode、三字段 Profile、检索投影，以及 Judgment、CAS 和租约的越权阻断。
+## 7. 选择 modern 写入链
 
-运行时用 `/api/health` 观察计数。不要仅凭计数或测试宣布真实链路完成；最终验收需要一条全新自然消息实际走到聊天主模型召回。
+先把 `memory_config.json` 的 `pipeline.mode` 改为 `modern`，并重启 Node 服务。modern 模式会停用旧 Scribe、旧 Archivist、Skills、Insight、Flash 和认知融合写入旁路。
 
-## 8. 何时启用现代模式
+然后显式设置非零调用预算，并选择一种客观审查适配器：
 
-现代提取由 `pipeline.mode=modern` 控制。语义 job 默认仍因数据库设置 `memory_semantic_maintenance_mode=backfill` 暂停；聊天召回默认读 legacy。
+- 自定义适配器：实现 `propose({ job, input })`，只返回 allowlist JSON action；`input` 是宿主生成的解密后最小证据快照。
+- Codex CLI 适配器：设置 `ALLOW_MEMORY_CODEX_CLI=1` 和 `MEMORY_CODEX_ISOLATED_CWD`。它以只读模式运行；安装、登录和产品行为以 [OpenAI 官方文档](https://developers.openai.com/api/docs/guides/code-generation) 为准。
 
-`memory_semantic_maintenance_mode=running` 只表示正式写入/审核链运行。在线 runner 只租用 priority 100 的实时任务；历史导入和显式回补留在低优先级车道，必须由明确的 backfill 操作消费。`memory_chat_read_mode=verified` 是另一个独立开关，表示聊天消费者改读现代发布物。不得用前者的运行状态代替后者的验收。
+任何适配器都没有 SQL 或 shell 写库权限。Codex/客观维护者不会生成第一人称 Judgment；非空 Judgment 需要另接 persona writer，且必须消费 assistant 态度 Claim 或审核 seed。
 
-切换前必须备份数据库和密钥、运行隔离库测试、配置结构化审查适配器、配置独立人格写作者，并完成虚构消息和一条新自然消息的端到端验收。结构化 Agent 不得获得 SQL 凭据。回滚时恢复 `backfill` 与 `legacy`；字段历史不会丢失。
+确认配置后启动正式维护链：
 
-## 9. Codex 与其他 agentic IDE
+```bash
+DB_PATH=./memory_constellations.db npm run memory:maintenance:status
+DB_PATH=./memory_constellations.db npm run memory:maintenance:start
+```
 
-Codex 或类似 IDE 可以作为部署助手。当前安装与登录步骤见 [Codex CLI](https://learn.chatgpt.com/docs/codex/cli) 和 [Codex IDE](https://learn.chatgpt.com/docs/codex/ide) 官方文档。
+`maintenance: running` 只表示 Scribe、当前车道审查、确定性推进和向量同步可以运行。在线 runner 只租用 priority 100 的实时任务；历史回补不会被顺带消费。暂停命令：
 
-运行期维护是另一种角色。`services/memoryCodexBackend.js` 提供 Codex CLI 只读提案适配器；`services/memoryCodexExecutor.js` 是唯一写入宿主，只接受 allowlist action。其他 Agent 只有实现相同协议后才能接入。不要提交登录目录、Cookie 或 token。
+```bash
+DB_PATH=./memory_constellations.db npm run memory:maintenance:pause
+```
 
-模型选择不绑定某个供应商：Scribe 可以替换为任何能稳定遵守原子观察和精确引文合同的模型；客观分类、证据审核、星座维护可由支持工具调用的 Agent 承担；非空第一人称 Judgment 必须交给绑定当前角色 persona 的写作者。无论选什么模型，都必须保留证据闭集、版本/CAS、租约、唯一写入者和失败保旧边界。
+## 8. 可选向量服务与 verified 发布
+
+verified 读侧需要独立 Chroma collection 和远端元数据核验：
+
+```bash
+python3 -m venv venv
+venv/bin/pip install -r requirements-vector.txt
+venv/bin/python -m uvicorn chroma_service:app --host 127.0.0.1 --port 7707
+```
+
+若服务不在默认地址，设置 `CHROMA_URL`。保持它在 loopback 或受保护网络中。
+
+先让现代 SQL 发布物和向量回执追平，再检查：
+
+```bash
+DB_PATH=./memory_constellations.db npm run memory:release:status
+DB_PATH=./memory_constellations.db npm run memory:release:prepare
+```
+
+只有 `prepare` 返回 `ready: true` 且 blocker 为空，才执行：
+
+```bash
+DB_PATH=./memory_constellations.db npm run memory:release:activate
+```
+
+`requested_chat_read_mode=verified` 不保证有效读模式一定是 verified。投影 revision、source hash 或远端回执任一不一致时，消费者自动回落 legacy。显式回滚：
+
+```bash
+DB_PATH=./memory_constellations.db npm run memory:release:rollback
+```
+
+## 9. 最终验收
+
+不能用测试通过或表计数代替真实验收。至少确认：
+
+1. 一条全新自然消息被 Scribe 拆成正确的原子观察，逐字引文和主体无误。
+2. Claim Review、Duty、Classification、Node Review 和证据池完成；拒绝项可恢复而不读 Fragment 正文。
+3. 星座候选、Episode、Profile 字段和搜索投影按证据发布。
+4. Judgment 证据不足时不生成，失败时保留旧值。
+5. `release:prepare` 远端核验通过，激活后 `/api/recall` 返回带 revision/source hash 的现代聊天包。
+6. 实际聊天模型在新一轮对话中正确召回；随后演练 `release:rollback`。
 
 ## 10. 备份与恢复
 
-停止写入后备份数据库及加密密钥。启用 WAL 时，应使用 SQLite 在线备份接口或正确处理 `-wal`/`-shm`，不要在写入中只复制主文件。恢复演练至少检查 schema、解密、`/api/health` 和 legacy 回滚模式。
+暂停维护后，使用 SQLite 在线备份接口，或在确认无写入时完整保存数据库、`-wal`、`-shm` 和加密密钥。恢复演练至少验证迁移版本、解密、`/api/health`、legacy 回滚和一条召回。不要只复制正在写入的主数据库文件。
 
 继续阅读：[架构](docs/MEMORY_ARCHITECTURE.md) · [配置](docs/CONFIGURATION.md) · [迁移](docs/MIGRATIONS.md) · [测试](docs/TESTING.md) · [排障](docs/TROUBLESHOOTING.md)

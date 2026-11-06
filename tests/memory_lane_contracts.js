@@ -11,7 +11,7 @@ async function main() {
     const codex = require('../services/memoryCodexExecutor');
     const { config } = require('../services/memoryConfig');
 
-    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 112);
+    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 118);
     db.prepare("INSERT OR IGNORE INTO chats(id,name) VALUES(1,'Lane Contract Test')").run();
 
     const addMessage = (content, timestamp) => Number(db.prepare(`INSERT INTO messages(
@@ -19,7 +19,7 @@ async function main() {
         VALUES(1,'user',?,?,0,'text','sent',?)`).run(content, timestamp, timestamp).lastInsertRowid);
     const observe = async (messageId, body, quote, cursor) => {
         await scribe.runBatch(db.prepare('SELECT * FROM messages WHERE id=?').all(messageId), cursor, {
-            extractEntries: async () => [{ body, domain: 'user_statement', temporal_state: 'unknown',
+            extractEntries: async () => [{ body, subject: 'user', domain: 'user_statement', temporal_state: 'unknown',
                 evidence: [{ message_id: messageId, quote }] }],
         });
         return protocol.readClaim(db, db.prepare('SELECT id FROM memory_claims ORDER BY id DESC LIMIT 1').get().id);
@@ -106,7 +106,7 @@ async function main() {
     const legacyCognitive = await require('../services/cognitiveModel').runUserModelCycle();
     assert.equal(legacyCognitive.reason, 'modern_memory_protocol');
 
-    console.log(JSON.stringify({ ok: true, schema: 112, live_priority: protocol.LIVE_JOB_PRIORITY,
+    console.log(JSON.stringify({ ok: true, schema: 118, live_priority: protocol.LIVE_JOB_PRIORITY,
         backfill_priority: protocol.BACKFILL_JOB_PRIORITY, model_calls_for_rejected_claim: modelCalls }));
 }
 

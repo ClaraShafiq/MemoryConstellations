@@ -56,6 +56,19 @@ const SKIP_NAMES = [
     resolved.ai.name.toLowerCase(),
 ];
 
+function normalizeIdentityName(value) {
+    return String(value || '').normalize('NFKC').trim().toLocaleLowerCase();
+}
+
+function isCoreIdentity(value) {
+    const name = typeof value === 'object' && value ? value.name : value;
+    const normalized = normalizeIdentityName(name);
+    if (!normalized) return false;
+    return [resolved.user.name, resolved.ai.name]
+        .map(normalizeIdentityName)
+        .includes(normalized);
+}
+
 module.exports = {
     config: resolved,
     USER: resolved.user,
@@ -65,4 +78,6 @@ module.exports = {
     PROJ: resolved.project,
     UI: resolved.ui,
     resolveTemplate,
+    normalizeIdentityName,
+    isCoreIdentity,
 };

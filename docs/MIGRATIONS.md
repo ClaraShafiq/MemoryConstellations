@@ -1,17 +1,18 @@
 # 数据库迁移约定
 
-迁移集中在 `database.js`，通过 `schema_version` 顺序记录。目标仓库当前最新版本为 v112。
+迁移集中在 `database.js`，由 `schema_version` 顺序记录。公共仓库当前最新版本为 v118。
 
 ## 规则
 
-- 新迁移使用目标仓库的下一个版本，不复制其他部署的版本号。
-- 一个 `ALTER TABLE ... ADD COLUMN` 使用一个版本，避免首条重复导致后续语句被整体跳过。
-- 新表用 `CREATE TABLE IF NOT EXISTS`，索引用 `CREATE INDEX IF NOT EXISTS`。
-- 控制面表在 critical migration 中一次建齐；失败时中止启动。
-- 空库迁移是必须验收项，不能依赖生产数据库已有列。
-- 禁止迁移私人数据、真实聊天或模型原始请求。
+- 只使用公共仓库自己的连续版本，不复制其他部署的迁移编号。
+- 一个 `ALTER TABLE ... ADD COLUMN` 占一个版本，避免首条重复导致整组语句被跳过。
+- 新表使用 `CREATE TABLE IF NOT EXISTS`；重建带 CHECK 的表时先迁移数据，再重建索引。
+- 控制面迁移标记为 critical；失败就停止启动。
+- 空库迁移和从前一公共版本升级都必须使用虚构数据验收。
+- 迁移只创建协议、索引和安全默认值，不携带聊天、Profile、模型请求或生产状态。
+- schema 完成不代表 maintenance 或 verified 自动启用。
 
-## v104–v112
+## v104–v118
 
 | 版本 | 内容 |
 |---|---|
@@ -19,9 +20,23 @@
 | v105 | Scribe 复合游标 ID |
 | v106–v107 | frozen observation 合同与状态 |
 | v108 | 星座 scope |
-| v109 | Claim、证据池、星座、Episode、Saga、Profile、检索与 job 控制表 |
-| v110 | legacy/backfill 安全默认设置 |
-| v111 | 将未完成的旧任务归入回补车道，实时任务以 priority 100 为边界 |
-| v112 | Judgment 队列记录来源车道，保持客观层与人格写作隔离 |
+| v109 | Claim、证据池、星座、Episode、Saga、Profile、检索和 job 控制表 |
+| v110 | legacy 读取和 backfill 暂停的安全默认设置 |
+| v111 | 实时/回补 job 车道，以 priority 100 为实时边界 |
+| v112 | Judgment 队列保存来源车道 |
+| v113 | Claim 主体类型 `user/assistant/third_party/unknown` |
+| v114 | Claim active/superseded 生命周期 |
+| v115 | 人工锁定 Claim 的恢复保护 |
+| v116 | 来源 speaker 统一为 `user/assistant` |
+| v117 | Claim Recovery、星座发现、纠错收件箱、Judgment seed、模型预算、向量回执和 release gate |
+| v118 | 检索投影正式支持 Saga |
 
-空库验证命令见 [TESTING.md](TESTING.md)。
+## 空库验证
+
+```bash
+DB_PATH=/tmp/memory-empty.sqlite \
+SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+npm run test:memory-extensions
+```
+
+测试应打印 `schema: 118`。如果临时文件已经存在，请换新路径，不要在旧文件上误判“空库迁移通过”。完整测试矩阵见 [TESTING.md](TESTING.md)。

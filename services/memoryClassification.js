@@ -69,6 +69,9 @@ function commit(db, decision) {
         );
         const priority = protocol.resolveJobPriority(db, 'claim_classification', claim.id,
             claim.revision, claim.input_hash, decision.priority);
+        for (const link of links) protocol.enqueueJob(db, { stage: 'node_review',
+            targetType: `claim_node:${link.entity_id}:${link.role}`, targetId: claim.id,
+            inputRevision: claim.revision, inputHash: claim.input_hash, priority });
         protocol.enqueueJob(db, { stage: 'evidence_resolution', targetType: 'claim', targetId: claim.id,
             inputRevision: claim.revision, inputHash: claim.input_hash, priority });
     })();

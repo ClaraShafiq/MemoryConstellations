@@ -1,58 +1,59 @@
 # Memory Constellations · 记忆星图
 
-Memory Constellations 是面向长期 AI 伴侣的可审计记忆管线。它把聊天中的原始消息逐层转成有来源、可复核、可回滚的记忆，而不是把每个对话碎片直接宣布为事实。
+Memory Constellations 是一条面向长期 AI 关系的可审计记忆管线。它把原始消息逐层变成有精确来源、可复核、可回滚的记忆发布物；它不会把每段聊天直接宣布为事实。
 
-它不是通用文档 RAG、无需治理的“全自动真相机器”，也不是聊天主模型。模型可以提出结构化判断；只有宿主程序能在校验证据、版本、租约与 CAS 条件后写入正式表。
+它不是聊天主模型、通用文档 RAG，也不是“无需审查的全自动真相机器”。模型只能提出结构化判断，正式写入由宿主校验证据、闭集 schema、版本、租约与 CAS 条件后完成。
 
-## 数据如何流动
+## 数据流
 
 ```mermaid
 flowchart LR
   M[原始消息] --> S[Scribe 原子观察]
-  S --> E[待裁决证据池]
-  E --> C[Claim 审查<br/>主体·时间·证据]
-  C --> K[星座<br/>准入·身份·别名·关系]
-  C --> P[Episode]
+  S --> C[Claim<br/>主体·时间·来源]
+  C --> E[待裁决证据池]
+  E --> K[星座<br/>发现·身份·别名·准入]
+  E --> P[Episode]
   P --> G[Saga]
-  K --> F[Facts / Status]
+  K --> F[Facts / Status<br/>客观字段]
   K --> J[Judgment 证据队列<br/>第一人称人格写作]
-  P --> R[检索投影]
+  P --> R[SQL + 向量检索投影]
   G --> R
   F --> R
   J --> R
-  R --> Q[聊天注入包]
+  R --> Q[有界聊天注入包]
 ```
 
-暂时无法归属的 Claim 会留在证据池。只有输入、证据或相关上下文的指纹发生变化才重新开放裁决；原样重试会转为 deferred，避免循环消耗。
+暂时无法归属的 Claim 不会丢弃。它保留在证据池中；相同证据指纹的重复裁决进入 `deferred`，只有来源、审查结论或相关上下文变化才重开。被拒 Claim 进入精确消息恢复流程，不会退回派生 Fragment 正文重新猜测。
 
-## 每一层只做一件事
+## 层级边界
 
 | 层 | 唯一职责 |
 |---|---|
-| Scribe observation | 由可替换的提取模型忠实拆出带精确引文的原子观察；不提前创建星座，不判断人格 |
-| Claim / evidence pool | 保存来源、主体归属、时间状态、支持度和阻断原因 |
-| Constellation | 管理可持续识别的实体、身份、别名、准入和关系 |
-| Episode | 将已准入 Claim 组织成一次有边界的叙事 |
-| Saga | 把已发布 Episode 组织成长程叙事弧线 |
-| Facts | 可核对的客观字段 |
-| Status | 有时效的近期状态 |
-| Judgment | 伴侣人格的第一人称看法；独立证据门与版本边界 |
-| Search projection | 只投影已经发布、允许聊天消费的内容 |
+| Fragment / Scribe observation | 从消息拆出带逐字引文的原子观察，不提前创建星座或判断人格 |
+| Claim / evidence pool | 保存主体、来源、时间、支持度、职责、归属和阻断原因 |
+| Constellation | 维护有导航价值的实体身份、证据化别名和准入状态 |
+| Episode | 把合格 Claim 组织成一次有边界、可版本化的事件叙事 |
+| Saga | 只用已发布 Episode 组织长程叙事弧线 |
+| Profile | 分别发布 Facts、Status、Judgment，不把三者混成一段文本 |
+| Search projection | 把允许消费的发布物同步到 SQL 与带回执的向量投影 |
+| Macro Insight | 规划中的跨事件认知层；当前没有正式聊天路由验收 |
 
-Facts、Status、Judgment 是三个独立发布流：各自有版本、来源、历史和回滚边界。Facts 或 Status 的成功不能替代 Judgment；Judgment 生成失败、证据不足或解析失败都不得覆盖旧值。
+Facts、Status、Judgment 各自拥有 revision、来源、历史和回滚边界。Facts 以当前可信基线为底，只对新增或纠正 Claim 做 `add/revise/withdraw`；Status 只接收近期动态。Judgment 以稳定态度 facet 保存，支持 `add/reinforce/revise/withdraw`，但必须来自 assistant 原始态度证据或经审核的 seed。证据不足、调用失败或解析失败不得覆盖旧值。
 
-## 模型职责
+## 四类执行者
 
-| 角色 | 允许做什么 | 不允许做什么 |
+| 角色 | 可以做 | 不可以做 |
 |---|---|---|
-| 确定性代码 | 指纹、精确引文、状态机、租约、CAS、写库、检索准入 | 猜测语义 |
-| 结构化轻量模型 / 维护 Agent | Claim 分类、证据组装、主体与时间判断、Facts、Status、候选身份与别名；也可协助管线工程 | 任意 SQL；第一人称 Judgment |
-| 第一人称人格模型 | 在证据充分且 persona 已绑定时生成非空 Judgment | 修改 Facts / Status；证据不足时硬写 |
-| 聊天主模型 | 消费有边界的记忆包并回复用户 | 直接绕过发布协议改正式记忆 |
+| 确定性代码 | 指纹、逐字校验、状态机、预算、租约、CAS、正式写库、发布门禁 | 猜测语义 |
+| 结构化模型 / 维护 Agent | 客观分类、证据审核、Claim Recovery、星座维护、Facts、Status、管线工程 | 任意 SQL；第一人称 Judgment |
+| 人格写作者 | 在 persona 已绑定且态度证据充分时生成非空 Judgment | 修改 Facts/Status；用事实数量硬造态度 |
+| 聊天主模型 | 消费有界记忆包并回复 | 绕过发布协议直接改成品记忆 |
+
+Scribe、维护 Agent、人格写作者和聊天主模型都可替换供应商，但实现必须保留同样的精确证据、闭集输出、版本/CAS、租约和唯一写入者合同。项目不要求特定模型、会员计划或 IDE。
 
 ## 快速开始
 
-要求 Node.js 18+、npm 和 SQLite 构建依赖。Python/ChromaDB 只在启用旧版向量检索时需要。
+要求 Node.js 18+、npm、OpenSSL 和 `better-sqlite3` 构建工具链。verified 向量发布还需要可选的 Python/Chroma 服务。
 
 ```bash
 git clone https://github.com/ClaraShafiq/MemoryConstellations.git
@@ -61,72 +62,65 @@ cp .env.example .env
 cp memory_config.example.json memory_config.json
 cp core-prompt.example.txt core-prompt.txt
 npm install
-npm run setup:llm
-npm run test:memory-modern
-npm start
+DB_PATH=./memory_constellations.db npm run setup:llm
+DB_PATH=./memory_constellations.db npm start
 ```
 
-先用 `openssl rand -hex 32` 生成密钥并填写 `.env`，其中 `MEMORY_LLM_PROVIDER`、`MEMORY_LLM_ENDPOINT`、`MEMORY_LLM_MODEL` 和 `MEMORY_LLM_API_KEY` 必须来自你实际使用的渠道；再运行上面的模型配置命令。打开 `http://localhost:3000/memory.html`；健康检查为 `GET /api/health`。首次启动会从空库迁移到 schema v112，不需要任何生产数据。详细步骤见 [OSS_SETUP.md](OSS_SETUP.md)。
+先在 `.env` 填写两个不同的随机密钥、登录密码和你自己的模型 endpoint；再编辑公共角色配置。首次启动会从空库迁移到 schema v118，不需要任何外部生产数据。完整步骤见 [OSS_SETUP.md](OSS_SETUP.md)。
 
-## 两种部署路径
+## 手动部署与 Agent 辅助部署
 
-手动部署：按 [部署指南](OSS_SETUP.md) 完成依赖、密钥、公共角色配置、空库迁移、聚焦测试和健康检查。默认保持 legacy 读取及 backfill 暂停。
+手动部署按 [部署指南](OSS_SETUP.md) 完成配置、空库迁移、测试、健康检查和分阶段切换。
 
-Agent 辅助部署：任何能读取仓库、修改文件并运行命令的 agentic IDE 都可以协助部署。Codex 的安装与登录以 [Codex CLI](https://learn.chatgpt.com/docs/codex/cli) 和 [Codex IDE](https://learn.chatgpt.com/docs/codex/ide) 官方文档为准。
+任何能读取仓库、修改文件并运行命令的 agentic IDE 都可以帮助部署。Codex 的公开能力与使用入口以 [OpenAI 官方 Codex 文档](https://developers.openai.com/api/docs/guides/code-generation) 为准。部署助手与运行期维护者是两种角色：
 
-部署助手与运行期维护者不同：
+- 部署助手只操作仓库和命令。
+- 运行期维护者必须接收宿主生成的只读证据快照，并返回 `memoryCodexReviewPolicy.js` 允许的类型化 JSON action。
+- 当前仓库提供 Codex CLI 的只读提案适配器和受控执行宿主；其他 Agent 可按同一接口接入，但不代表已经原生支持所有 IDE。
+- 运行期 Agent 没有 SQL、shell 或第一人称 Judgment 写权限。
 
-- 部署助手只需要操作仓库和命令。
-- 运行期维护者必须实现本项目的类型化 JSON action、证据校验、租约和 CAS 协议。
-- 当前仓库实现了 Codex CLI 的只读提案适配器与受控宿主；其他 Agent 可按接口接入，但不是开箱即用的原生支持。
-- 具体产品的安装、登录、支持环境和额度可能变化；请以供应商官方资料为准。
-
-## 验证
+## 验证与启用
 
 ```bash
-DB_PATH=/tmp/memory-constellations-test.sqlite \
-SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
-npm run test:memory-modern
-npm run test:memory-lanes
+DB_PATH=/tmp/memory-modern.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-modern
+DB_PATH=/tmp/memory-lanes.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-lanes
+DB_PATH=/tmp/memory-extensions.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-extensions
 npm run test:llm-config
 npm run check:docs
 npm run check:privacy
-curl http://localhost:3000/api/health
+curl http://127.0.0.1:3000/api/health
 ```
 
-健康响应中的 `claims`、`evidence`、`episodes`、`profile_fields` 与 `search_units` 对应 Claim、证据池、Episode、三字段 Profile 和检索投影。测试细节见 [测试文档](docs/TESTING.md)。
+`pipeline.mode=modern` 只选择现代调度器；`npm run memory:maintenance:start` 才让正式写入/审核链运行。聊天消费者切到现代发布物是另一件事：必须先完成向量回执并执行 `memory:release:prepare`，确认无 blocker 后再执行 `memory:release:activate`。投影一旦变化或远端回执不匹配，有效读模式自动回退到 legacy；`memory:release:rollback` 可显式回滚。
 
-## 隐私、安全、备份和费用
+## 隐私、安全、备份与费用
 
-- 不提交 `.env`、数据库、聊天记录、人格私有 prompt、日志、Cookie 或登录目录。
-- 原始消息、Claim 证据和现代发布记录使用 AES-256-GCM 加密；旧 UI 的兼容投影仍沿用既有表约定。请离线备份密钥与 SQLite 数据库。
-- Agent 没有任意 SQL 写权限；`memoryCodexExecutor.js` 只接受 allowlist action。
-- 示例 fixture 是虚构、中性数据。
-- 模型费用由所选供应商、模型、缓存规则和实际 token 量决定；本项目不提供会迅速过期的固定报价。请按 [费用核算方法](docs/COST.md) 记录自己的实测用量，并以供应商当日官方资料结算。
-- 启用现代读侧前先备份并完成真实消息端到端验收。
+- 不提交 `.env`、数据库、WAL/SHM、聊天、画像、persona、日志、Cookie、登录目录或模型原始请求。
+- 消息证据和现代发布正文使用 AES-256-GCM；丢失密钥就无法恢复旧数据。备份 SQLite 时要使用在线备份或同时正确处理 WAL。
+- `/api/messages`、`/api/recall` 和 `/api/memory/corrections` 是本地/受信集成接口；公网部署必须另加 TLS、鉴权、速率和请求大小限制。
+- 模型调用预算默认是 0，即 modern 模型调用 fail-closed。部署者必须显式设置每日上限；本项目不写会过期的模型价格或额度。
+- 测试通过只证明协议回归。真实交付仍需一条全新自然消息实际贯穿写入、发布、verified 检索并被聊天模型召回。
 
-## Current status / Roadmap
+## 当前完成度与 Roadmap
 
-阶段 1–5 的基础设施和受控写入架构已实现：原子观察、Claim 证据池、准入阻断原因、实时/回补车道、类型化审查动作、星座身份/别名、Episode、Saga、字段级 Profile 发布和检索投影均有公共实现与聚焦测试。
+公共仓库已实现阶段 1–5 的通用控制面：原子观察与精确重放、Claim 恢复和证据池、星座发现/身份/别名/准入、Episode/Saga、Profile 三字段差量发布、纠错收件箱、实时/回补分车道、单飞/预算/租约、自愈、SQL/向量投影、来源指纹、verified 门禁与回滚。
 
-但“实现”不等于“已完成生产切换”：
+这不等于某个部署已经切换完成。默认仍是 `legacy` 读取、`backfill` 暂停和模型预算 0。以下能力仍未完成或未作公共生产承诺：
 
-- 参考部署的正式写入/审核链（maintenance）已经是 `running`，且在线 runner 只消费实时车道；历史回补不会被自然在线调度。
-- 参考部署的聊天读取（verified read mode）仍保持 `memory_chat_read_mode=legacy`。写入链 running 不等于聊天消费者已经切换。
-- 新 Profile 字段表已迁移，但还没有来自全新自然聊天链路的完整生产发布样本。
-- 单案验收中，证据不足时 Judgment 留空表现正确，但 Status 动作判断未通过。
-- 阶段 6（宏观认知/直觉模块）与阶段 7（最终检索路由和完整消费者切换）尚未完成。
-- 尚未完成“新真实消息 → 全链路写入 → 人格模型实际召回”的最终验收。
-
-开源默认配置仍使用 legacy / backfill，避免安装即触发模型调用。参考部署的 running / legacy 状态与这个安全安装默认值并不矛盾。测试通过只证明协议回归，不代表真实生产链路已经验收。
+- `same_as / part_of / related` 正式关系发布层；
+- Status 被替换前的重要经历沉降机制的完整验收；
+- Macro Insight 的真实聊天意图路由；
+- 全局 verified 聊天读取的最终生产切换；
+- 每周健康扫描、每月活跃 Profile 全景复核和 assistant 长期演化 PT；
+- 任一私有部署的旧数据全量回补和运营脚本。
 
 ## 文档
 
 - [部署指南](OSS_SETUP.md)
-- [记忆架构](docs/MEMORY_ARCHITECTURE.md)
-- [配置说明](docs/CONFIGURATION.md)
-- [数据库迁移约定](docs/MIGRATIONS.md)
-- [能力同步状态](docs/PORTING_STATUS.md)
+- [架构与协议](docs/MEMORY_ARCHITECTURE.md)
+- [配置](docs/CONFIGURATION.md)
+- [迁移](docs/MIGRATIONS.md)
+- [同步状态](docs/PORTING_STATUS.md)
 - [测试与验收](docs/TESTING.md)
 - [故障排查](docs/TROUBLESHOOTING.md)
 - [费用边界](docs/COST.md)

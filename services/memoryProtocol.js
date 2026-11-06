@@ -10,8 +10,9 @@ const LIVE_JOB_PRIORITY = 100;
 const BACKFILL_JOB_PRIORITY = -1;
 const DOMAINS = Object.freeze([
     'user_statement', 'observed_activity', 'interaction', 'companion_opinion',
-    'inference', 'fiction', 'third_party', 'legacy_unverified',
+    'inference', 'fiction', 'third_party', 'legacy_unverified', 'correction',
 ]);
+const SUBJECT_KINDS = Object.freeze(['user', 'assistant', 'third_party', 'unknown']);
 const TEMPORAL_STATES = Object.freeze([
     'unknown', 'planned', 'in_progress', 'completed', 'cancelled', 'historical',
 ]);
@@ -36,6 +37,9 @@ CREATE TABLE IF NOT EXISTS memory_claims (
     revision INTEGER NOT NULL DEFAULT 1,
     reviewer TEXT,
     verified_at TEXT,
+    subject_kind TEXT NOT NULL DEFAULT 'unknown' CHECK(subject_kind IN('user','assistant','third_party','unknown')),
+    claim_status TEXT NOT NULL DEFAULT 'active' CHECK(claim_status IN('active','superseded')),
+    manual_locked INTEGER NOT NULL DEFAULT 0 CHECK(manual_locked IN(0,1)),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -45,7 +49,7 @@ CREATE TABLE IF NOT EXISTS memory_claim_sources (
     message_id INTEGER NOT NULL REFERENCES messages(id),
     message_fingerprint TEXT NOT NULL,
     quote_enc TEXT NOT NULL,
-    speaker TEXT NOT NULL CHECK(speaker IN('user','companion')),
+    speaker TEXT NOT NULL CHECK(speaker IN('user','assistant')),
     source_time TEXT,
     PRIMARY KEY(claim_id, message_id)
 );
@@ -154,7 +158,7 @@ function messageFingerprint(row) {
 }
 
 function normalizeSpeaker(sender) {
-    return sender === 'user' ? 'user' : 'companion';
+    return sender === 'user' ? 'user' : 'assistant';
 }
 
 function captureSource(db, messageId, quote) {
@@ -168,11 +172,11 @@ function captureSource(db, messageId, quote) {
     };
 }
 
-function claimInput(body, domain, temporal, sources, subjectEntityId = null) {
+function claimInput(body, domain, temporal, sources, subjectEntityId = null, subjectKind = 'unknown') {
     return hash({ body, domain, temporal, sources: sources.map(source => ({
         message_id: source.message_id, message_fingerprint: source.message_fingerprint,
         quote: source.quote, speaker: source.speaker, source_time: source.source_time,
-    })), subject_entity_id: subjectEntityId });
+    })), subject_entity_id: subjectEntityId, subject_kind: subjectKind });
 }
 
 function createClaim(db, input) {
@@ -180,11 +184,14 @@ function createClaim(db, input) {
     if (!DOMAINS.includes(input.domain)) fail('memory_domain_invalid');
     if (!TEMPORAL_STATES.includes(input.temporal?.state || 'unknown')) fail('memory_temporal_invalid');
     if (!Array.isArray(input.sources) || input.sources.length === 0) fail('memory_sources_required');
+    const subjectKind = input.subjectKind || 'unknown';
+    if (!SUBJECT_KINDS.includes(subjectKind)) fail('memory_subject_kind_invalid');
     const fragment = db.prepare('SELECT id,status FROM memory_fragments WHERE id=?').get(input.fragmentId);
     if (!fragment) fail('memory_fragment_missing');
     const body = String(input.body || '').trim();
     if (!body) fail('memory_claim_body_required');
-    const inputHash = claimInput(body, input.domain, input.temporal || {}, input.sources, input.subjectEntityId || null);
+    const inputHash = claimInput(body, input.domain, input.temporal || {}, input.sources,
+        input.subjectEntityId || null, subjectKind);
     const key = input.claimKey || hash({ fragment_id: input.fragmentId, input_hash: inputHash });
     return db.transaction(() => {
         const existing = db.prepare('SELECT * FROM memory_claims WHERE claim_key=?').get(key);
@@ -194,11 +201,11 @@ function createClaim(db, input) {
         }
         const result = db.prepare(`INSERT INTO memory_claims(
             fragment_id,claim_key,scope,body_enc,domain,subject_entity_id,temporal_state,
-            event_from,event_until,time_precision,input_hash)
-            VALUES(?,?,'default',?,?,?,?,?,?,?,?)`).run(
+            event_from,event_until,time_precision,input_hash,subject_kind)
+            VALUES(?,?,'default',?,?,?,?,?,?,?,?,?)`).run(
             input.fragmentId, key, encrypt(body), input.domain, input.subjectEntityId || null,
             input.temporal?.state || 'unknown', input.temporal?.event_from || null,
-            input.temporal?.event_until || null, input.temporal?.precision || 'unknown', inputHash,
+            input.temporal?.event_until || null, input.temporal?.precision || 'unknown', inputHash, subjectKind,
         );
         const claimId = Number(result.lastInsertRowid);
         const insertSource = db.prepare(`INSERT INTO memory_claim_sources(
@@ -286,11 +293,27 @@ function setDuty(db, claimId, decision) {
 function eligible(db, claimId) {
     const claim = readClaim(db, claimId);
     const duty = db.prepare('SELECT * FROM memory_claim_duties WHERE claim_id=?').get(claimId);
-    return sourcesCurrent(db, claim)
+    return claim.claim_status !== 'superseded'
+        && sourcesCurrent(db, claim)
         && claim.source_state === 'supported'
         && claim.support_state === 'supported'
         && claim.attribution_state === 'supported'
         && duty?.state === 'supported' && duty.duty !== 'unresolved';
+}
+
+function supersedeClaim(db, claimId, { expectedRevision, inputHash, actor = 'host' } = {}) {
+    const claim = readClaim(db, claimId);
+    if (claim.manual_locked) fail('memory_claim_manual_locked');
+    if (Number(expectedRevision) !== Number(claim.revision) || inputHash !== claim.input_hash)
+        fail('memory_claim_cas_failed');
+    const changed = db.prepare(`UPDATE memory_claims SET claim_status='superseded',source_state='stale',
+        support_state='stale',attribution_state='stale',revision=revision+1,updated_at=CURRENT_TIMESTAMP
+        WHERE id=? AND revision=? AND input_hash=? AND claim_status='active'`).run(
+        claimId, claim.revision, claim.input_hash);
+    if (changed.changes !== 1) fail('memory_claim_cas_failed');
+    const after = readClaim(db, claimId);
+    recordAction(db, 'claim', claimId, after.revision, 'supersede', claim, after, actor);
+    return after;
 }
 
 function enqueueJob(db, job) {
@@ -325,6 +348,10 @@ function leaseJobs(db, stage, { limit = 20, leaseMs = 120000, now = Date.now(), 
     if (!['all', 'current', 'backfill'].includes(priorityBand)) fail('memory_priority_band_invalid');
     const token = randomUUID();
     return db.transaction(() => {
+        db.prepare(`UPDATE memory_jobs SET status=CASE WHEN attempts>=5 THEN 'needs_review' ELSE 'retry' END,
+            lease_token=NULL,lease_until=NULL,error_code='lease_expired',next_attempt_at=?,updated_at=?
+            WHERE stage=? AND status='running' AND lease_until IS NOT NULL AND lease_until<=?`)
+            .run(now + 60000, now, stage, now);
         const bandSql = priorityBand === 'current' ? 'AND priority>=?'
             : priorityBand === 'backfill' ? 'AND priority<?' : '';
         const bandParams = priorityBand === 'all' ? [] : [LIVE_JOB_PRIORITY];
@@ -370,8 +397,8 @@ function tracked(db, stage, fn) {
 }
 
 module.exports = {
-    SCHEMA, SCOPE, LIVE_JOB_PRIORITY, BACKFILL_JOB_PRIORITY, DOMAINS, TEMPORAL_STATES, fail, hash, encrypt, decrypt,
-    messageText, messageFingerprint, captureSource, createClaim, readClaim,
-    sourcesCurrent, reviewClaim, setDuty, eligible, enqueueJob, resolveJobPriority, leaseJobs,
+    SCHEMA, SCOPE, LIVE_JOB_PRIORITY, BACKFILL_JOB_PRIORITY, DOMAINS, SUBJECT_KINDS, TEMPORAL_STATES, fail, hash, encrypt, decrypt,
+    messageText, messageFingerprint, normalizeSpeaker, captureSource, createClaim, readClaim,
+    sourcesCurrent, reviewClaim, setDuty, eligible, supersedeClaim, enqueueJob, resolveJobPriority, leaseJobs,
     finishJob, recordAction, tracked,
 };

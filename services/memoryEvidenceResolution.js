@@ -40,6 +40,7 @@ function evidenceFingerprint(db, claimId) {
 
 function derive(db, claimId, now = Date.now()) {
     const claim = protocol.readClaim(db, claimId);
+    if (claim.claim_status === 'superseded') return { state: 'ineligible', reason: 'claim_superseded', entityIds: [] };
     if (!protocol.sourcesCurrent(db, claim)) return { state: 'ineligible', reason: 'source_changed', entityIds: [] };
     if (!protocol.eligible(db, claimId)) {
         const duty = db.prepare('SELECT state,duty FROM memory_claim_duties WHERE claim_id=?').get(claimId);
@@ -53,7 +54,8 @@ function derive(db, claimId, now = Date.now()) {
     if (classification.outcome === 'needs_resolution') {
         const previous = db.prepare('SELECT * FROM memory_evidence_pool WHERE claim_id=?').get(claimId);
         const fingerprint = evidenceFingerprint(db, claimId);
-        if (previous && previous.evidence_fingerprint === fingerprint && previous.next_review_at && now >= previous.next_review_at)
+        if (previous && previous.evidence_fingerprint === fingerprint
+            && ['needs_resolution', 'deferred'].includes(previous.state))
             return { state: 'deferred', reason: 'evidence_unchanged_after_review', entityIds: [] };
         return { state: 'needs_resolution', reason: 'ambiguous_assignment', entityIds: [] };
     }
@@ -73,7 +75,7 @@ function reconcile(db, claimId, { now = Date.now(), priority = protocol.BACKFILL
     const previous = db.prepare('SELECT * FROM memory_evidence_pool WHERE claim_id=?').get(claimId);
     const attempts = previous && previous.evidence_fingerprint === fingerprint && next.state === 'deferred'
         ? previous.attempts + 1 : previous?.attempts || 0;
-    const nextReviewAt = next.state === 'needs_resolution' ? now + 24 * 60 * 60 * 1000 : 0;
+    const nextReviewAt = 0;
     db.prepare(`INSERT INTO memory_evidence_pool(claim_id,claim_revision,input_hash,state,reason_code,
         entity_ids_json,attempts,evidence_fingerprint,next_review_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(claim_id) DO UPDATE SET claim_revision=excluded.claim_revision,input_hash=excluded.input_hash,
@@ -88,6 +90,10 @@ function reconcile(db, claimId, { now = Date.now(), priority = protocol.BACKFILL
             claim_id,from_state,to_state,reason_code,evidence_fingerprint,created_at) VALUES(?,?,?,?,?,?)`).run(
             claimId, previous?.state || null, next.state, next.reason, fingerprint, now,
         );
+    }
+    if (['grounded', 'unassigned', 'topic_only'].includes(next.state)) {
+        protocol.enqueueJob(db, { stage: 'constellation_discovery', targetType: 'claim', targetId: claimId,
+            inputRevision: claim.revision, inputHash: fingerprint, priority });
     }
     if (next.state === 'grounded' || next.state === 'unassigned') {
         protocol.enqueueJob(db, { stage: 'episode_candidate', targetType: 'claim', targetId: claimId,

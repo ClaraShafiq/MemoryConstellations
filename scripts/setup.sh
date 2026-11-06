@@ -54,7 +54,7 @@ echo ""
 if command -v python3 &> /dev/null; then
     echo "✅ Python3 $(python3 --version)"
 else
-    echo "ℹ️  Python3 未安装；只有启用 legacy 本地向量路径时才需要。"
+    echo "ℹ️  Python3 未安装；legacy 向量检索和 verified 向量发布/核验都需要可选向量服务。"
 fi
 
 # 5. Initialize database

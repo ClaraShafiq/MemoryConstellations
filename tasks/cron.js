@@ -35,7 +35,7 @@ function registerCronJobs() {
     } else {
         cron.schedule('*/2 * * * *', () => {
             const { getDb } = require('../database');
-            require('../services/memoryPipeline').tick(getDb()).catch(err => {
+            require('../services/memoryMaintenanceRunner').tick(getDb()).catch(err => {
                 console.error('[Cron] Modern memory pipeline error:', err.message);
             });
         }, TZ_OPT);
@@ -46,12 +46,14 @@ function registerCronJobs() {
     // 门槛（沉默 ≥20min + 积压 ≥60 条，或积压 ≥100 条）在 checkAndRunScribe 里面，
     // 这里只负责定期敲门。挂在自己的 cron 上、不要串进别的 tick——上游踩过：
     // 排在一串会 return 的闸门后面时，兜底那句「超过 N 小时也跑」可能永远轮不到执行。
-    cron.schedule('*/5 * * * *', () => {
-        require('../services/scribe').checkAndRunScribe().catch(err => {
-            console.error('[Cron] Scribe error:', err.message);
-        });
-    }, TZ_OPT);
-    console.log('[Cron] Scribe registered: every 5 minutes');
+    if (!modern) {
+        cron.schedule('*/5 * * * *', () => {
+            require('../services/scribe').checkAndRunScribe().catch(err => {
+                console.error('[Cron] Scribe error:', err.message);
+            });
+        }, TZ_OPT);
+        console.log('[Cron] Legacy Scribe registered: every 5 minutes');
+    }
 
     // ── 每日主角状态：写主角星座的「X月X日：…」日志行 ──
     // 主角不在 regenerateEntityOverviews 的扫描范围里（SKIP_NAMES），这一条是她

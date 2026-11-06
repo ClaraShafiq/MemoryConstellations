@@ -2,8 +2,9 @@
 
 const { getDb } = require('../database');
 const { callLLM } = require('./llm');
-const { WORLD_CONTEXT } = require('./worldContext');
+const { getWorldContext } = require('./worldContext');
 const protocol = require('./memoryProtocol');
+const subjects = require('./memoryConversationSubjects');
 
 const CONTRACT = 'atomic-observation-v1';
 const MIN_RECOVERY_BATCH = 15;
@@ -30,15 +31,16 @@ function pendingMessages(db, cursor, limit = 60) {
 function buildPrompt(messages) {
     const input = messages.map(message => ({
         message_id: message.id,
-        speaker: message.sender === 'user' ? 'user' : 'companion',
+        speaker: subjects.sourceSpeaker(message.sender),
         timestamp: message.timestamp,
         text: message.content,
     }));
     return {
-        system: `${WORLD_CONTEXT}\n\nYou are the Scribe. Extract only atomic observations directly supported by exact quotes.
+        system: `${getWorldContext('scribe')}\n\nYou are the Scribe. Extract only atomic observations directly supported by exact quotes.
 Do not decide constellation identity, admission, profile fields, personality, or relationships.
 Do not use prior memory. Do not merge independent claims.
-Return JSON only: {"entries":[{"body":"neutral atomic statement","domain":"user_statement|observed_activity|interaction|companion_opinion|inference|fiction|third_party","temporal_state":"unknown|planned|in_progress|completed|cancelled|historical","event_from":null,"event_until":null,"time_precision":"unknown|day","evidence":[{"message_id":1,"quote":"exact substring"}]}]}.
+Preserve who the observation is about. An assistant self-statement is not a user fact.
+Return JSON only: {"entries":[{"body":"neutral atomic statement","subject":"user|assistant|third_party|unknown","domain":"user_statement|observed_activity|interaction|companion_opinion|inference|fiction|third_party","temporal_state":"unknown|planned|in_progress|completed|cancelled|historical","event_from":null,"event_until":null,"time_precision":"unknown|day","evidence":[{"message_id":1,"quote":"exact substring"}]}]}.
 If evidence is insufficient, omit the entry.`,
         user: JSON.stringify({ contract: CONTRACT, messages: input }),
     };
@@ -66,12 +68,14 @@ function validateEntry(messageMap, entry) {
             message_id: message.id,
             message_fingerprint: protocol.messageFingerprint(message),
             quote: item.quote,
-            speaker: message.sender === 'user' ? 'user' : 'companion',
+            speaker: subjects.sourceSpeaker(message.sender),
             source_time: message.timestamp,
         };
     });
+    const subject = subjects.validateSubject(entry.subject || 'unknown', sources);
     return {
         body: entry.body.trim(), domain: entry.domain,
+        subject,
         temporal: {
             state: entry.temporal_state || 'unknown',
             event_from: entry.event_from || null,
@@ -83,17 +87,57 @@ function validateEntry(messageMap, entry) {
 }
 
 async function extract(messages) {
+    require('./memoryModelBudget').reserve(getDb(), 'scribe');
     const prompt = buildPrompt(messages);
     return parseEntries(await callLLM([{ role: 'user', parts: [{ text: prompt.user }] }], prompt.system, null, {
         temperature: 0, maxOutputTokens: 8192,
     }));
 }
 
+async function persist(messages, cursor, rawEntries, { advanceCursor = true } = {}) {
+    const db = getDb();
+    const decoded = messages.map(message => message.content && !message.content.startsWith('enc:') ? message : decodeMessage(message));
+    const messageMap = new Map(decoded.map(message => [Number(message.id), message]));
+    const entries = rawEntries.map(entry => validateEntry(messageMap, entry));
+    const finalMessage = decoded.at(-1);
+    const next = { at: finalMessage.picked_up_at || finalMessage.timestamp, id: Number(finalMessage.id) };
+    return db.transaction(() => {
+        let written = 0;
+        for (const entry of entries) {
+            const sourceIds = [...new Set(entry.sources.map(source => source.message_id))].sort((a, b) => a - b);
+            const identity = protocol.hash({ contract: CONTRACT, sources: entry.sources.map(source => ({
+                message_id: source.message_id, quote: source.quote,
+            })), body: entry.body, subject: entry.subject, domain: entry.domain, temporal: entry.temporal });
+            const existing = db.prepare('SELECT id FROM memory_claims WHERE claim_key=?').get(`scribe:${identity}`);
+            if (existing) continue;
+            const fragmentResult = db.prepare(`INSERT INTO memory_fragments(
+                type,entity,content,emotional_weight,source,source_date,status,source_msg_ids,
+                observation_json,observation_state,content_hash)
+                VALUES('observation','unassigned',?,0.5,'chat',?,'frozen',?,?,'frozen',?)`).run(
+                entry.body, entry.sources.map(source => source.source_time).filter(Boolean).sort().at(-1)?.slice(0, 10) || null,
+                JSON.stringify(sourceIds), JSON.stringify({ contract: CONTRACT, subject: entry.subject,
+                    domain: entry.domain, temporal: entry.temporal,
+                    evidence: entry.sources.map(source => ({ message_id: source.message_id, quote: source.quote,
+                        speaker: source.speaker, source_time: source.source_time })) }), identity,
+            );
+            protocol.createClaim(db, {
+                fragmentId: Number(fragmentResult.lastInsertRowid), claimKey: `scribe:${identity}`,
+                body: entry.body, subjectKind: entry.subject, domain: entry.domain, temporal: entry.temporal,
+                sources: entry.sources, priority: protocol.LIVE_JOB_PRIORITY,
+            });
+            written++;
+        }
+        if (advanceCursor) db.prepare(`INSERT INTO scribe_runs(processed_until,processed_until_id,messages_processed,fragments_written,status)
+            VALUES(?,?,?,?, 'done')`).run(next.at, next.id, decoded.length, written);
+        return { outcome: 'done', messages_processed: decoded.length, observations_written: written,
+            cursor: advanceCursor ? next : cursor, replay: !advanceCursor };
+    })();
+}
+
 async function runBatch(messages, cursor, { extractEntries = extract } = {}) {
     if (!Array.isArray(messages) || messages.length === 0) return { outcome: 'no_change' };
     const db = getDb();
     const decoded = messages.map(message => message.content && !message.content.startsWith('enc:') ? message : decodeMessage(message));
-    const messageMap = new Map(decoded.map(message => [Number(message.id), message]));
     let rawEntries;
     try {
         rawEntries = await extractEntries(decoded);
@@ -102,39 +146,21 @@ async function runBatch(messages, cursor, { extractEntries = extract } = {}) {
             VALUES(?,?,0,0,'failed')`).run(cursor.at, cursor.id);
         throw error;
     }
-    const entries = rawEntries.map(entry => validateEntry(messageMap, entry));
-    const finalMessage = decoded.at(-1);
-    const next = { at: finalMessage.picked_up_at || finalMessage.timestamp, id: Number(finalMessage.id) };
-    const result = db.transaction(() => {
-        let written = 0;
-        for (const entry of entries) {
-            const sourceIds = [...new Set(entry.sources.map(source => source.message_id))].sort((a, b) => a - b);
-            const identity = protocol.hash({ contract: CONTRACT, sources: entry.sources.map(source => ({
-                message_id: source.message_id, quote: source.quote,
-            })), body: entry.body, domain: entry.domain, temporal: entry.temporal });
-            const existing = db.prepare('SELECT id FROM memory_claims WHERE claim_key=?').get(`scribe:${identity}`);
-            if (existing) continue;
-            const fragmentResult = db.prepare(`INSERT INTO memory_fragments(
-                type,entity,content,emotional_weight,source,source_date,status,source_msg_ids,
-                observation_json,observation_state,content_hash)
-                VALUES('observation','unassigned',?,0.5,'chat',?,'frozen',?,?,'frozen',?)`).run(
-                entry.body, entry.sources.map(source => source.source_time).filter(Boolean).sort().at(-1)?.slice(0, 10) || null,
-                JSON.stringify(sourceIds), JSON.stringify({ contract: CONTRACT, domain: entry.domain, temporal: entry.temporal,
-                    evidence: entry.sources.map(source => ({ message_id: source.message_id, quote: source.quote,
-                        speaker: source.speaker, source_time: source.source_time })) }), identity,
-            );
-            protocol.createClaim(db, {
-                fragmentId: Number(fragmentResult.lastInsertRowid), claimKey: `scribe:${identity}`,
-                body: entry.body, domain: entry.domain, temporal: entry.temporal, sources: entry.sources,
-                priority: protocol.LIVE_JOB_PRIORITY,
-            });
-            written++;
-        }
-        db.prepare(`INSERT INTO scribe_runs(processed_until,processed_until_id,messages_processed,fragments_written,status)
-            VALUES(?,?,?,?, 'done')`).run(next.at, next.id, decoded.length, written);
-        return { outcome: 'done', messages_processed: decoded.length, observations_written: written, cursor: next };
-    })();
-    return result;
+    return persist(decoded, cursor, rawEntries, { advanceCursor: true });
+}
+
+async function replayMessages(messageIds, { extractEntries = extract } = {}) {
+    const ids = [...new Set((messageIds || []).map(Number))];
+    if (!ids.length || ids.length > 20 || ids.some(id => !Number.isSafeInteger(id) || id <= 0))
+        protocol.fail('scribe_replay_ids_invalid');
+    const db = getDb();
+    const marks = ids.map(() => '?').join(',');
+    const messages = db.prepare(`SELECT id,chat_id,sender,content,is_encrypted,timestamp,picked_up_at,status,message_type
+        FROM messages WHERE id IN(${marks}) AND status='sent' ORDER BY COALESCE(picked_up_at,timestamp),id`).all(...ids);
+    if (messages.length !== ids.length) protocol.fail('scribe_replay_message_missing');
+    const decoded = messages.map(decodeMessage);
+    const rawEntries = await extractEntries(decoded);
+    return persist(decoded, lastCursor(db), rawEntries, { advanceCursor: false });
 }
 
 function recoveryState(db, cursor, maxBatch) {
@@ -168,4 +194,4 @@ async function checkAndRun(options = {}) {
 }
 
 module.exports = { CONTRACT, MIN_RECOVERY_BATCH, FAILURE_BACKOFF_SECONDS, lastCursor, pendingMessages,
-    buildPrompt, parseEntries, validateEntry, runBatch, recoveryState, checkAndRun };
+    buildPrompt, parseEntries, validateEntry, persist, runBatch, replayMessages, recoveryState, checkAndRun };

@@ -2,6 +2,7 @@
 
 const protocol = require('./memoryProtocol');
 const resolution = require('./memoryEvidenceResolution');
+const { isCoreIdentity } = require('./memoryConfig');
 
 const CATEGORIES = Object.freeze(['person','pet','organization','place','event','consumed','hobby','project','object','term']);
 const SCHEMA = `
@@ -118,7 +119,7 @@ function resolveIdentity(db, decision) {
         return { outcome: decision.outcome, entity_id: null };
     }
     const name = String(decision.name || '').trim();
-    if (!name || !CATEGORIES.includes(decision.category)) protocol.fail('identity_invalid');
+    if (!name || isCoreIdentity(name) || !CATEGORIES.includes(decision.category)) protocol.fail('identity_invalid');
     const aliases = validateAliases(input.claims, decision.aliases || []);
     return db.transaction(() => {
         let entity = db.prepare(`SELECT id,name,aliases FROM entity_profiles
@@ -147,6 +148,8 @@ function resolveIdentity(db, decision) {
         if (changed.changes !== 1) protocol.fail('identity_cas_failed');
         protocol.recordAction(db, 'constellation_identity', entity.id, 1, 'resolve',
             { candidate_id: input.id }, { name, category: decision.category, aliases: aliases.map(alias => alias.value) }, decision.reviewer);
+        protocol.enqueueJob(db, { stage: 'constellation_admission', targetType: 'candidate', targetId: input.id,
+            inputRevision: 1, inputHash: input.input_hash, priority: decision.priority });
         return { outcome: 'identity', entity_id: entity.id, aliases_added: aliases.map(alias => alias.value) };
     })();
 }

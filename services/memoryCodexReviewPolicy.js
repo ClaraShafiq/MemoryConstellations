@@ -11,6 +11,9 @@ const ACTIONS = Object.freeze({
     admit_constellation: ['candidateId', 'outcome', 'basis', 'reviewer'],
     publish_episode: ['candidateId', 'draft', 'producer', 'reviewer'],
     publish_profile_field: ['entityId', 'field', 'draft', 'producer', 'modelRole'],
+    recover_claims: ['fragmentId', 'inputHash', 'outcome', 'reviewer'],
+    discover_constellation: ['claimId', 'expectedRevision', 'inputHash', 'outcome', 'name', 'category', 'basis', 'reviewer'],
+    review_correction: ['receiptId', 'inputHash', 'outcome', 'reviewer'],
 });
 
 function validate(action) {
@@ -18,7 +21,7 @@ function validate(action) {
     const required = ACTIONS[action.type];
     if (!required) protocol.fail('codex_action_not_allowed');
     for (const key of required) if (action[key] === undefined || action[key] === null) protocol.fail(`codex_action_missing_${key}`);
-    if (action.field === 'judgment' && String(action.draft?.value || '').trim()) protocol.fail('codex_judgment_forbidden');
+    if (action.field === 'judgment') protocol.fail('codex_judgment_forbidden');
     if ('sql' in action || 'command' in action || 'shell' in action) protocol.fail('codex_raw_execution_forbidden');
     return action;
 }
