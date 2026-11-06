@@ -65,6 +65,17 @@ DB_PATH=./memory_constellations.db npm run memory:release:activate
 DB_PATH=./memory_constellations.db npm run memory:release:rollback
 ```
 
+统一健康与确定性修复：
+
+```bash
+DB_PATH=./memory_constellations.db npm run memory:health:check
+DB_PATH=./memory_constellations.db npm run memory:health:verify
+DB_PATH=./memory_constellations.db npm run memory:health:repair
+DB_PATH=./memory_constellations.db npm run memory:health:repair -- --execute
+```
+
+`check` 不访问远端；`verify` 还检查 verified 专用向量 collection。修复默认 dry-run，执行模式只从正式发布物重建派生索引，不调用模型。requested=verified 但 release 不再 ready 时，读取会 blocked；不会自动降级到 legacy，必须显式 rollback。
+
 ## 模型与适配器合同
 
 Scribe 必须输出原子观察、合法主体、闭集 domain/时间状态和逐字引文。结构化维护者必须实现 `propose({ job, input })` 并返回 allowlist action。人格写作者必须独占非空第一人称 Judgment。聊天主模型只消费发布后的聊天包。

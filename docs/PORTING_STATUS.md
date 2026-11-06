@@ -18,7 +18,9 @@
 | 实时/回补车道、单飞、租约自愈 | 直接移植并泛化 | `memoryMaintenanceRunner.js`、`memoryProtocol.js` | 在线 runner current-only；过期租约有限重试 |
 | 调用预算 | 新增公共实现 | `memoryModelBudget.js` | 默认 0，按角色和 UTC 日 fail-closed |
 | SQL/向量投影与来源指纹 | 新增公共实现 | `memorySearchProjection.js`、`memoryVectorProjection.js` | 独立 collection、receipt、revision/source hash 远端核验 |
-| verified 发布与回滚 | 新增公共实现 | `memoryReleaseGate.js`、`memoryReadMode.js`、`scripts/memory_release.js` | manifest 变化自动降级 legacy |
+| verified 发布与回滚 | 新增公共实现 | `memoryReleaseGate.js`、`memoryReadMode.js`、`scripts/memory_release.js` | manifest 变化后 fail-closed；只允许显式 rollback 到 legacy |
+| 派生状态健康与确定性修复 | 新增公共实现 | `memoryDerivedStateHealth.js`、`memoryProjectionReconciler.js`、`scripts/memory_health.js` | 三态健康；权威发布物重建；远端缺失/陈旧/待删/多余向量核验 |
+| legacy FTS 一致性 | 适配旧公共实现 | `memoryLegacyFts.js`、`scripts/rebuild_fts.js` | 只索引 active Fragment；仅在 legacy 模式纳入权威健康检查 |
 | 可插拔角色上下文 | 泛化适配 | `worldContext.js` | 公共默认无私人 persona；部署方可注入 provider |
 | 旧语义旁路 fail-closed | 按公共仓库实际模块适配 | `archivist.js`、`skillManager.js`、`cognitiveModel.js`、`tasks/cron.js` | modern 模式不启动旧 writer；未制造不存在模块的假实现 |
 
@@ -36,7 +38,7 @@
 - Status 替换前的重要经历沉降完整验收；
 - Macro Insight 的真实聊天意图路由；
 - 全局 verified 读取的具体部署最终切换；
-- 每周健康扫描、每月 Profile 全景复核和 assistant 长期演化 PT；
+- 每周健康扫描的自动调度、每月 Profile 全景复核和 assistant 长期演化 PT；
 - 一条具体部署的“新自然消息 → 正式写入 → verified 检索 → 聊天模型实际召回”最终验收。
 
 公共仓库提供这些机制，不替任何部署宣称已经 running 或已经切读。`maintenance running` 与有效 `verified read mode` 必须分别核验。

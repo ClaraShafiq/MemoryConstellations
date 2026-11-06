@@ -3,6 +3,8 @@
 const protocol = require('./memoryProtocol');
 const vectors = require('./memoryVectorProjection');
 
+const PREPARE_TTL_MS = 15 * 60 * 1000;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_release_state (
     id INTEGER PRIMARY KEY CHECK(id=1),
@@ -14,6 +16,12 @@ CREATE TABLE IF NOT EXISTS memory_release_state (
 `;
 
 async function prepare(db, options = {}) {
+    const localBlockers = require('./memoryDerivedStateHealth').releaseBlockers(db, {
+        runnerActive: require('./memoryMaintenanceRunner').status().active,
+    });
+    if (localBlockers.length) {
+        return { ready: false, blockers: localBlockers, manifest_digest: vectors.manifest(db).digest };
+    }
     const remote = await vectors.verifyRemote(db, options);
     if (!remote.ready) return { ready: false, blockers: remote.blockers, manifest_digest: remote.digest };
     db.prepare(`INSERT INTO memory_release_state(id,manifest_digest,status,prepared_at,activated_at)
@@ -25,6 +33,7 @@ async function prepare(db, options = {}) {
 function isReady(db) {
     const row = db.prepare('SELECT * FROM memory_release_state WHERE id=1').get();
     if (!row || !['ready', 'activated'].includes(row.status)) return false;
+    if (row.status === 'ready' && Date.now() - Number(row.prepared_at) > PREPARE_TTL_MS) return false;
     try { return vectors.manifest(db).ready && vectors.manifest(db).digest === row.manifest_digest; }
     catch (_) { return false; }
 }
@@ -45,4 +54,4 @@ function rollback(db) {
     return { chat_read_mode: 'legacy' };
 }
 
-module.exports = { SCHEMA, prepare, isReady, activate, rollback };
+module.exports = { SCHEMA, PREPARE_TTL_MS, prepare, isReady, activate, rollback };

@@ -39,7 +39,7 @@ function vectorId(key) {
     return `verified_${protocol.hash(key).slice(0, 32)}`;
 }
 
-function schedule(db, key) {
+function schedule(db, key, { force = false } = {}) {
     ensureReady(db);
     const row = db.prepare('SELECT * FROM memory_search_projection WHERE projection_key=?').get(key);
     const current = db.prepare('SELECT * FROM memory_vector_projection WHERE projection_key=?').get(key);
@@ -47,7 +47,7 @@ function schedule(db, key) {
     const revision = Number(row?.revision || current.revision);
     const sourceHash = row?.input_hash || protocol.hash({ key, revision, deleted: true });
     const operation = row ? 'upsert' : 'delete';
-    if (current && current.revision === revision && current.source_hash === sourceHash
+    if (!force && current && current.revision === revision && current.source_hash === sourceHash
         && current.operation === operation && current.status === 'done') return current;
     db.prepare(`INSERT INTO memory_vector_projection(
         projection_key,vector_id,revision,source_hash,operation,status,attempts,updated_at)
@@ -135,18 +135,98 @@ function manifest(db) {
 
 async function verifyRemote(db, { transport = require('./memory').chromaDBOperation } = {}) {
     const state = manifest(db);
-    if (!state.ready) return { ready: false, digest: state.digest, blockers: state.blockers };
-    const upserts = state.rows.filter(row => row.operation === 'upsert');
-    const response = await transport('get_batch', { ids: upserts.map(row => row.vector_id), collection_name: COLLECTION });
-    const remote = new Map((response.items || []).map(item => [item.id, item.metadata || {}]));
-    const blockers = [];
-    for (const row of upserts) {
-        const metadata = remote.get(row.vector_id);
-        if (!metadata) blockers.push(`remote_missing:${row.projection_key}`);
-        else if (Number(metadata.revision) !== Number(row.revision) || metadata.source_hash !== row.source_hash
-            || metadata.projection_key !== row.projection_key) blockers.push(`remote_stale:${row.projection_key}`);
+    if (!state.ready) return { ready: false, status: 'drift', digest: state.digest,
+        blockers: state.blockers.length ? state.blockers : ['projection_empty'], details: {} };
+    try {
+        const upserts = state.rows.filter(row => row.operation === 'upsert');
+        const deletes = state.rows.filter(row => row.operation === 'delete');
+        const remote = new Map();
+        for (let i = 0; i < upserts.length; i += 100) {
+            const batch = upserts.slice(i, i + 100);
+            const response = await transport('get_batch', {
+                ids: batch.map(row => row.vector_id), collection_name: COLLECTION,
+            });
+            for (const item of response.items || []) remote.set(item.id, item.metadata || {});
+        }
+        if (deletes.length) {
+            for (let i = 0; i < deletes.length; i += 100) {
+                const response = await transport('get_batch', {
+                    ids: deletes.slice(i, i + 100).map(row => row.vector_id), collection_name: COLLECTION,
+                });
+                for (const item of response.items || []) remote.set(item.id, item.metadata || {});
+            }
+        }
+        const remoteIds = await listRemoteIds(transport, COLLECTION);
+        const expectedIds = new Set(upserts.map(row => row.vector_id));
+        const details = { missing: [], stale: [], delete_present: [], extra: [] };
+        for (const row of upserts) {
+            const metadata = remote.get(row.vector_id);
+            if (!metadata) details.missing.push(row.projection_key);
+            else if (Number(metadata.revision) !== Number(row.revision) || metadata.source_hash !== row.source_hash
+                || metadata.projection_key !== row.projection_key) details.stale.push(row.projection_key);
+        }
+        for (const row of deletes) if (remote.has(row.vector_id)) details.delete_present.push(row.projection_key);
+        for (const id of remoteIds) if (!expectedIds.has(id)) details.extra.push(id);
+        const blockers = [
+            ...details.missing.map(key => `remote_missing:${key}`),
+            ...details.stale.map(key => `remote_stale:${key}`),
+            ...details.delete_present.map(key => `remote_delete_pending:${key}`),
+            ...details.extra.map(id => `remote_extra:${id}`),
+        ];
+        return { ready: blockers.length === 0, status: blockers.length ? 'drift' : 'healthy',
+            digest: state.digest, blockers, details };
+    } catch (error) {
+        return { ready: false, status: 'unverifiable', digest: state.digest,
+            blockers: ['remote_unavailable'], error_code: String(error.code || error.message || 'remote_unavailable').slice(0, 80),
+            details: {} };
     }
-    return { ready: blockers.length === 0, digest: state.digest, blockers };
+}
+
+async function listRemoteIds(transport = require('./memory').chromaDBOperation, collectionName = COLLECTION,
+    { pageSize = 500, maxItems = 50000 } = {}) {
+    const ids = [];
+    let offset = 0;
+    while (true) {
+        const response = await transport('list_ids', { collection_name: collectionName, offset, limit: pageSize });
+        const page = Array.isArray(response.ids) ? response.ids.map(String) : [];
+        ids.push(...page);
+        const total = Number(response.total ?? ids.length);
+        if (total > maxItems || ids.length > maxItems) {
+            const error = new Error('remote_collection_too_large');
+            error.code = error.message;
+            throw error;
+        }
+        if (!page.length || ids.length >= total) break;
+        offset += page.length;
+    }
+    return ids;
+}
+
+async function repairRemote(db, { execute = false, transport = require('./memory').chromaDBOperation,
+    embed = require('./memory').getLocalEmbedding, limit = 256 } = {}) {
+    const before = await verifyRemote(db, { transport });
+    if (before.ready || before.status === 'unverifiable') {
+        return { execute, before, scheduled: 0, extras_deleted: 0, drained: 0, after: before };
+    }
+    const keys = new Set([
+        ...(before.details?.missing || []),
+        ...(before.details?.stale || []),
+        ...(before.details?.delete_present || []),
+    ]);
+    const extras = before.details?.extra || [];
+    if (!execute) {
+        return { execute, before, scheduled: keys.size, extras_deleted: extras.length, drained: 0, after: before };
+    }
+    for (const key of keys) schedule(db, key, { force: true });
+    let extrasDeleted = 0;
+    for (const id of extras) {
+        await transport('delete', { id, collection_name: COLLECTION });
+        extrasDeleted++;
+    }
+    const drained = await drain(db, { limit, transport, embed });
+    const after = await verifyRemote(db, { transport });
+    return { execute, before, scheduled: keys.size, extras_deleted: extrasDeleted,
+        drained: drained.done, after };
 }
 
 async function query(db, text, limit = 8, { transport = require('./memory').chromaDBOperation,
@@ -170,4 +250,5 @@ async function query(db, text, limit = 8, { transport = require('./memory').chro
     return rows;
 }
 
-module.exports = { COLLECTION, SCHEMA, ready, vectorId, schedule, drain, manifest, verifyRemote, query };
+module.exports = { COLLECTION, SCHEMA, ready, vectorId, schedule, drain, manifest, verifyRemote,
+    listRemoteIds, repairRemote, query };

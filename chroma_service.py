@@ -112,6 +112,11 @@ class GetBatchRequest(BaseModel):
     ids: list[str]
     collection_name: str | None = 'memories_collection'
 
+class ListIdsRequest(BaseModel):
+    collection_name: str | None = 'memories_collection'
+    offset: int = 0
+    limit: int = 500
+
 
 # ── 路由（逻辑完全从 chroma_helper.py 搬移）──
 
@@ -377,6 +382,15 @@ def api_get_batch(req: GetBatchRequest):
         {'id': item_id, 'metadata': raw['metadatas'][index] or {}}
         for index, item_id in enumerate(raw.get('ids', []))
     ]}
+
+@app.post("/list_ids")
+def api_list_ids(req: ListIdsRequest):
+    col = get_collection(req.collection_name)
+    total = col.count()
+    limit = max(1, min(int(req.limit), 1000))
+    offset = max(0, int(req.offset))
+    raw = col.get(limit=limit, offset=offset, include=[])
+    return {'ids': [str(item_id) for item_id in raw.get('ids', [])], 'total': total}
 
 
 # ── 健康检查 ──

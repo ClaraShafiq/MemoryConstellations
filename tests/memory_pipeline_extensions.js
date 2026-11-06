@@ -27,7 +27,7 @@ async function main() {
     const codex = require('../services/memoryCodexExecutor');
     const pipeline = require('../services/memoryPipeline');
 
-    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 118);
+    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 119);
     db.prepare("INSERT INTO chats(id,name) VALUES(1,'Fictional Pipeline Test')").run();
 
     let minute = 0;
@@ -219,6 +219,8 @@ async function main() {
         if (operation === 'delete') remote.delete(payload.id);
         if (operation === 'get_batch') return { items: payload.ids.filter(id => remote.has(id))
             .map(id => ({ id, metadata: remote.get(id) })) };
+        if (operation === 'list_ids') return { ids: [...remote.keys()].slice(payload.offset, payload.offset + payload.limit),
+            total: remote.size };
         return {};
     };
     const drained = await vectors.drain(db, { limit: 50, transport, embed: async () => [0.1, 0.2] });
@@ -234,7 +236,7 @@ async function main() {
         .get(`profile:${entityId}:facts`);
     search.put(db, factsProjection.projection_key, 'profile', entityId, 'facts', factsProjection.revision + 1,
         protocol.hash('changed publication'), 'River: changed publication', { field: 'facts' });
-    assert.equal(readMode.get(db), 'legacy');
+    assert.equal(readMode.get(db), 'blocked');
     release.rollback(db);
     assert.equal(readMode.requested(db), 'legacy');
 
@@ -277,7 +279,7 @@ async function main() {
     assert.equal(expired.status, 'retry');
     assert.equal(expired.error_code, 'lease_expired');
 
-    console.log(JSON.stringify({ ok: true, schema: 118, recovered_claims: recovered.claim_ids.length,
+    console.log(JSON.stringify({ ok: true, schema: 119, recovered_claims: recovered.claim_ids.length,
         facts_revision: revisedFacts.revision, vector_receipts: vectors.manifest(db).rows.length }));
 }
 

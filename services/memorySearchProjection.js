@@ -40,6 +40,10 @@ function remove(db, key) {
 }
 
 function refreshClaim(db, claimId) {
+    if (!db.prepare('SELECT 1 FROM memory_claims WHERE id=?').get(claimId)) {
+        remove(db, `claim:${claimId}`);
+        return false;
+    }
     const claim = protocol.readClaim(db, claimId);
     if (!policy.readableClaim(db, claimId)) {
         remove(db, `claim:${claimId}`);
@@ -65,7 +69,10 @@ function refreshSaga(db, sagaId) {
 function refreshEpisode(db, memoryId) {
     const row = db.prepare(`SELECT p.*,m.title,m.content,m.status FROM memory_episode_publications p
         JOIN memories m ON m.id=p.memory_id WHERE p.memory_id=?`).get(memoryId);
-    if (!row) return false;
+    if (!row) {
+        remove(db, `episode:${memoryId}`);
+        return false;
+    }
     put(db, `episode:${memoryId}`, 'episode', memoryId, null, row.revision, row.input_hash,
         `${row.title}\n${protocol.decrypt(row.content)}`, { status: row.status });
     return true;
@@ -78,8 +85,12 @@ function refreshProfile(db, entityId) {
         return 0;
     }
     const rows = db.prepare('SELECT * FROM memory_profile_field_publications WHERE entity_id=? ORDER BY field').all(entityId);
+    const readable = new Map(rows.filter(row => policy.readableProfileField(row)).map(row => [row.field, row]));
     let count = 0;
-    for (const row of rows) if (policy.readableProfileField(row)) {
+    for (const field of ['facts', 'status', 'judgment']) {
+        if (!readable.has(field)) remove(db, `profile:${entityId}:${field}`);
+    }
+    for (const row of readable.values()) {
         const publication = require('./memoryProfileFields').readField(db, entityId, row.field);
         put(db, `profile:${entityId}:${row.field}`, 'profile', entityId, row.field, row.revision, row.input_hash,
             `${entity.name}: ${publication?.value || ''}`, { field: row.field });

@@ -56,12 +56,19 @@ DB_PATH=./memory_constellations.db npm run memory:release:status
 - `projection_receipts_incomplete`：仍有 queued/retry/running 或未 acknowledged 项；
 - `projection_stale:*`：revision/source hash 已变化；
 - `remote_missing:*` / `remote_stale:*`：Chroma collection 中缺项或 metadata 不一致。
+- `remote_delete_pending:*`：本地已有 delete receipt，但远端对象仍存在；
+- `remote_extra:*`：verified 专用 collection 存在没有本地权威来源的对象；
+- `job_leases_expired`：仍有过期 running 租约，release 不应继续。
 
-确认 `CHROMA_URL`、向量服务、独立 collection 和 maintenance runner 正常，再重新 prepare。不要直接把数据库开关改为 verified。
+先运行 `npm run memory:health:verify`。可用 `npm run memory:health:repair` 查看不会写入的修复预演；确认后使用 `npm run memory:health:repair -- --execute`，再重新 prepare。不要直接把数据库开关改为 verified。
 
-## requested 是 verified，但 effective 仍是 legacy
+## requested 是 verified，但 effective 是 blocked
 
-release manifest 在激活后发生了变化，或 receipt 不再完整。有效读模式自动回退是预期保护。先修投影并重新 `prepare`；需要立即回滚时运行 `npm run memory:release:rollback`。
+release manifest 在激活后发生了变化，或 receipt 不再完整。读取接口此时返回 503，防止悄悄读到可能已经陈旧的 legacy 记忆。先修投影并重新 `prepare/activate`；需要立即恢复旧读取时，显式运行 `npm run memory:release:rollback`。
+
+## 旧 FTS、SQL 投影和向量状态不一致
+
+不要把三份数据直接合并。权威来源取决于部署模式：legacy 模式的旧 FTS 只索引 active Fragment/legacy Memory；modern 模式的 SQL/向量投影只从正式 Claim/Episode/Saga/Profile publication 重建。`memory:health:repair -- --execute` 会按当前模式修复对应派生层，不会调用模型或反向生成事实。
 
 ## Codex 运行期适配器失败
 

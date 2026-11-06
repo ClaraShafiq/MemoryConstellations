@@ -10,7 +10,7 @@ SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 npm run test:memory-modern
 ```
 
-覆盖空库 v118、Scribe 逐字引文和主体、Claim/Duty/Classification/Node Review、证据池、星座身份/别名/准入、Episode、Saga、Facts/Status、Judgment 证据门、Codex Judgment 禁令、搜索投影、CAS 和租约。
+覆盖空库 v119、Scribe 逐字引文和主体、Claim/Duty/Classification/Node Review、证据池、星座身份/别名/准入、Episode、Saga、Facts/Status、Judgment 证据门、Codex Judgment 禁令、搜索投影、CAS 和租约。
 
 ## 车道、失败停点与旧旁路
 
@@ -40,8 +40,18 @@ npm run test:memory-extensions
 - Facts 差量 revise 保留未触及事实；
 - Judgment `add/reinforce/revise/withdraw` 与态度证据；
 - Agent 收到解密后的最小只读快照而非 SQL 能力；
-- 向量 receipt、远端 metadata 核验、release prepare/activate、投影变化自动降级和 rollback；
+- 向量 receipt、远端 metadata 核验、release prepare/activate、投影变化 fail-closed 和显式 rollback；
 - 每日模型预算、单飞和过期租约恢复。
+
+## 派生状态健康与修复
+
+```bash
+DB_PATH=/tmp/memory-derived-state.sqlite \
+SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+npm run test:memory-derived-state
+```
+
+覆盖 status-aware legacy FTS、SQL 投影 dry-run/执行修复、远端多余向量发现与删除、三态健康以及过期租约告警。fixture 全部为新建的中性虚构内容。
 
 ## 其他定向测试
 
@@ -74,8 +84,10 @@ npm run check:privacy
 - maintenance runner 是否 active；
 - Claim、证据池、Episode、Profile、搜索单元计数；
 - verified release 和向量 manifest blocker。
+- 派生状态三态、积压新鲜度、过期租约与 legacy FTS（仅 legacy 模式）。
 
 `npm run memory:release:status` 用于更详细地检查 receipt 数、manifest digest 和有效读模式。
+`npm run memory:health:verify` 会额外核对远端向量；`npm run memory:health:repair` 默认只预演，只有追加 `-- --execute` 才执行确定性修复。
 
 ## 最终真实验收
 
@@ -86,6 +98,6 @@ npm run check:privacy
 3. Judgment 只有在 assistant 态度证据充分时由 persona writer 生成；失败保旧。
 4. SQL/向量 manifest 追平，`release:prepare` 通过。
 5. 激活后实际聊天模型召回正确内容。
-6. 修改投影可自动回落 legacy，并成功演练显式 rollback。
+6. 修改投影会让 verified 读取 fail-closed，并成功演练显式 rollback 到 legacy。
 
 在第 5 步完成前，不能写“现代管线已全面上线”。

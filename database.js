@@ -1212,6 +1212,7 @@ function initDatabase() {
         require('./services/memoryModelBudget').SCHEMA,
         require('./services/memoryVectorProjection').SCHEMA,
         require('./services/memoryReleaseGate').SCHEMA,
+        require('./services/memoryDerivedStateHealth').SCHEMA,
     ].join('\n');
     runMigration(109, 'modern memory: controlled pipeline tables', modernSchemas, { critical: true });
     runMigration(110, 'modern memory: safe rollout defaults', `
@@ -1280,6 +1281,10 @@ function initDatabase() {
         CREATE INDEX idx_memory_search_projection_target
             ON memory_search_projection(target_type,target_id);
     `, { critical: true });
+    runMigration(119, 'memory derived-state health and status-aware legacy FTS', [
+        require('./services/memoryDerivedStateHealth').SCHEMA,
+        require('./services/memoryLegacyFts').triggerSql(),
+    ].join('\n'), { critical: true });
 
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {

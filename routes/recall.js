@@ -29,7 +29,12 @@ router.post('/recall', async (req, res) => {
     try {
         const n = Math.min(parseInt(limit, 10) || 8, 20);
         const db = getDb();
-        if (readMode.get(db) === 'verified') {
+        const mode = readMode.get(db);
+        if (mode === 'blocked') {
+            return res.status(503).json({ success: false, error: 'verified_memory_temporarily_unavailable',
+                message: '现代记忆发布物未通过门禁；请检查 /api/health 或显式回滚。' });
+        }
+        if (mode === 'verified') {
             const vectorRows = await verifiedVectors.query(db, q, n);
             const sqlRows = verifiedSearch.search(db, q, n);
             const seen = new Set();

@@ -66,7 +66,7 @@ DB_PATH=./memory_constellations.db npm run setup:llm
 DB_PATH=./memory_constellations.db npm start
 ```
 
-先在 `.env` 填写两个不同的随机密钥、登录密码和你自己的模型 endpoint；再编辑公共角色配置。首次启动会从空库迁移到 schema v118，不需要任何外部生产数据。完整步骤见 [OSS_SETUP.md](OSS_SETUP.md)。
+先在 `.env` 填写两个不同的随机密钥、登录密码和你自己的模型 endpoint；再编辑公共角色配置。首次启动会从空库迁移到 schema v119，不需要任何外部生产数据。完整步骤见 [OSS_SETUP.md](OSS_SETUP.md)。
 
 ## 手动部署与 Agent 辅助部署
 
@@ -85,13 +85,25 @@ DB_PATH=./memory_constellations.db npm start
 DB_PATH=/tmp/memory-modern.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-modern
 DB_PATH=/tmp/memory-lanes.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-lanes
 DB_PATH=/tmp/memory-extensions.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-extensions
+DB_PATH=/tmp/memory-derived-state.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-derived-state
 npm run test:llm-config
 npm run check:docs
 npm run check:privacy
 curl http://127.0.0.1:3000/api/health
 ```
 
-`pipeline.mode=modern` 只选择现代调度器；`npm run memory:maintenance:start` 才让正式写入/审核链运行。聊天消费者切到现代发布物是另一件事：必须先完成向量回执并执行 `memory:release:prepare`，确认无 blocker 后再执行 `memory:release:activate`。投影一旦变化或远端回执不匹配，有效读模式自动回退到 legacy；`memory:release:rollback` 可显式回滚。
+`pipeline.mode=modern` 只选择现代调度器；`npm run memory:maintenance:start` 才让正式写入/审核链运行。聊天消费者切到现代发布物是另一件事：必须先完成向量回执并执行 `memory:release:prepare`，确认无 blocker 后再执行 `memory:release:activate`。激活后若投影变化或门禁失效，verified 读取会 fail-closed 并返回 503；它不会悄悄读取可能已经陈旧的 legacy 记忆。只有 `memory:release:rollback` 会显式恢复 legacy。
+
+派生状态使用统一健康入口：
+
+```bash
+DB_PATH=./memory_constellations.db npm run memory:health:check
+DB_PATH=./memory_constellations.db npm run memory:health:verify
+DB_PATH=./memory_constellations.db npm run memory:health:repair
+DB_PATH=./memory_constellations.db npm run memory:health:repair -- --execute
+```
+
+`check` 只检查本地新鲜度、积压、租约、SQL/向量 receipt；`verify` 还核对远端缺失、陈旧、待删除和多余向量。`repair` 默认只预演；`--execute` 才会从正式 Claim/Episode/Saga/Profile 发布物重建投影并修复远端。legacy 模式会同时检查旧 FTS，modern 模式不会让旧索引重新成为权威来源。
 
 ## 隐私、安全、备份与费用
 
@@ -111,7 +123,7 @@ curl http://127.0.0.1:3000/api/health
 - Status 被替换前的重要经历沉降机制的完整验收；
 - Macro Insight 的真实聊天意图路由；
 - 全局 verified 聊天读取的最终生产切换；
-- 每周健康扫描、每月活跃 Profile 全景复核和 assistant 长期演化 PT；
+- 每周自动调度健康扫描、每月活跃 Profile 全景复核和 assistant 长期演化 PT；
 - 任一私有部署的旧数据全量回补和运营脚本。
 
 ## 文档

@@ -110,11 +110,25 @@ Claim Review 之后的 Duty 与 Classification 继承原 job priority。已拒�
 
 1. `prepare`：SQL manifest 完整、所有 receipt 完成、远端 metadata 逐项一致；
 2. `activate`：manifest digest 未变化时才把 requested mode 设为 verified；
-3. 消费：`memoryReadMode.get()` 每次确认 release 仍 ready，否则有效模式回退 legacy；
-4. `rollback`：显式恢复 legacy，不删除现代发布历史。
+3. 消费：`memoryReadMode.get()` 每次确认 release 仍 ready；若 requested=verified 但门禁失效，则 effective=`blocked`，读取接口 fail-closed；
+4. `rollback`：只有显式 rollback 才恢复 legacy，不删除现代发布历史。
 
 `memoryChatPacket.js` 最终生成有长度上限并带 revision/input hash 的注入包。maintenance running 只描述写入链；只有有效 read mode 为 verified 才表示聊天消费者正在读取现代发布物。
 
+## 派生状态健康与确定性修复
+
+`memoryDerivedStateHealth.js` 把本地投影新鲜度、Scribe/job 积压、过期租约、向量 receipt 和 legacy FTS（仅 legacy 模式）汇总为三态：
+
+- `healthy`：已检查范围与权威发布物一致；
+- `drift`：检查成功但发现可定位的不一致；
+- `unverifiable`：依赖不可达或无法可靠完成检查，不能当成健康。
+
+`memoryVectorProjection.js` 同时核验 upsert 和 delete receipt，并分页列出 verified 专用 collection 的 ID，因此能发现远端缺失、metadata 陈旧、应删除仍存在以及无本地来源的多余向量。release prepare 会阻止过期租约、未完成 receipt 和正在运行的维护批次；prepare 结果在激活前还有短时有效期。
+
+`memoryProjectionReconciler.js` 只从正式 Claim、Episode、Saga、Profile publication 重建 SQL 搜索投影，再按 revision/source hash 安排向量操作。它不调用模型，也不从旧 FTS 或旧向量库反向制造事实。修复命令默认 dry-run，必须显式 `--execute` 才写入。
+
+旧 FTS 和现代检索不会合并为双权威：legacy 模式下检查并以 active Fragment/legacy Memory 重建旧 FTS；modern 模式下旧索引标记为不适用，正式读取只由发布物、SQL 投影、向量 receipt 和 release gate 决定。
+
 ## 当前边界
 
-公共控制面与虚构数据回归已实现，但默认安装没有自动生产切换。仍未完成：正式关系发布、Status 重要经历沉降的完整验收、Macro Insight 真实聊天路由、每周/月度复核、assistant 长期演化 PT，以及任何具体部署的旧数据全量回补和自然聊天最终验收。
+公共控制面与虚构数据回归已实现，但默认安装没有自动生产切换。仍未完成：正式关系发布、Status 重要经历沉降的完整验收、Macro Insight 真实聊天路由、每周健康检查的自动调度、月度复核、assistant 长期演化 PT，以及任何具体部署的旧数据全量回补和自然聊天最终验收。

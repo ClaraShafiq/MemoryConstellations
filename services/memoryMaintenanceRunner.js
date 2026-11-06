@@ -65,7 +65,8 @@ async function execute(db, options = {}) {
 
 function tick(db, options = {}) {
     if (active) return Promise.resolve({ outcome: 'skipped', reason: 'single_flight_active' });
-    active = execute(db, options).finally(() => { active = null; });
+    active = require('./memoryProtocol').tracked(db, 'maintenance_runner', () => execute(db, options))
+        .finally(() => { active = null; });
     return active;
 }
 

@@ -59,7 +59,7 @@ MEMORY_MAINTENANCE_DAILY_CALL_LIMIT=0
 DB_PATH=./memory_constellations.db npm run setup:llm
 ```
 
-该命令从空库迁移到 schema v118，把 API key 加密写入指定数据库，并设置为默认模型连接。之后所有启动、维护和发布命令都要使用相同 `DB_PATH`。
+该命令从空库迁移到 schema v119，把 API key 加密写入指定数据库，并设置为默认模型连接。之后所有启动、维护和发布命令都要使用相同 `DB_PATH`。
 
 ## 4. 运行聚焦测试
 
