@@ -14,7 +14,7 @@ const { sqlNow, sqlDaysAgo } = require('../utils/time');
 const CONFIG = {
     FRAGMENT_COOLING_DAYS: 14,     // 14天无人访问 → 冷却
     FRAGMENT_FROZEN_DAYS: 30,      // 冷却后30天 → 冻结（从ChromaDB删除向量）
-    FRAGMENT_TOMBSTONE_DAYS: 90,   // 冻结后90天 → 墓碑（清空内容，仅留证据链）
+    FRAGMENT_TOMBSTONE_DAYS: 90,   // 冻结后90天 → 墓碑（只打标记，正文保留）
     EPISODE_MATURE_MONTHS: 6,      // 6个月未触达 → 成熟（权重减半）
     EPISODE_ARCHIVE_MONTHS: 12,    // 12个月 → 归档
     MIN_FRAGS_FOR_ENTITY: 2,       // 实体最少碎片数才提取
@@ -80,7 +80,9 @@ async function runFragmentGC() {
     }
     stats.frozen = toFreeze.length;
 
-    // 4. 冻结 → 墓碑：冻结90天 → 清空内容，仅保留证据链
+    // 4. 冻结 → 墓碑：冻结90天 → 只打 status 标记，正文与证据链都保留
+    //    墓碑靠 status 退出检索（librarian 只查 status='active'），不靠抹掉文字：
+    //    content 是唯一存着原始发言与证据链的副本，覆盖掉就再也要不回来。
     const tombstoneCutoff = sqlDaysAgo(CONFIG.FRAGMENT_TOMBSTONE_DAYS);
     const toTombstone = db.prepare(`
         SELECT id FROM memory_fragments
@@ -90,7 +92,7 @@ async function runFragmentGC() {
     `).all(tombstoneCutoff);
 
     for (const f of toTombstone) {
-        db.prepare(`UPDATE memory_fragments SET status = 'tombstone', content = '[expired]', lifecycle_updated_at = ? WHERE id = ?`)
+        db.prepare(`UPDATE memory_fragments SET status = 'tombstone', lifecycle_updated_at = ? WHERE id = ?`)
             .run(now, f.id);
     }
     stats.tombstoned = toTombstone.length;
