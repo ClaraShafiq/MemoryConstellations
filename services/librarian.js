@@ -237,7 +237,7 @@ function searchFragments(userMessage, limit = 8) {
         const rows = db.prepare(`
           SELECT mf.id, mf.content, mf.emotional_weight AS weight,
                  mf.source_date AS date_label, mf.created_at,
-                 mf.read_count, mf.layer,
+                 mf.read_count, mf.retrieval_rank, mf.layer,
                  'fragment' AS source_table,
                  rank
           FROM memory_fragments_fts fts
@@ -389,6 +389,7 @@ async function searchHybrid(userMessage, limit = 6) {
         emotional_weight: item.weight || 0.5,
         _created_at: item.created_at || '',
         _read_count: item.read_count || 0,
+        _retrieval_rank: item.retrieval_rank,
       });
     }
   });
@@ -411,6 +412,7 @@ async function searchHybrid(userMessage, limit = 6) {
         emotional_weight: item.emotional_weight || 0.5,
         _created_at: item.created_at || '',
         _read_count: item.read_count || 0,
+        _retrieval_rank: item.retrieval_rank,
         _entity_id: item.entity_id,
       });
     }
@@ -436,6 +438,7 @@ async function searchHybrid(userMessage, limit = 6) {
         emotional_weight: item.emotional_weight || 0.5,
         _created_at: item.created_at || '',
         _read_count: item.read_count || 0,
+        _retrieval_rank: item.retrieval_rank,
       });
     } else {
       const existing = itemMap.get(key);
@@ -503,7 +506,10 @@ async function searchHybrid(userMessage, limit = 6) {
     const wmBoost = boostMap.get(`${item.source_table}-${item.id}`) || 1.0;
     // 时效加权：语义相近时，新记忆优先。≤1天的×1.3，≤3天×1.15，≤7天×1.05，之后无加成
     const recencyBoost = days <= 1 ? 1.3 : days <= 3 ? 1.15 : days <= 7 ? 1.05 : 1.0;
-    const combinedScore = item._rrf * decay * importance * novelty * wmBoost * recencyBoost;
+    // retrieval_rank 是可重建的检索投影列（默认 1.0 = 中性，不改变原有排序）
+    const rankRaw = Number(item._retrieval_rank);
+    const rankWeight = Number.isFinite(rankRaw) ? rankRaw : 1.0;
+    const combinedScore = item._rrf * decay * importance * novelty * wmBoost * recencyBoost * rankWeight;
     return { ...item, _rrf: combinedScore, _decay: decay, _importance: importance, _novelty: novelty, _daysAgo: Math.round(days), _wmBoost: wmBoost, _recencyBoost: recencyBoost };
   })
   .filter(item => item._rrf >= MIN_COMBINED_SCORE)
