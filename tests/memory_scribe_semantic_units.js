@@ -7,7 +7,7 @@ async function main() {
     const db = initDatabase();
     const scribe = require('../services/memoryScribe');
 
-    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 119);
+    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 120);
     assert.equal(scribe.CONTRACT, 'complete-semantic-unit-v2');
     db.prepare("INSERT OR IGNORE INTO chats(id,name) VALUES(1,'Fictional Harbor Workshop')").run();
 
@@ -72,7 +72,7 @@ async function main() {
     assert.match(prompt.system, /same chat, speaker, and timestamp/);
     assert.match(prompt.system, /Each evidence message_id may appear at most once/);
 
-    console.log(JSON.stringify({ ok: true, schema: 119, contract: scribe.CONTRACT,
+    console.log(JSON.stringify({ ok: true, schema: 120, contract: scribe.CONTRACT,
         attempts: result.extraction_attempts, observations: result.observations_written }));
 }
 

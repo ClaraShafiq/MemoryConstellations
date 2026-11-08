@@ -10,7 +10,7 @@ SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 npm run test:memory-modern
 ```
 
-覆盖空库 v119、Scribe 逐字引文和主体、Claim/Duty/Classification/Node Review、证据池、星座身份/别名/准入、Episode、Saga、Facts/Status、Judgment 证据门、Codex Judgment 禁令、搜索投影、CAS 和租约。
+覆盖空库 v120、Scribe 逐字引文和主体、Claim/Duty/Classification/Node Review、证据池、星座身份/别名/准入、Episode、Saga、Facts/Status、Judgment 证据门、Codex Judgment 禁令、搜索投影、CAS 和租约。
 
 ## Scribe 完整语义单元
 
@@ -61,7 +61,21 @@ SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 npm run test:memory-derived-state
 ```
 
-覆盖 status-aware legacy FTS、SQL 投影 dry-run/执行修复、远端多余向量发现与删除、三态健康以及过期租约告警。fixture 全部为新建的中性虚构内容。
+覆盖 status-aware legacy FTS、SQL 投影 dry-run/执行修复、远端多余向量发现与删除、三态健康、legacy 下本地 manifest blocker、过期向量租约唤醒及五次失败转人工检查。fixture 全部为新建的中性虚构内容。
+
+## 纠错反馈与 v120 升级
+
+```bash
+DB_PATH=/tmp/memory-correction-feedback.sqlite \
+SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+npm run test:memory-correction-feedback
+
+DB_PATH=/tmp/memory-v120-upgrade.sqlite \
+SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+npm run test:memory-v120-upgrade
+```
+
+第一组验证 fragment 纠错按来源消息交集降权、无关碎片不受影响、即时处理与后台重试不会重复应用，并拒绝没有正确内容的普通纠错。第二组模拟 v119 表结构，验证历史纠错记录和向量 receipt 原地保留；历史纠错会安全标记为已处理，不在升级时追溯降权。
 
 ## 其他定向测试
 

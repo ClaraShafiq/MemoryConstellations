@@ -100,6 +100,7 @@ Claim Review 之后的 Duty 与 Classification 继承原 job priority。已拒�
 - `memoryMaintenanceRunner.js` 单飞执行 Scribe、当前车道受控审查、确定性推进和向量同步。
 - 没有配置审查 backend 时，runner 保留 model job 并在结果/健康状态中暴露 backlog，不伪造完成。
 - 过期租约进入 retry；连续尝试达到上限后进入 needs_review，不无限自旋。
+- 向量 receipt 同样在崩溃后回收过期租约，五次失败后进入 `needs_review`；维护 runner 会把过期 `running` 计入待处理积压。
 - `memoryModelBudget.js` 以 UTC 日和角色计数。默认 limit=0，模型调用禁用；预算耗尽 fail-closed。
 
 历史回补必须显式使用 `priorityBand=backfill` 的维护操作，在线 runner 不会自然消费它。
@@ -126,6 +127,10 @@ Claim Review 之后的 Duty 与 Classification 继承原 job priority。已拒�
 - `healthy`：已检查范围与权威发布物一致；
 - `drift`：检查成功但发现可定位的不一致；
 - `unverifiable`：依赖不可达或无法可靠完成检查，不能当成健康。
+
+本地 receipt/manifest blocker 与聊天读模式无关：即使当前读取 legacy，账目不齐仍报告 drift。报告同时声明 coverage 边界；它验证结构、新鲜度和派生一致性，不验证正文语义、模型判断质量或未知的设计缺口。
+
+旧兼容纠错链以 `source_msg_ids_json` 保存纠错发生时的来源快照，并用独立 `feedback_applied_at` 保证同源降权最多应用一次。`status` 只保留纠错合并生命周期，不能再兼任“反馈已处理”标记。v120 以前的历史记录迁移时标记为已处理，避免升级后重复降权。
 
 `memoryVectorProjection.js` 同时核验 upsert 和 delete receipt，并分页列出 verified 专用 collection 的 ID，因此能发现远端缺失、metadata 陈旧、应删除仍存在以及无本地来源的多余向量。release prepare 会阻止过期租约、未完成 receipt 和正在运行的维护批次；prepare 结果在激活前还有短时有效期。
 

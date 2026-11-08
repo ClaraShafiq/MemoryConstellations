@@ -1,6 +1,9 @@
 {
   "name": "memory-constellations",
   "version": "1.0.0",
+  "engines": {
+    "node": ">=18"
+  },
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -12,6 +15,8 @@
     "test:memory-lanes": "node tests/memory_lane_contracts.js",
     "test:memory-extensions": "node tests/memory_pipeline_extensions.js",
     "test:memory-derived-state": "node tests/memory_derived_state_control.js",
+    "test:memory-correction-feedback": "node tests/memory_correction_feedback.js",
+    "test:memory-v120-upgrade": "node tests/memory_v120_upgrade.js",
     "memory:release:status": "node scripts/memory_release.js status",
     "memory:release:prepare": "node scripts/memory_release.js prepare",
     "memory:release:activate": "node scripts/memory_release.js activate",

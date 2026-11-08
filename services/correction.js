@@ -23,23 +23,77 @@ const CORRECTION_CONFIG = {
     MERGE_THRESHOLD: 10,    // 累积 N 条 → 合并为长期准则
 };
 
+function parseSourceMessageIds(value) {
+    try {
+        const parsed = Array.isArray(value) ? value : JSON.parse(value || '[]');
+        return [...new Set(parsed.map(Number).filter(value => Number.isInteger(value) && value > 0))];
+    } catch (_) {
+        return [];
+    }
+}
+
+function sourceMessageIdsForTarget(db, targetType, targetId) {
+    if (!targetId || !['memory', 'fragment'].includes(targetType)) return [];
+    const table = targetType === 'memory' ? 'memories' : 'memory_fragments';
+    const row = db.prepare(`SELECT source_msg_ids FROM ${table} WHERE id=?`).get(targetId);
+    return parseSourceMessageIds(row?.source_msg_ids);
+}
+
+function applyCorrectionFeedback(db, correctionOrId) {
+    const correction = typeof correctionOrId === 'object' ? correctionOrId
+        : db.prepare('SELECT * FROM correction_log WHERE id=?').get(correctionOrId);
+    if (!correction || correction.feedback_applied_at) return { applied: false, cascaded: 0 };
+    return db.transaction(() => {
+        const current = db.prepare('SELECT * FROM correction_log WHERE id=?').get(correction.id);
+        if (!current || current.feedback_applied_at) return { applied: false, cascaded: 0 };
+        let sourceIds = parseSourceMessageIds(current.source_msg_ids_json);
+        if (!sourceIds.length) sourceIds = sourceMessageIdsForTarget(db, current.target_type, current.target_id);
+        let cascaded = 0;
+        if (sourceIds.length && ['memory', 'fragment'].includes(current.target_type)) {
+            const sourceSet = new Set(sourceIds);
+            const candidates = db.prepare(`SELECT id,source_msg_ids FROM memory_fragments
+                WHERE status='active' AND (?!='fragment' OR id!=?)`)
+                .all(current.target_type, Number(current.target_id || 0));
+            const related = candidates.filter(row => parseSourceMessageIds(row.source_msg_ids)
+                .some(messageId => sourceSet.has(messageId)));
+            const demote = db.prepare(`UPDATE memory_fragments
+                SET emotional_weight=MAX(0.1,COALESCE(emotional_weight,0.5)*0.5),
+                    lifecycle_updated_at=datetime('now') WHERE id=?`);
+            for (const row of related) cascaded += demote.run(row.id).changes;
+        }
+        db.prepare("UPDATE correction_log SET feedback_applied_at=datetime('now') WHERE id=?").run(current.id);
+        return { applied: true, cascaded };
+    })();
+}
+
 // 写入一条纠正
-function recordCorrection({ targetType, targetId, wrongSummary, correctSummary, source = 'manual', chatMessageId = null }) {
+function recordCorrection({ targetType, targetId, wrongSummary, correctSummary, source = 'manual',
+    chatMessageId = null, sourceMessageIds = null }) {
     const db = getDb();
+    const wrong = String(wrongSummary || '').trim();
+    const correct = String(correctSummary || '').trim();
+    if (!wrong) throw new Error('correction_wrong_summary_required');
+    const deletionSignal = source === 'manual_delete' && ['memory', 'fragment'].includes(targetType);
+    if (!correct && !deletionSignal) throw new Error('correction_correct_summary_required');
+    const capturedSourceIds = sourceMessageIds == null
+        ? sourceMessageIdsForTarget(db, targetType, targetId)
+        : parseSourceMessageIds(sourceMessageIds);
     const insert = db.prepare(`
-        INSERT INTO correction_log (target_type, target_id, wrong_summary, correct_summary, source, chat_message_id, status)
-        VALUES (?, ?, ?, ?, ?, ?, 'active')
+        INSERT INTO correction_log (target_type,target_id,wrong_summary,correct_summary,source,chat_message_id,
+            status,source_msg_ids_json)
+        VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
     `);
-    const info = insert.run(targetType, targetId || null, wrongSummary, correctSummary, source, chatMessageId);
-    console.log(`[Correction] 记录纠正 #${info.lastInsertRowid}: ${wrongSummary.slice(0, 50)} → ${correctSummary.slice(0, 50)}`);
+    const info = insert.run(targetType, targetId || null, wrong, correct, source, chatMessageId,
+        JSON.stringify(capturedSourceIds));
+    console.log(`[Correction] 记录纠正 #${info.lastInsertRowid}: ${wrong.slice(0, 50)} → ${correct.slice(0, 50)}`);
 
     // 观星手记可见化：聊天自动纠正写入 changelog（手动删除已有自己的可见路径）
     if (source === 'chat_correction') {
         try {
             db.prepare(`INSERT INTO ontology_changelog (action, category_path, detail, status) VALUES ('memory_correction', NULL, ?, 'done')`)
                 .run(JSON.stringify({
-                    wrong: (wrongSummary || '').slice(0, 80),
-                    correct: (correctSummary || '').slice(0, 80),
+                    wrong: wrong.slice(0, 80),
+                    correct: correct.slice(0, 80),
                     target: targetType,
                 }));
         } catch (e) { /* changelog 失败不影响纠正主流程 */ }
@@ -55,8 +109,15 @@ function recordCorrection({ targetType, targetId, wrongSummary, correctSummary, 
         console.log(`[Correction] 碎片 #${targetId} 已标记 consolidated`);
     }
 
+    try {
+        applyCorrectionFeedback(db, Number(info.lastInsertRowid));
+    } catch (error) {
+        console.error(`[Correction] 纠正反馈暂未应用 #${info.lastInsertRowid}:`, error.message);
+    }
+
     // 检查是否需要合并
-    const activeCount = db.prepare("SELECT COUNT(*) as c FROM correction_log WHERE status='active'").get();
+    const activeCount = db.prepare(`SELECT COUNT(*) as c FROM correction_log
+        WHERE status='active' AND TRIM(correct_summary)!=''`).get();
     if (activeCount.c >= CORRECTION_CONFIG.MERGE_THRESHOLD) {
         console.log(`[Correction] 活跃纠正已达 ${activeCount.c} 条，触发合并...`);
         // 异步合并，不阻塞请求
@@ -71,7 +132,7 @@ function getActiveCorrections(limit = CORRECTION_CONFIG.ACTIVE_LIMIT) {
     const db = getDb();
     const rows = db.prepare(`
         SELECT wrong_summary, correct_summary FROM correction_log
-        WHERE status = 'active'
+        WHERE status = 'active' AND TRIM(correct_summary)!=''
         ORDER BY created_at DESC LIMIT ?
     `).all(limit);
 
@@ -85,7 +146,8 @@ function getActiveCorrections(limit = CORRECTION_CONFIG.ACTIVE_LIMIT) {
 // 合并活跃纠正为长期准则
 async function mergeGuidelines() {
     const db = getDb();
-    const rows = db.prepare("SELECT id, wrong_summary, correct_summary FROM correction_log WHERE status='active'").all();
+    const rows = db.prepare(`SELECT id,wrong_summary,correct_summary FROM correction_log
+        WHERE status='active' AND TRIM(correct_summary)!=''`).all();
     if (rows.length < CORRECTION_CONFIG.MERGE_THRESHOLD) return null;
 
     const itemsText = rows.map(r => `- wrong: ${r.wrong_summary}\n  correct: ${r.correct_summary}`).join('\n');
@@ -336,4 +398,5 @@ async function processChatCorrection({ wrongStatement, correction, memoryId, cha
     };
 }
 
-module.exports = { recordCorrection, getActiveCorrections, mergeGuidelines, getMergedGuidelines, processChatCorrection };
+module.exports = { recordCorrection, getActiveCorrections, mergeGuidelines, getMergedGuidelines,
+    processChatCorrection, parseSourceMessageIds, sourceMessageIdsForTarget, applyCorrectionFeedback };

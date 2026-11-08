@@ -105,7 +105,7 @@ function inspectLocal(db, options = {}) {
     let manifest;
     try {
         manifest = vectors.manifest(db);
-        if (requestedReadMode(db) === 'verified' && !manifest.ready) issues.push(...manifest.blockers);
+        if (!manifest.ready) issues.push(...manifest.blockers);
     } catch (_) {
         manifest = { ready: false, expected: 0, done: 0, blockers: ['vector_manifest_unverifiable'] };
         issues.push('vector_manifest_unverifiable');
@@ -136,6 +136,10 @@ function inspectLocal(db, options = {}) {
         vector_manifest: { ready: manifest.ready, expected: manifest.expected,
             done: manifest.done, blockers: manifest.blockers },
         legacy_fts: legacy,
+        coverage: {
+            covers: ['freshness', 'leases', 'receipt_counts', 'manifest_digest', 'legacy_fts_when_applicable'],
+            does_not_cover: ['content_semantics', 'model_judgment_quality', 'unknown_design_gaps'],
+        },
     };
 }
 

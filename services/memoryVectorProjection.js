@@ -4,6 +4,7 @@ const { randomUUID } = require('node:crypto');
 const protocol = require('./memoryProtocol');
 
 const COLLECTION = 'memory_constellations_verified';
+const MAX_ATTEMPTS = 5;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_vector_projection (
     projection_key TEXT PRIMARY KEY,
@@ -11,7 +12,7 @@ CREATE TABLE IF NOT EXISTS memory_vector_projection (
     revision INTEGER NOT NULL,
     source_hash TEXT NOT NULL,
     operation TEXT NOT NULL CHECK(operation IN('upsert','delete')),
-    status TEXT NOT NULL CHECK(status IN('queued','running','done','retry','obsolete')),
+    status TEXT NOT NULL CHECK(status IN('queued','running','done','retry','needs_review','obsolete')),
     attempts INTEGER NOT NULL DEFAULT 0,
     lease_token TEXT,
     lease_until INTEGER,
@@ -58,13 +59,26 @@ function schedule(db, key, { force = false } = {}) {
     return db.prepare('SELECT * FROM memory_vector_projection WHERE projection_key=?').get(key);
 }
 
+function recoverExpired(db, { now = Date.now() } = {}) {
+    ensureReady(db);
+    const needsReview = db.prepare(`UPDATE memory_vector_projection
+        SET status='needs_review',lease_token=NULL,lease_until=NULL,error_code='attempts_exhausted',updated_at=?
+        WHERE status IN('retry','running') AND attempts>=?
+          AND (status!='running' OR lease_until IS NULL OR lease_until<=?)`).run(now, MAX_ATTEMPTS, now).changes;
+    const retried = db.prepare(`UPDATE memory_vector_projection
+        SET status='retry',lease_token=NULL,lease_until=NULL,error_code='lease_expired',updated_at=?
+        WHERE status='running' AND attempts<? AND (lease_until IS NULL OR lease_until<=?)`)
+        .run(now, MAX_ATTEMPTS, now).changes;
+    return { retried, needs_review: needsReview };
+}
+
 function lease(db, { now = Date.now(), leaseMs = 120000 } = {}) {
     ensureReady(db);
     return db.transaction(() => {
-        db.prepare(`UPDATE memory_vector_projection SET status='retry',lease_token=NULL,lease_until=NULL,
-            error_code='lease_expired',updated_at=? WHERE status='running' AND lease_until<=?`).run(now, now);
+        recoverExpired(db, { now });
         const row = db.prepare(`SELECT * FROM memory_vector_projection
-            WHERE status IN('queued','retry') ORDER BY updated_at,projection_key LIMIT 1`).get();
+            WHERE status IN('queued','retry') AND attempts<? ORDER BY updated_at,projection_key LIMIT 1`)
+            .get(MAX_ATTEMPTS);
         if (!row) return null;
         const token = randomUUID();
         const changed = db.prepare(`UPDATE memory_vector_projection SET status='running',lease_token=?,lease_until=?,
@@ -109,9 +123,11 @@ async function drain(db, { limit = 32, transport = require('./memory').chromaDBO
             if (!changed.changes) protocol.fail('vector_projection_lease_lost');
             done++;
         } catch (error) {
-            db.prepare(`UPDATE memory_vector_projection SET status='retry',lease_token=NULL,lease_until=NULL,
+            const status = item.attempts >= MAX_ATTEMPTS ? 'needs_review' : 'retry';
+            db.prepare(`UPDATE memory_vector_projection SET status=?,lease_token=NULL,lease_until=NULL,
                 error_code=?,updated_at=? WHERE projection_key=? AND lease_token=?`)
-                .run(String(error.code || error.message).slice(0, 80), Date.now(), item.projection_key, item.lease_token);
+                .run(status, String(error.code || error.message).slice(0, 80), Date.now(),
+                    item.projection_key, item.lease_token);
         }
     }
     return { done };
@@ -250,5 +266,5 @@ async function query(db, text, limit = 8, { transport = require('./memory').chro
     return rows;
 }
 
-module.exports = { COLLECTION, SCHEMA, ready, vectorId, schedule, drain, manifest, verifyRemote,
-    listRemoteIds, repairRemote, query };
+module.exports = { COLLECTION, MAX_ATTEMPTS, SCHEMA, ready, vectorId, schedule, recoverExpired,
+    lease, drain, manifest, verifyRemote, listRemoteIds, repairRemote, query };

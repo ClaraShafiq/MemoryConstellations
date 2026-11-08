@@ -870,12 +870,11 @@ router.delete(MEMORY_API.memoryItemPattern, requireAuth, async (req, res) => {
             return res.status(404).json({ error: "Memory not found" });
         }
 
-        // 写入纠正日志（删除即纠正信号）
+        // 保存来源快照并立即应用一次幂等纠正反馈。
         try {
-            db.prepare(`INSERT INTO correction_log (target_type, target_id, wrong_summary, correct_summary, source, status, created_at)
-                VALUES ('memory', ?, ?, '', 'manual', 'active', datetime('now'))`).run(
-                memoryId, existing.title
-            );
+            require('../services/correction').recordCorrection({ targetType: 'memory', targetId: Number(memoryId),
+                wrongSummary: existing.title || 'Deleted memory', correctSummary: '', source: 'manual_delete',
+                sourceMessageIds: existing.source_msg_ids });
         } catch (logErr) {
             console.error('⚠️ correction_log写入失败:', logErr.message);
         }
@@ -1419,38 +1418,14 @@ router.delete('/api/fragment/:id', requireAuth, async (req, res) => {
         const frag = db.prepare(`SELECT id, content, source_msg_ids, emotional_weight FROM memory_fragments WHERE id = ?`).get(req.params.id);
         if (!frag) return res.status(404).json({ error: '碎片不存在' });
 
-        // 写入纠正日志（删除即纠正信号）
+        // 保存来源快照并立即应用一次幂等纠正反馈。
         try {
-            db.prepare(`INSERT INTO correction_log (target_type, target_id, wrong_summary, correct_summary, source, status, created_at)
-                VALUES ('fragment', ?, ?, '', 'manual', 'active', datetime('now'))`).run(
-                frag.id, (frag.content || '').slice(0, 80)
-            );
+            require('../services/correction').recordCorrection({ targetType: 'fragment', targetId: frag.id,
+                wrongSummary: (frag.content || 'Deleted fragment').slice(0, 80), correctSummary: '', source: 'manual_delete',
+                sourceMessageIds: frag.source_msg_ids });
             console.log(`[Correction] 碎片删除写入纠正日志 #${frag.id}`);
         } catch (logErr) {
             console.error('⚠️ correction_log写入失败:', logErr.message);
-        }
-
-        // 级联降权：查同源碎片（同一批对话提取的），emotional_weight × 0.5
-        let sourceIds = [];
-        try { sourceIds = JSON.parse(frag.source_msg_ids || '[]'); } catch (_) {}
-        if (sourceIds.length > 0) {
-            const placeholders = sourceIds.map(() => '?').join(',');
-            const sameSource = db.prepare(`
-                SELECT id, source_msg_ids FROM memory_fragments
-                WHERE id != ? AND status = 'active'
-                  AND source_msg_ids IS NOT NULL
-            `).all(frag.id).filter(f => {
-                try {
-                    const ids = JSON.parse(f.source_msg_ids || '[]');
-                    return ids.some(id => sourceIds.includes(id));
-                } catch (_) { return false; }
-            });
-
-            if (sameSource.length > 0) {
-                const demote = db.prepare("UPDATE memory_fragments SET emotional_weight = MAX(0.1, emotional_weight * 0.5), lifecycle_updated_at = datetime('now') WHERE id = ?");
-                for (const s of sameSource) demote.run(s.id);
-                console.log(`[Correction] 级联降权: ${sameSource.length}条同源碎片 ew×0.5 (source: fragment #${frag.id})`);
-            }
         }
 
         // 删除 ChromaDB 向量
@@ -1464,7 +1439,7 @@ router.delete('/api/fragment/:id', requireAuth, async (req, res) => {
         // 真删除
         db.prepare(`DELETE FROM memory_fragments WHERE id = ?`).run(frag.id);
         console.log(`🗑️ Fragment hard-deleted: #${frag.id} "${(frag.content || '').slice(0, 50)}"`);
-        res.json({ success: true, demotedSameSource: true });
+        res.json({ success: true, correctionRecorded: true });
 
     } catch (e) {
         console.error(`❌ DELETE /api/fragment/${req.params.id}:`, e.message);

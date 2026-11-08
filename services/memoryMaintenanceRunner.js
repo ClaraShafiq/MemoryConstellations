@@ -36,7 +36,9 @@ function backlog(db) {
         .get(cursor.at, cursor.at, cursor.id).count;
     const currentJobs = db.prepare(`SELECT COUNT(*) count FROM memory_jobs
         WHERE status IN('queued','retry') AND priority>=?`).get(require('./memoryProtocol').LIVE_JOB_PRIORITY).count;
-    const vectors = db.prepare("SELECT COUNT(*) count FROM memory_vector_projection WHERE status IN('queued','retry')").get().count;
+    const vectors = db.prepare(`SELECT COUNT(*) count FROM memory_vector_projection
+        WHERE status IN('queued','retry') OR (status='running' AND (lease_until IS NULL OR lease_until<=?))`)
+        .get(Date.now()).count;
     return { messages, current_jobs: currentJobs, vectors };
 }
 

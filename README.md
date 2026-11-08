@@ -66,7 +66,7 @@ DB_PATH=./memory_constellations.db npm run setup:llm
 DB_PATH=./memory_constellations.db npm start
 ```
 
-先在 `.env` 填写两个不同的随机密钥、登录密码和你自己的模型 endpoint；再编辑公共角色配置。首次启动会从空库迁移到 schema v119，不需要任何外部生产数据。完整步骤见 [OSS_SETUP.md](OSS_SETUP.md)。
+先在 `.env` 填写两个不同的随机密钥、登录密码和你自己的模型 endpoint；再编辑公共角色配置。首次启动会从空库迁移到 schema v120，不需要任何外部生产数据。完整步骤见 [OSS_SETUP.md](OSS_SETUP.md)。
 
 ## 手动部署与 Agent 辅助部署
 
@@ -87,6 +87,8 @@ DB_PATH=/tmp/memory-scribe-units.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand 
 DB_PATH=/tmp/memory-lanes.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-lanes
 DB_PATH=/tmp/memory-extensions.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-extensions
 DB_PATH=/tmp/memory-derived-state.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-derived-state
+DB_PATH=/tmp/memory-correction-feedback.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-correction-feedback
+DB_PATH=/tmp/memory-v120-upgrade.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-v120-upgrade
 npm run test:llm-config
 npm run check:docs
 npm run check:privacy
@@ -105,6 +107,8 @@ DB_PATH=./memory_constellations.db npm run memory:health:repair -- --execute
 ```
 
 `check` 只检查本地新鲜度、积压、租约、SQL/向量 receipt；`verify` 还核对远端缺失、陈旧、待删除和多余向量。`repair` 默认只预演；`--execute` 才会从正式 Claim/Episode/Saga/Profile 发布物重建投影并修复远端。legacy 模式会同时检查旧 FTS，modern 模式不会让旧索引重新成为权威来源。
+
+本地向量账目缺口无论聊天当前读取 legacy 还是 verified 都会报告；读模式只决定正式消费者与是否需要远端验收，不会隐藏本地 receipt 漂移。健康报告覆盖新鲜度、租约、receipt、manifest 和适用的旧 FTS，不代表正文语义或模型判断已经正确。
 
 ## 隐私、安全、备份与费用
 

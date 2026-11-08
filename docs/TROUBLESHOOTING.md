@@ -62,6 +62,8 @@ DB_PATH=./memory_constellations.db npm run memory:release:status
 
 先运行 `npm run memory:health:verify`。可用 `npm run memory:health:repair` 查看不会写入的修复预演；确认后使用 `npm run memory:health:repair -- --execute`，再重新 prepare。不要直接把数据库开关改为 verified。
 
+`memory:health:check` 在 legacy 读取下也会报告本地 receipt/manifest blocker，这是预期行为：legacy 只表示聊天尚未消费现代发布物，不表示现代派生账目可以静默漂移。向量任务崩溃留下的过期 `running` 会被 runner 重新唤醒；累计五次失败后状态为 `needs_review`，需要先处理持久错误再显式重新安排，不能靠无限重试掩盖故障。
+
 ## requested 是 verified，但 effective 是 blocked
 
 release manifest 在激活后发生了变化，或 receipt 不再完整。读取接口此时返回 503，防止悄悄读到可能已经陈旧的 legacy 记忆。先修投影并重新 `prepare/activate`；需要立即恢复旧读取时，显式运行 `npm run memory:release:rollback`。

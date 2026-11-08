@@ -27,7 +27,7 @@ async function main() {
     const codex = require('../services/memoryCodexExecutor');
     const pipeline = require('../services/memoryPipeline');
 
-    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 119);
+    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 120);
     db.prepare("INSERT INTO chats(id,name) VALUES(1,'Fictional Pipeline Test')").run();
 
     let minute = 0;
@@ -279,7 +279,7 @@ async function main() {
     assert.equal(expired.status, 'retry');
     assert.equal(expired.error_code, 'lease_expired');
 
-    console.log(JSON.stringify({ ok: true, schema: 119, recovered_claims: recovered.claim_ids.length,
+    console.log(JSON.stringify({ ok: true, schema: 120, recovered_claims: recovered.claim_ids.length,
         facts_revision: revisedFacts.revision, vector_receipts: vectors.manifest(db).rows.length }));
 }
 

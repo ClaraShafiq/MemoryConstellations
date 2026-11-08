@@ -1285,6 +1285,34 @@ function initDatabase() {
         require('./services/memoryDerivedStateHealth').SCHEMA,
         require('./services/memoryLegacyFts').triggerSql(),
     ].join('\n'), { critical: true });
+    runMigration(120, 'bounded vector recovery and idempotent correction feedback', `
+        ALTER TABLE correction_log ADD COLUMN source_msg_ids_json TEXT NOT NULL DEFAULT '[]'
+            CHECK(json_valid(source_msg_ids_json));
+        ALTER TABLE correction_log ADD COLUMN feedback_applied_at TEXT;
+        UPDATE correction_log SET feedback_applied_at=COALESCE(created_at,datetime('now'))
+            WHERE feedback_applied_at IS NULL;
+
+        ALTER TABLE memory_vector_projection RENAME TO memory_vector_projection_v119;
+        CREATE TABLE memory_vector_projection (
+            projection_key TEXT PRIMARY KEY,
+            vector_id TEXT NOT NULL UNIQUE,
+            revision INTEGER NOT NULL,
+            source_hash TEXT NOT NULL,
+            operation TEXT NOT NULL CHECK(operation IN('upsert','delete')),
+            status TEXT NOT NULL CHECK(status IN('queued','running','done','retry','needs_review','obsolete')),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            lease_token TEXT,
+            lease_until INTEGER,
+            error_code TEXT,
+            acknowledged_at INTEGER,
+            updated_at INTEGER NOT NULL
+        );
+        INSERT INTO memory_vector_projection
+            SELECT * FROM memory_vector_projection_v119;
+        DROP TABLE memory_vector_projection_v119;
+        CREATE INDEX idx_memory_vector_projection_ready
+            ON memory_vector_projection(status,updated_at);
+    `, { critical: true });
 
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {

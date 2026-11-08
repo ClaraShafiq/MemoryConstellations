@@ -18,7 +18,6 @@ const CONFIG = {
     EPISODE_MATURE_MONTHS: 6,      // 6个月未触达 → 成熟（权重减半）
     EPISODE_ARCHIVE_MONTHS: 12,    // 12个月 → 归档
     MIN_FRAGS_FOR_ENTITY: 2,       // 实体最少碎片数才提取
-    CORRECTION_DAYS_LOOKBACK: 7,   // 纠正反馈追溯天数
     LLM_API_NAME: '[书库]DS',      // 使用便宜稳定的DS
 };
 
@@ -310,45 +309,17 @@ async function runEntityExtraction() {
 async function runCorrectionFeedback() {
     const db = getDb();
     const stats = { processed: 0, cascaded: 0 };
-
-    // 拿到最近7天内新增的纠正记录
-    const cutoffDate = sqlDaysAgo(CONFIG.CORRECTION_DAYS_LOOKBACK);
     const corrections = db.prepare(`
         SELECT * FROM correction_log
-        WHERE status = 'active'
-          AND created_at >= ?
+        WHERE feedback_applied_at IS NULL
         ORDER BY created_at DESC
-    `).all(cutoffDate);
+    `).all();
 
     for (const c of corrections) {
         try {
-            // 降权同类碎片：找到与被纠正记忆内容相近的活跃碎片
-            if (c.target_type === 'memory' && c.target_id) {
-                // 查被删记忆的碎片来源
-                const deletedMemory = db.prepare('SELECT source_msg_ids FROM memories WHERE id = ?').get(c.target_id);
-                let sourceIds = [];
-                try { sourceIds = JSON.parse(deletedMemory?.source_msg_ids || '[]'); } catch {}
-
-                if (sourceIds.length > 0) {
-                    // 找到同源碎片 → 降权
-                    const placeholders = sourceIds.map(() => '?').join(',');
-                    const relatedFrags = db.prepare(`
-                        SELECT id, emotional_weight FROM memory_fragments
-                        WHERE status = 'active'
-                          AND id IN (${placeholders})
-                    `).all(...sourceIds);
-
-                    for (const f of relatedFrags) {
-                        const newEW = Math.max(0.1, (f.emotional_weight || 0.5) * 0.5);
-                        db.prepare(`UPDATE memory_fragments SET emotional_weight = ? WHERE id = ?`)
-                            .run(newEW, f.id);
-                        stats.cascaded++;
-                    }
-                }
-            }
-
-            db.prepare(`UPDATE correction_log SET status = 'applied' WHERE id = ?`).run(c.id);
-            stats.processed++;
+            const result = require('./correction').applyCorrectionFeedback(db, c);
+            if (result.applied) stats.processed++;
+            stats.cascaded += result.cascaded;
         } catch (e) {
             console.error(`[Lifecycle] 纠正处理失败 #${c.id}:`, e.message);
         }

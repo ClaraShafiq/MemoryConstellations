@@ -1,6 +1,6 @@
 # 数据库迁移约定
 
-迁移集中在 `database.js`，由 `schema_version` 顺序记录。公共仓库当前最新版本为 v119。
+迁移集中在 `database.js`，由 `schema_version` 顺序记录。公共仓库当前最新版本为 v120。
 
 ## 规则
 
@@ -12,7 +12,7 @@
 - 迁移只创建协议、索引和安全默认值，不携带聊天、Profile、模型请求或生产状态。
 - schema 完成不代表 maintenance 或 verified 自动启用。
 
-## v104–v119
+## v104–v120
 
 | 版本 | 内容 |
 |---|---|
@@ -31,6 +31,7 @@
 | v117 | Claim Recovery、星座发现、纠错收件箱、Judgment seed、模型预算、向量回执和 release gate |
 | v118 | 检索投影正式支持 Saga |
 | v119 | 派生状态健康记录与 status-aware legacy FTS 触发器 |
+| v120 | 向量 receipt 有限恢复状态；纠错来源快照与幂等反馈标记 |
 
 ## 空库验证
 
@@ -40,4 +41,4 @@ SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 npm run test:memory-extensions
 ```
 
-测试应打印 `schema: 119`。如果临时文件已经存在，请换新路径，不要在旧文件上误判“空库迁移通过”。完整测试矩阵见 [TESTING.md](TESTING.md)。
+测试应打印 `schema: 120`。如果临时文件已经存在，请换新路径，不要在旧文件上误判“空库迁移通过”。`test:memory-v120-upgrade` 还会模拟 v119 原表并验证原地升级。完整测试矩阵见 [TESTING.md](TESTING.md)。

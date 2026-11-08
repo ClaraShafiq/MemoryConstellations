@@ -20,7 +20,8 @@
 | 调用预算 | 新增公共实现 | `memoryModelBudget.js` | 默认 0，按角色和 UTC 日 fail-closed |
 | SQL/向量投影与来源指纹 | 新增公共实现 | `memorySearchProjection.js`、`memoryVectorProjection.js` | 独立 collection、receipt、revision/source hash 远端核验 |
 | verified 发布与回滚 | 新增公共实现并已有参考切换验收 | `memoryReleaseGate.js`、`memoryReadMode.js`、`scripts/memory_release.js` | manifest 变化后 fail-closed；只允许显式 rollback 到 legacy；其他部署仍须独立验收 |
-| 派生状态健康与确定性修复 | 新增公共实现 | `memoryDerivedStateHealth.js`、`memoryProjectionReconciler.js`、`scripts/memory_health.js` | 三态健康；权威发布物重建；远端缺失/陈旧/待删/多余向量核验 |
+| 派生状态健康与确定性修复 | 新增公共实现 | `memoryDerivedStateHealth.js`、`memoryProjectionReconciler.js`、`scripts/memory_health.js` | 三态健康；本地 blocker 不受读模式隐藏；权威发布物重建；远端缺失/陈旧/待删/多余向量核验 |
+| 旧兼容纠错反馈 | 修复公共旧链 | `correction.js`、`lifecycle.js` | 保存来源消息快照；同源降权幂等；普通纠错拒绝空正确内容；不反向移植到现代 Claim 纠错协议 |
 | legacy FTS 一致性 | 适配旧公共实现 | `memoryLegacyFts.js`、`scripts/rebuild_fts.js` | 只索引 active Fragment；仅在 legacy 模式纳入权威健康检查 |
 | 可插拔角色上下文 | 泛化适配 | `worldContext.js` | 公共默认无私人 persona；部署方可注入 provider |
 | 旧语义旁路 fail-closed | 按公共仓库实际模块适配 | `archivist.js`、`skillManager.js`、`cognitiveModel.js`、`tasks/cron.js` | modern 模式不启动旧 writer；未制造不存在模块的假实现 |
