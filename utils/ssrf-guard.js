@@ -119,6 +119,33 @@ function isPrivateIPv6(hextets) {
     return false;
 }
 
+// ── 回环放行开关（默认关闭）──
+// 只用于管理员把记忆管线指向本机 OpenAI 兼容反代这一类场景：
+// 开启后仅放行「解析结果全部是回环地址」的目标（IPv4 127.0.0.0/8、IPv6 ::1），
+// 其它私网/保留段与公网 HTTP 仍然拒绝，公网 HTTPS 维持原有行为。
+function loopbackAllowed() {
+    const v = String(process.env.MEMORY_LLM_ALLOW_LOOPBACK || '').trim().toLowerCase();
+    return v === '1' || v === 'true';
+}
+
+function isLoopbackIP(ip) {
+    const host = stripBrackets(String(ip));
+    const family = net.isIP(host);
+    if (family === 4) {
+        const octets = host.split('.').map(Number);
+        return octets.length === 4 && octets[0] === 127;
+    }
+    if (family === 6) {
+        try {
+            const hextets = expandIPv6(host);
+            return hextets.slice(0, 7).every(h => h === 0) && hextets[7] === 1;
+        } catch (e) {
+            return false;
+        }
+    }
+    return false;
+}
+
 // ── 统一入口 ──
 
 // 判定一个（已解析出的）IP 地址是否属于私有/内网/保留段
@@ -149,8 +176,11 @@ async function validateEndpoint(endpointString) {
         throw new Error('无效的endpoint地址');
     }
 
+    const allowLoopback = loopbackAllowed();
     if (url.protocol !== 'https:') {
-        throw new Error('不允许访问该endpoint地址：仅支持HTTPS');
+        if (!(allowLoopback && url.protocol === 'http:')) {
+            throw new Error('不允许访问该endpoint地址：仅支持HTTPS');
+        }
     }
     if (url.username || url.password) {
         throw new Error('不允许访问该endpoint地址：不支持携带用户名/密码');
@@ -167,6 +197,20 @@ async function validateEndpoint(endpointString) {
 
     if (!addresses || addresses.length === 0) {
         throw new Error('无法解析endpoint地址');
+    }
+
+    if (allowLoopback) {
+        const loopbackFlags = addresses.map(({ address }) => isLoopbackIP(address));
+        const loopbackCount = loopbackFlags.filter(Boolean).length;
+        if (loopbackCount > 0) {
+            if (loopbackCount !== addresses.length) {
+                throw new Error('不允许访问该endpoint地址：解析结果中混有非回环地址');
+            }
+            return url;
+        }
+        if (url.protocol === 'http:') {
+            throw new Error('不允许访问该endpoint地址：仅支持HTTPS');
+        }
     }
 
     for (const { address } of addresses) {
@@ -191,6 +235,7 @@ function buildSafeUrl(validatedUrl, ...segments) {
 
 module.exports = {
     isPrivateIP,
+    isLoopbackIP,
     isPrivateIPv4,
     isPrivateIPv6,
     expandIPv6,
