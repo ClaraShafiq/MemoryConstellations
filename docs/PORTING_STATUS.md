@@ -1,10 +1,11 @@
 # 公共能力同步状态
 
-本表只记录可复用协议和公共实现，不记录任何参考部署的消息、数据库、角色 prompt、模型请求、成本、规模或运行状态。
+本表只记录可复用协议、公共实现和不含私密细节的验收边界，不记录任何参考部署的消息、数据库、角色 prompt、模型请求、成本或规模。
 
 | 能力 | 分类 | 公共落点 | 说明 |
 |---|---|---|---|
-| Scribe 原子观察、来源绑定、复合游标 | 直接移植并泛化 | `memoryScribe.js`、`memoryConversationSubjects.js` | 主体改为 user/assistant/third_party；支持精确消息重放 |
+| Scribe 完整语义观察、来源绑定、复合游标 | 直接移植并泛化 | `memoryScribe.js`、`memoryConversationSubjects.js` | 同批次先整体理解；主体改为 user/assistant/third_party/unknown；支持精确消息重放 |
+| Scribe 完整性审计 | 按公共闭集适配 | `memoryScribe.js` | 同批次过度拆分会重试；拒绝缺对象/含糊对象；同消息多段证据收拢为连续逐字引文 |
 | 失败不越过、60→30→15、自适应冷却 | 直接移植 | `memoryScribe.js` | 三次稳定失败后一小时冷却 |
 | Claim Review、Duty、Classification、Node Review | 直接移植并接线 | `memoryProtocol.js` 及对应 service | 下游继承来源车道；不支持 Claim 零模型结束 |
 | 被拒 Claim Recovery | 新增公共实现 | `memoryClaimRecovery.js` | 只读绑定消息，不读 Fragment 派生正文；旧 Claim 以 CAS supersede |
@@ -18,7 +19,7 @@
 | 实时/回补车道、单飞、租约自愈 | 直接移植并泛化 | `memoryMaintenanceRunner.js`、`memoryProtocol.js` | 在线 runner current-only；过期租约有限重试 |
 | 调用预算 | 新增公共实现 | `memoryModelBudget.js` | 默认 0，按角色和 UTC 日 fail-closed |
 | SQL/向量投影与来源指纹 | 新增公共实现 | `memorySearchProjection.js`、`memoryVectorProjection.js` | 独立 collection、receipt、revision/source hash 远端核验 |
-| verified 发布与回滚 | 新增公共实现 | `memoryReleaseGate.js`、`memoryReadMode.js`、`scripts/memory_release.js` | manifest 变化后 fail-closed；只允许显式 rollback 到 legacy |
+| verified 发布与回滚 | 新增公共实现并已有参考切换验收 | `memoryReleaseGate.js`、`memoryReadMode.js`、`scripts/memory_release.js` | manifest 变化后 fail-closed；只允许显式 rollback 到 legacy；其他部署仍须独立验收 |
 | 派生状态健康与确定性修复 | 新增公共实现 | `memoryDerivedStateHealth.js`、`memoryProjectionReconciler.js`、`scripts/memory_health.js` | 三态健康；权威发布物重建；远端缺失/陈旧/待删/多余向量核验 |
 | legacy FTS 一致性 | 适配旧公共实现 | `memoryLegacyFts.js`、`scripts/rebuild_fts.js` | 只索引 active Fragment；仅在 legacy 模式纳入权威健康检查 |
 | 可插拔角色上下文 | 泛化适配 | `worldContext.js` | 公共默认无私人 persona；部署方可注入 provider |
@@ -37,8 +38,8 @@
 - `same_as / part_of / related` 正式关系发布；
 - Status 替换前的重要经历沉降完整验收；
 - Macro Insight 的真实聊天意图路由；
-- 全局 verified 读取的具体部署最终切换；
+- 每个新部署的真实数据发布、召回验收和 verified 切换；
 - 每周健康扫描的自动调度、每月 Profile 全景复核和 assistant 长期演化 PT；
-- 一条具体部署的“新自然消息 → 正式写入 → verified 检索 → 聊天模型实际召回”最终验收。
+- 参考部署之外的“新自然消息 → 正式写入 → verified 检索 → 聊天模型实际召回”最终验收。
 
-公共仓库提供这些机制，不替任何部署宣称已经 running 或已经切读。`maintenance running` 与有效 `verified read mode` 必须分别核验。
+维护者参考部署已分别核验正式维护链 running 与有效 verified read mode，但公共仓库不替其他部署宣称已经 running 或已经切读。两种状态必须在每个部署中分别核验。

@@ -8,7 +8,7 @@ Memory Constellations 是一条面向长期 AI 关系的可审计记忆管线。
 
 ```mermaid
 flowchart LR
-  M[原始消息] --> S[Scribe 原子观察]
+  M[原始消息] --> S[Scribe 最小完整语义观察]
   S --> C[Claim<br/>主体·时间·来源]
   C --> E[待裁决证据池]
   E --> K[星座<br/>发现·身份·别名·准入]
@@ -29,7 +29,7 @@ flowchart LR
 
 | 层 | 唯一职责 |
 |---|---|
-| Fragment / Scribe observation | 从消息拆出带逐字引文的原子观察，不提前创建星座或判断人格 |
+| Fragment / Scribe observation | 从同一表达批次提取带逐字引文的最小完整语义单元，不提前创建星座或判断人格 |
 | Claim / evidence pool | 保存主体、来源、时间、支持度、职责、归属和阻断原因 |
 | Constellation | 维护有导航价值的实体身份、证据化别名和准入状态 |
 | Episode | 把合格 Claim 组织成一次有边界、可版本化的事件叙事 |
@@ -83,6 +83,7 @@ DB_PATH=./memory_constellations.db npm start
 
 ```bash
 DB_PATH=/tmp/memory-modern.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-modern
+DB_PATH=/tmp/memory-scribe-units.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-scribe-units
 DB_PATH=/tmp/memory-lanes.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-lanes
 DB_PATH=/tmp/memory-extensions.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-extensions
 DB_PATH=/tmp/memory-derived-state.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-derived-state
@@ -115,14 +116,16 @@ DB_PATH=./memory_constellations.db npm run memory:health:repair -- --execute
 
 ## 当前完成度与 Roadmap
 
-公共仓库已实现阶段 1–5 的通用控制面：原子观察与精确重放、Claim 恢复和证据池、星座发现/身份/别名/准入、Episode/Saga、Profile 三字段差量发布、纠错收件箱、实时/回补分车道、单飞/预算/租约、自愈、SQL/向量投影、来源指纹、verified 门禁与回滚。
+公共仓库已实现阶段 1–5 的通用控制面：完整语义观察与精确重放、Claim 恢复和证据池、星座发现/身份/别名/准入、Episode/Saga、Profile 三字段差量发布、纠错收件箱、实时/回补分车道、单飞/预算/租约、自愈、SQL/向量投影、来源指纹、verified 门禁与回滚。
 
-这不等于某个部署已经切换完成。默认仍是 `legacy` 读取、`backfill` 暂停和模型预算 0。以下能力仍未完成或未作公共生产承诺：
+维护者的参考部署已经完成自己的发布门禁与聊天消费者 verified 切换，证明这套切换流程可实际运行；该部署状态不会自动传递给其他安装。公共仓库的干净安装仍默认 `legacy` 读取、`backfill` 暂停和模型预算 0，每个部署都必须用自己的消息、投影与召回完成验收。
+
+以下能力仍未完成或未作公共生产承诺：
 
 - `same_as / part_of / related` 正式关系发布层；
 - Status 被替换前的重要经历沉降机制的完整验收；
 - Macro Insight 的真实聊天意图路由；
-- 全局 verified 聊天读取的最终生产切换；
+- 每个新部署的真实消息到 verified 聊天召回验收与按需切换；
 - 每周自动调度健康扫描、每月活跃 Profile 全景复核和 assistant 长期演化 PT；
 - 任一私有部署的旧数据全量回补和运营脚本。
 

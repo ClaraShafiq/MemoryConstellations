@@ -12,6 +12,16 @@ npm run test:memory-modern
 
 覆盖空库 v119、Scribe 逐字引文和主体、Claim/Duty/Classification/Node Review、证据池、星座身份/别名/准入、Episode、Saga、Facts/Status、Judgment 证据门、Codex Judgment 禁令、搜索投影、CAS 和租约。
 
+## Scribe 完整语义单元
+
+```bash
+DB_PATH=/tmp/memory-scribe-units.sqlite \
+SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+npm run test:memory-scribe-units
+```
+
+覆盖同一表达批次的 sibling 审计与重试、最小连续逐字引文收拢、缺对象动作和含糊对象拒绝。fixture 是新建的虚构港口手册与灯具事件，不来自任何部署消息。
+
 ## 车道、失败停点与旧旁路
 
 ```bash
@@ -100,4 +110,4 @@ npm run check:privacy
 5. 激活后实际聊天模型召回正确内容。
 6. 修改投影会让 verified 读取 fail-closed，并成功演练显式 rollback 到 legacy。
 
-在第 5 步完成前，不能写“现代管线已全面上线”。
+维护者参考部署已完成自己的第 5 步并切到 verified；这不构成其他部署的验收。任何新部署在自己的第 5 步完成前，都不能写“现代管线已全面上线”。

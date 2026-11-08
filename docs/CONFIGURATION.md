@@ -44,7 +44,7 @@ API key 会加密保存。不要在 Issue、日志、截图或提交中公开 `.
 `pipeline`：
 
 - `mode=legacy`：启用旧 Archivist/Scribe 调度。
-- `mode=modern`：启用原子观察和受控维护 runner，并停止旧语义写入旁路。
+- `mode=modern`：启用完整语义观察和受控维护 runner，并停止旧语义写入旁路。
 - `chat_read_mode` 与 `semantic_maintenance` 只是配置文件中的部署说明；权威值在数据库 `user_settings`，通过仓库命令切换。
 - `persona_writer` 描述部署方的人格写作者集成意图；公共仓库不会因填了模型名就自动授予 Judgment 写权限。
 
@@ -78,7 +78,7 @@ DB_PATH=./memory_constellations.db npm run memory:health:repair -- --execute
 
 ## 模型与适配器合同
 
-Scribe 必须输出原子观察、合法主体、闭集 domain/时间状态和逐字引文。结构化维护者必须实现 `propose({ job, input })` 并返回 allowlist action。人格写作者必须独占非空第一人称 Judgment。聊天主模型只消费发布后的聊天包。
+Scribe 必须输出可独立消费的最小完整语义观察、合法主体、闭集 domain/时间状态和逐字引文；同一表达批次不能仅因句子、domain 或时间状态不同而机械切碎。结构化维护者必须实现 `propose({ job, input })` 并返回 allowlist action。人格写作者必须独占非空第一人称 Judgment。聊天主模型只消费发布后的聊天包。
 
 `input` 是宿主从正式表生成的最小只读快照，不包含任意 SQL 能力。无论模型或 IDE 如何替换，都不能绕过证据指纹、revision/CAS、租约、预算、producer role 和唯一写入者校验。
 

@@ -8,6 +8,7 @@
     "setup:llm": "node scripts/setup_llm.js",
     "vacuum": "node scripts/vacuum.js",
     "test:memory-modern": "node tests/modern_memory_pipeline.js",
+    "test:memory-scribe-units": "node tests/memory_scribe_semantic_units.js",
     "test:memory-lanes": "node tests/memory_lane_contracts.js",
     "test:memory-extensions": "node tests/memory_pipeline_extensions.js",
     "test:memory-derived-state": "node tests/memory_derived_state_control.js",

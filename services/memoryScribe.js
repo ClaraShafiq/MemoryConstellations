@@ -6,9 +6,13 @@ const { getWorldContext } = require('./worldContext');
 const protocol = require('./memoryProtocol');
 const subjects = require('./memoryConversationSubjects');
 
-const CONTRACT = 'atomic-observation-v1';
+const CONTRACT = 'complete-semantic-unit-v2';
+const MAX_BODY_CHARS = 180;
 const MIN_RECOVERY_BATCH = 15;
 const FAILURE_BACKOFF_SECONDS = 60 * 60;
+
+const GENERIC_OBJECT_RE = /(?:[这那](?:件|个)[^，。！？\n]{0,12}(?:衣服|东西|物品|商品|款式|事情|地方)|(?:奇怪的|某个?|某种|什么|一些|有些|不明的|乱七八糟的)(?:东西|事情|事|人|关系|因素|问题)|外物|任何(?:事|东西|事物)|\b(?:(?:this|that|some|strange|unknown|external|any)\s+(?:thing|matter|issue|place|factor)s?|something\s+(?:strange|unknown|external)|something|anything)\b)/i;
+const BARE_ACTION_RE = /^(?:(?:(?:the\s+)?(?:user|assistant)|[^，。！？,.!?\s]{1,32})(?:当时|目前|现在|刚刚|已经|还|尚)?(?:尚未|还没|没有|没|未)?(?:通关|看完|读完|写完|完成|开始|继续|买下|玩过|看过|读过)(?:了|过|呢)?|(?:the\s+)?(?:user|assistant)\s+(?:(?:has|have|had|is|was)\s+)?(?:not\s+)?(?:finished|completed|started|continued|bought|watched|read|played)(?:\s+(?:it|that))?)[。！？.!?]?$/i;
 
 function decodeMessage(row) {
     return { ...row, content: protocol.messageText(row) };
@@ -28,7 +32,7 @@ function pendingMessages(db, cursor, limit = 60) {
         .all(cursor.at, cursor.at, cursor.id, limit).map(decodeMessage);
 }
 
-function buildPrompt(messages) {
+function buildPrompt(messages, feedback = '') {
     const input = messages.map(message => ({
         message_id: message.id,
         speaker: subjects.sourceSpeaker(message.sender),
@@ -36,12 +40,19 @@ function buildPrompt(messages) {
         text: message.content,
     }));
     return {
-        system: `${getWorldContext('scribe')}\n\nYou are the Scribe. Extract only atomic observations directly supported by exact quotes.
+        system: `${getWorldContext('scribe')}\n\nYou are the Scribe. Extract the smallest complete semantic units directly supported by exact quotes.
 Do not decide constellation identity, admission, profile fields, personality, or relationships.
 Do not use prior memory. Do not merge independent claims.
 Preserve who the observation is about. An assistant self-statement is not a user fact.
-Return JSON only: {"entries":[{"body":"neutral atomic statement","subject":"user|assistant|third_party|unknown","domain":"user_statement|observed_activity|interaction|companion_opinion|inference|fiction|third_party","temporal_state":"unknown|planned|in_progress|completed|cancelled|historical","event_from":null,"event_until":null,"time_precision":"unknown|day","evidence":[{"message_id":1,"quote":"exact substring"}]}]}.
-If evidence is insufficient, omit the entry.`,
+"Atomic" does not mean one sentence or one clause per entry. An entry must remain understandable outside the chat: who, what object, and what happened or was believed must be explicit.
+Messages from the same chat, speaker, and timestamp are one expression burst. Understand the burst as a whole before splitting it. Merge background, action, result, feeling, or explanation when they concern the same object and will be retrieved or updated together. A domain or temporal-state difference alone is not a reason to split.
+Split only when each part concerns an independent object or future use and remains complete by itself.
+If one speaker expresses relationship insecurity and the other gives a concrete reassurance or explanation, preserve both sides as one domain=interaction entry with both exact quotes. Use subject=unknown when no single subject represents the complete interaction; do not infer a relationship label.
+Never leave a bare action without its object. Never reduce a concrete explanation back to vague phrases such as "that thing", "something strange", or "anything". If the object cannot be grounded in exact evidence, omit the entry.
+Each evidence message_id may appear at most once per entry. When one message contains multiple supporting spans, quote the smallest continuous source range covering them.
+Keep body at or below ${MAX_BODY_CHARS} characters.
+Return JSON only: {"entries":[{"body":"neutral, independently consumable semantic unit","subject":"user|assistant|third_party|unknown","domain":"user_statement|observed_activity|interaction|companion_opinion|inference|fiction|third_party","temporal_state":"unknown|planned|in_progress|completed|cancelled|historical","event_from":null,"event_until":null,"time_precision":"unknown|day","evidence":[{"message_id":1,"quote":"exact substring"}]}]}.
+Before returning, audit sibling entries from the same expression burst and merge any that only make sense together. If evidence is insufficient, omit the entry.${feedback ? `\n\nPrevious-attempt audit:\n${feedback}` : ''}`,
         user: JSON.stringify({ contract: CONTRACT, messages: input }),
     };
 }
@@ -58,12 +69,18 @@ function parseEntries(reply) {
 
 function validateEntry(messageMap, entry) {
     if (!entry || typeof entry.body !== 'string' || !entry.body.trim()) protocol.fail('scribe_entry_invalid');
+    if (entry.body.trim().length > MAX_BODY_CHARS) protocol.fail('scribe_body_too_long');
+    const incomplete = incompleteBodyReason(entry.body);
+    if (incomplete) protocol.fail(incomplete);
     if (!protocol.DOMAINS.includes(entry.domain)) protocol.fail('scribe_domain_invalid');
     if (!protocol.TEMPORAL_STATES.includes(entry.temporal_state || 'unknown')) protocol.fail('scribe_temporal_invalid');
     if (!Array.isArray(entry.evidence) || entry.evidence.length === 0) protocol.fail('scribe_evidence_required');
+    const seenMessageIds = new Set();
     const sources = entry.evidence.map(item => {
         const message = messageMap.get(Number(item.message_id));
         if (!message || typeof item.quote !== 'string' || !message.content.includes(item.quote)) protocol.fail('scribe_quote_not_exact');
+        if (seenMessageIds.has(message.id)) protocol.fail('scribe_duplicate_message_evidence');
+        seenMessageIds.add(message.id);
         return {
             message_id: message.id,
             message_fingerprint: protocol.messageFingerprint(message),
@@ -86,9 +103,100 @@ function validateEntry(messageMap, entry) {
     };
 }
 
-async function extract(messages) {
+function incompleteBodyReason(body) {
+    const text = String(body || '').trim();
+    if (GENERIC_OBJECT_RE.test(text)) return 'scribe_generic_object';
+    return BARE_ACTION_RE.test(text) ? 'scribe_missing_action_object' : null;
+}
+
+function coalesceDuplicateEvidence(entry, messages) {
+    if (!entry || !Array.isArray(entry.evidence) || entry.evidence.length < 2) return entry;
+    const messageMap = new Map((messages || []).map(message => [Number(message.id), message]));
+    const groups = new Map();
+    for (const item of entry.evidence) {
+        const id = Number(item?.message_id);
+        if (!groups.has(id)) groups.set(id, []);
+        groups.get(id).push(item);
+    }
+    if (![...groups.values()].some(items => items.length > 1)) return entry;
+    const evidence = [];
+    for (const [id, items] of groups) {
+        if (items.length === 1) {
+            evidence.push(items[0]);
+            continue;
+        }
+        const text = String(messageMap.get(id)?.content || '');
+        const spans = items.map(item => {
+            const quote = typeof item?.quote === 'string' ? item.quote.trim() : '';
+            const start = quote ? text.indexOf(quote) : -1;
+            return { start, end: start < 0 ? -1 : start + quote.length };
+        });
+        if (!text || spans.some(span => span.start < 0)) {
+            evidence.push(...items);
+            continue;
+        }
+        const start = Math.min(...spans.map(span => span.start));
+        const end = Math.max(...spans.map(span => span.end));
+        evidence.push({ message_id: id, quote: text.slice(start, end) });
+    }
+    return { ...entry, evidence };
+}
+
+function sameBurstSplitDiagnostics(entries, messages) {
+    if (!Array.isArray(entries) || entries.length < 2) return [];
+    const messageMap = new Map((messages || []).map(message => [Number(message.id), message]));
+    const groups = new Map();
+    for (let index = 0; index < entries.length; index++) {
+        for (const evidence of entries[index]?.evidence || []) {
+            const message = messageMap.get(Number(evidence.message_id));
+            if (!message) continue;
+            const at = String(message.picked_up_at || message.timestamp || '');
+            if (!at) continue;
+            const key = [Number(message.chat_id), at, subjects.sourceSpeaker(message.sender),
+                entries[index].subject || 'unknown'].join('|');
+            if (!groups.has(key)) groups.set(key, new Set());
+            groups.get(key).add(index);
+        }
+    }
+    return [...groups.entries()].map(([key, indexes]) => ({ key, indexes: [...indexes].sort((a, b) => a - b) }))
+        .filter(group => group.indexes.length > 1);
+}
+
+function auditEntries(rawEntries, messages, { checkSplit = true } = {}) {
+    if (!Array.isArray(rawEntries)) protocol.fail('scribe_invalid_contract');
+    const entries = rawEntries.map(entry => coalesceDuplicateEvidence(entry, messages));
+    const hard = entries.map((entry, index) => ({ index, reason: incompleteBodyReason(entry?.body) }))
+        .filter(item => item.reason);
+    const split = checkSplit ? sameBurstSplitDiagnostics(entries, messages) : [];
+    return { entries, hard, split };
+}
+
+function auditFeedback(audit) {
+    const parts = [];
+    if (audit.split.length) parts.push(`Sibling entries may be over-split: ${JSON.stringify(audit.split)}. Merge entries that concern the same object and future retrieval/update use; keep separate objects independent.`);
+    if (audit.hard.length) parts.push(`These entries are not independently consumable: ${JSON.stringify(audit.hard)}. Restore the concrete object and scene from exact quotes, or omit them.`);
+    return parts.join('\n');
+}
+
+async function extractWithAudit(messages, extractEntries, maxAttempts = 2) {
+    let feedback = '';
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const rawEntries = await extractEntries(messages, { attempt, feedback });
+        const audit = auditEntries(rawEntries, messages, { checkSplit: attempt === 1 });
+        if (attempt < maxAttempts && (audit.hard.length || audit.split.length)) {
+            feedback = auditFeedback(audit);
+            continue;
+        }
+        const rejected = new Set(audit.hard.map(item => item.index));
+        return { entries: audit.entries.filter((_entry, index) => !rejected.has(index)),
+            rejected: rejected.size, attempts: attempt, feedback };
+    }
+    protocol.fail('scribe_audit_exhausted');
+}
+
+async function extract(messages, { feedback = '' } = {}) {
     require('./memoryModelBudget').reserve(getDb(), 'scribe');
-    const prompt = buildPrompt(messages);
+    const prompt = buildPrompt(messages, feedback);
     return parseEntries(await callLLM([{ role: 'user', parts: [{ text: prompt.user }] }], prompt.system, null, {
         temperature: 0, maxOutputTokens: 8192,
     }));
@@ -138,15 +246,16 @@ async function runBatch(messages, cursor, { extractEntries = extract } = {}) {
     if (!Array.isArray(messages) || messages.length === 0) return { outcome: 'no_change' };
     const db = getDb();
     const decoded = messages.map(message => message.content && !message.content.startsWith('enc:') ? message : decodeMessage(message));
-    let rawEntries;
+    let audited;
     try {
-        rawEntries = await extractEntries(decoded);
+        audited = await extractWithAudit(decoded, extractEntries);
     } catch (error) {
         db.prepare(`INSERT INTO scribe_runs(processed_until,processed_until_id,messages_processed,fragments_written,status)
             VALUES(?,?,0,0,'failed')`).run(cursor.at, cursor.id);
         throw error;
     }
-    return persist(decoded, cursor, rawEntries, { advanceCursor: true });
+    const result = await persist(decoded, cursor, audited.entries, { advanceCursor: true });
+    return { ...result, observations_rejected: audited.rejected, extraction_attempts: audited.attempts };
 }
 
 async function replayMessages(messageIds, { extractEntries = extract } = {}) {
@@ -159,8 +268,9 @@ async function replayMessages(messageIds, { extractEntries = extract } = {}) {
         FROM messages WHERE id IN(${marks}) AND status='sent' ORDER BY COALESCE(picked_up_at,timestamp),id`).all(...ids);
     if (messages.length !== ids.length) protocol.fail('scribe_replay_message_missing');
     const decoded = messages.map(decodeMessage);
-    const rawEntries = await extractEntries(decoded);
-    return persist(decoded, lastCursor(db), rawEntries, { advanceCursor: false });
+    const audited = await extractWithAudit(decoded, extractEntries);
+    const result = await persist(decoded, lastCursor(db), audited.entries, { advanceCursor: false });
+    return { ...result, observations_rejected: audited.rejected, extraction_attempts: audited.attempts };
 }
 
 function recoveryState(db, cursor, maxBatch) {
@@ -193,5 +303,7 @@ async function checkAndRun(options = {}) {
     return protocol.tracked(db, 'scribe', () => runBatch(messages, cursor));
 }
 
-module.exports = { CONTRACT, MIN_RECOVERY_BATCH, FAILURE_BACKOFF_SECONDS, lastCursor, pendingMessages,
-    buildPrompt, parseEntries, validateEntry, persist, runBatch, replayMessages, recoveryState, checkAndRun };
+module.exports = { CONTRACT, MAX_BODY_CHARS, MIN_RECOVERY_BATCH, FAILURE_BACKOFF_SECONDS, lastCursor, pendingMessages,
+    buildPrompt, parseEntries, validateEntry, incompleteBodyReason, coalesceDuplicateEvidence,
+    sameBurstSplitDiagnostics, auditEntries, extractWithAudit, persist, runBatch, replayMessages,
+    recoveryState, checkAndRun };
