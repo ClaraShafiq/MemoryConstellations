@@ -261,7 +261,8 @@ async function query(db, text, limit = 8, { transport = require('./memory').chro
         if (meta.projection_key !== receipt.projection_key || meta.source_hash !== receipt.source_hash
             || Number(meta.revision) !== Number(receipt.revision)) continue;
         const row = db.prepare('SELECT * FROM memory_search_projection WHERE projection_key=?').get(receipt.projection_key);
-        if (row) rows.push({ ...row, text: protocol.decrypt(row.text_enc), metadata: JSON.parse(row.metadata_json) });
+        if (row && require('./memoryReadPolicy').projectionCurrent(db, row)) rows.push({ ...row,
+            text: protocol.decrypt(row.text_enc), metadata: JSON.parse(row.metadata_json) });
     }
     return rows;
 }

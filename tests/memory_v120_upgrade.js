@@ -2,6 +2,15 @@
 
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
+if (!process.env.DB_PATH) {
+    const fs = require('node:fs');
+    const os = require('node:os');
+    const path = require('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-constellations-upgrade-'));
+    process.env.DB_PATH = path.join(dir, 'upgrade.db');
+    process.once('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
+}
+process.env.SANCTUARY_ENCRYPTION_KEY ||= '4'.repeat(64);
 
 if (process.env.MEMORY_V120_SEED === '1') {
     const db = require('../database').initDatabase();
@@ -47,7 +56,23 @@ if (process.env.MEMORY_V120_SEED === '1') {
         DROP TABLE memory_vector_projection_v120;
         CREATE INDEX idx_memory_vector_projection_ready
             ON memory_vector_projection(status,updated_at);
-        DELETE FROM schema_version WHERE version=120;
+        ALTER TABLE memory_claim_recoveries RENAME TO memory_claim_recoveries_v120;
+        CREATE TABLE memory_claim_recoveries (
+            fragment_id INTEGER PRIMARY KEY REFERENCES memory_fragments(id) ON DELETE CASCADE,
+            input_hash TEXT NOT NULL,
+            replacement_claim_ids_json TEXT NOT NULL CHECK(json_valid(replacement_claim_ids_json)),
+            outcome TEXT NOT NULL CHECK(outcome IN('recovered','needs_context')),
+            reviewer TEXT NOT NULL,
+            recovered_at INTEGER NOT NULL
+        );
+        INSERT INTO memory_claim_recoveries(fragment_id,input_hash,replacement_claim_ids_json,outcome,reviewer,recovered_at)
+            SELECT fragment_id,input_hash,replacement_claim_ids_json,outcome,reviewer,recovered_at
+            FROM memory_claim_recoveries_v120;
+        DROP TABLE memory_claim_recoveries_v120;
+        DROP TABLE IF EXISTS memory_claim_review_passes;
+        DROP TABLE IF EXISTS memory_foreground_leases;
+        DROP TABLE IF EXISTS memory_runtime_state;
+        DELETE FROM schema_version WHERE version>=120;
     `);
     db.close();
     process.exit(0);
@@ -64,7 +89,7 @@ if (seeded.status !== 0) {
 }
 
 const db = require('../database').initDatabase();
-assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 120);
+assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 124);
 const correctionColumns = new Set(db.prepare('PRAGMA table_info(correction_log)').all().map(row => row.name));
 assert.ok(correctionColumns.has('source_msg_ids_json'));
 assert.ok(correctionColumns.has('feedback_applied_at'));
@@ -77,5 +102,11 @@ db.prepare(`UPDATE memory_vector_projection SET status='needs_review'
     WHERE projection_key='claim:upgrade'`).run();
 assert.equal(db.prepare("SELECT status FROM memory_vector_projection WHERE projection_key='claim:upgrade'").get().status,
     'needs_review');
+const recoveryColumns = new Set(db.prepare('PRAGMA table_info(memory_claim_recoveries)').all().map(row => row.name));
+assert.ok(recoveryColumns.has('preserved_claim_ids_json'));
+assert.ok(recoveryColumns.has('disputed_claim_ids_json'));
+assert.ok(recoveryColumns.has('contract_version'));
+assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_claim_review_passes'").get());
+assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_foreground_leases'").get());
 
-console.log(JSON.stringify({ ok: true, from_schema: 119, schema: 120, historical_feedback_preserved: true }));
+console.log(JSON.stringify({ ok: true, from_schema: 119, schema: 124, historical_feedback_preserved: true }));

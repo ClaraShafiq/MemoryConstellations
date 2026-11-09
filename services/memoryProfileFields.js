@@ -2,6 +2,7 @@
 
 const protocol = require('./memoryProtocol');
 const projection = require('./memoryProfileProjection');
+const { CONTEXT_SCOPES, UNCERTAINTY_MARKERS } = require('./memorySemanticContracts');
 const { isCoreIdentity } = require('./memoryConfig');
 
 const OBJECTIVE_PRODUCERS = new Set(['structured_reviewer', 'deterministic_rule', 'legacy_migration']);
@@ -119,9 +120,14 @@ function selectedSeeds(db, entityId, ids) {
 
 function requireObjectiveEvidence(db, field, claims) {
     for (const claim of claims) {
-        const duty = db.prepare('SELECT duty,state FROM memory_claim_duties WHERE claim_id=?').get(claim.id);
-        if (duty?.state !== 'supported') protocol.fail('profile_duty_missing');
-        if (field === 'facts' && ['current_state', 'opinion', 'fiction', 'unresolved'].includes(duty.duty))
+        const duty = db.prepare(`SELECT claim_revision,duty,context_scope,state FROM memory_claim_duties
+            WHERE claim_id=?`).get(claim.id);
+        if (duty?.state !== 'supported' || Number(duty.claim_revision) !== Number(claim.revision)
+            || !CONTEXT_SCOPES.includes(duty.context_scope)) protocol.fail('profile_duty_missing');
+        if (!claim.node_roles?.some(row => row.role === 'subject'
+            && Number(row.claim_revision) === Number(claim.revision) && row.input_hash === claim.input_hash))
+            protocol.fail('profile_node_assignment_missing');
+        if (field === 'facts' && ['current_state', 'event', 'opinion', 'fiction', 'unresolved'].includes(duty.duty))
             protocol.fail('profile_fact_duty_invalid');
         if (field === 'status') {
             if (!['current_state', 'event'].includes(duty.duty)) protocol.fail('profile_status_duty_invalid');
@@ -132,6 +138,11 @@ function requireObjectiveEvidence(db, field, claims) {
             }
         }
     }
+}
+
+function preserveQualification(claims, text) {
+    if (claims.some(claim => UNCERTAINTY_MARKERS.test(claim.body)) && !UNCERTAINTY_MARKERS.test(String(text || '')))
+        protocol.fail('profile_qualified_attribute_lost');
 }
 
 function requireCorrection(claims) {
@@ -149,6 +160,7 @@ function applyObjectiveOperations(db, input, field, current, operations) {
         if (operation.action === 'add') {
             const text = String(operation.text || '').trim();
             if (!text) protocol.fail('profile_operation_text_required');
+            preserveQualification(claims, text);
             items.push({ id: fieldId(field, text, claims.map(claim => claim.id)), text,
                 claim_ids: claims.map(claim => claim.id), seed_ids: [] });
         } else {
@@ -157,6 +169,7 @@ function applyObjectiveOperations(db, input, field, current, operations) {
             else {
                 const text = String(operation.text || '').trim();
                 if (!text) protocol.fail('profile_operation_text_required');
+                preserveQualification(claims, text);
                 items[index] = { id: items[index].id, text, claim_ids: claims.map(claim => claim.id), seed_ids: [] };
             }
         }
@@ -215,9 +228,9 @@ function assertProducer(field, items, meta) {
 }
 
 function publish(db, entityId, field, draft, meta) {
-    const input = projection.snapshot(db, entityId);
-    if (draft.input_hash !== input.input_hash) protocol.fail('profile_projection_cas_failed');
     if (!['facts', 'status', 'judgment'].includes(field)) protocol.fail('profile_field_invalid');
+    const input = projection.snapshot(db, entityId, field);
+    if (draft.input_hash !== input.input_hash) protocol.fail('profile_projection_cas_failed');
     if (field === 'judgment' && !['persona_writer', 'judgment_gate'].includes(meta?.producer))
         protocol.fail('judgment_persona_writer_required');
     const previous = readField(db, entityId, field);
@@ -233,6 +246,7 @@ function publish(db, entityId, field, draft, meta) {
                 claim_ids: evidence.claimIds, seed_ids: evidence.seedIds }];
         } else {
             requireObjectiveEvidence(db, field, claims);
+            preserveQualification(claims, draft.value);
             items = [{ id: fieldId(field, draft.value, claims.map(claim => claim.id)), text: String(draft.value).trim(),
                 claim_ids: claims.map(claim => claim.id), seed_ids: [] }];
         }
@@ -271,7 +285,7 @@ function publish(db, entityId, field, draft, meta) {
 }
 
 function enqueueJudgment(db, entityId, { priority = protocol.BACKFILL_JOB_PRIORITY } = {}) {
-    const input = projection.snapshot(db, entityId);
+    const input = projection.snapshot(db, entityId, 'judgment');
     const evidence = input.claims.filter(claim => claim.domain === 'companion_opinion'
         && claim.sources.some(source => source.speaker === 'assistant'));
     const seeds = db.prepare(`SELECT COUNT(*) count FROM memory_judgment_seeds
@@ -285,11 +299,12 @@ function enqueueJudgment(db, entityId, { priority = protocol.BACKFILL_JOB_PRIORI
 }
 
 function enqueueFields(db, entityId, { priority = protocol.BACKFILL_JOB_PRIORITY } = {}) {
-    const input = projection.snapshot(db, entityId);
+    const facts = projection.snapshot(db, entityId, 'facts');
+    const status = projection.snapshot(db, entityId, 'status');
     protocol.enqueueJob(db, { stage: 'profile_facts', targetType: 'entity', targetId: entityId,
-        inputRevision: 1, inputHash: input.input_hash, priority });
+        inputRevision: 1, inputHash: facts.input_hash, priority });
     protocol.enqueueJob(db, { stage: 'profile_status', targetType: 'entity', targetId: entityId,
-        inputRevision: 1, inputHash: input.input_hash, priority });
+        inputRevision: 1, inputHash: status.input_hash, priority });
     return { ...enqueueJudgment(db, entityId, { priority }), objective_fields: ['facts', 'status'] };
 }
 

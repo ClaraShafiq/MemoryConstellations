@@ -59,7 +59,7 @@ MEMORY_MAINTENANCE_DAILY_CALL_LIMIT=0
 DB_PATH=./memory_constellations.db npm run setup:llm
 ```
 
-该命令从空库迁移到 schema v119，把 API key 加密写入指定数据库，并设置为默认模型连接。之后所有启动、维护和发布命令都要使用相同 `DB_PATH`。
+该命令从空库迁移到 schema v124，把 API key 加密写入指定数据库，并设置为默认模型连接。之后所有启动、维护和发布命令都要使用相同 `DB_PATH`。
 
 ## 4. 运行聚焦测试
 
@@ -69,6 +69,9 @@ DB_PATH=./memory_constellations.db npm run setup:llm
 DB_PATH=/tmp/memory-modern.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-modern
 DB_PATH=/tmp/memory-lanes.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-lanes
 DB_PATH=/tmp/memory-extensions.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-extensions
+SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-latest-contracts
+SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-background
+SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-v124-upgrade
 npm run test:llm-config
 npm run test:contracts
 npm run test:ssrf
@@ -90,7 +93,7 @@ DB_PATH=./memory_constellations.db npm start
 curl http://127.0.0.1:3000/api/health
 ```
 
-初始响应应包含 `ok: true`、`schema_version: 118`、`chat_read_mode: legacy`、`semantic_maintenance: backfill`、各层计数和 verified 向量 blocker。健康接口不返回记忆正文。
+初始响应应包含 `ok: true`、`schema_version: 124`、`chat_read_mode: legacy`、`semantic_maintenance: backfill`、各层计数和 verified 向量 blocker。健康接口不返回记忆正文。
 
 ## 6. 接入消息与纠错证据
 
@@ -128,6 +131,18 @@ DB_PATH=./memory_constellations.db npm run memory:maintenance:start
 
 `maintenance: running` 只表示 Scribe、当前车道审查、确定性推进和向量同步可以运行。在线 runner 只租用 priority 100 的实时任务；历史回补不会被顺带消费。暂停命令：
 
+modern runner 在独立子进程中执行。若外部聊天程序的回复生成时间可能超过 `/api/recall`，应把整个回复窗口包在前台租约中：
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/memory/runtime/foreground/start \
+  -H 'content-type: application/json' -d '{"owner":"chat-host","ttl_ms":300000}'
+# 使用返回 token；回复完成后：
+curl -X POST http://127.0.0.1:3000/api/memory/runtime/foreground/end \
+  -H 'content-type: application/json' -d '{"token":"returned-token"}'
+```
+
+精确 canary 应给受控执行器明确的 `targetId`，不要用普通 current 队列轮询代替单案验收。
+
 ```bash
 DB_PATH=./memory_constellations.db npm run memory:maintenance:pause
 ```
@@ -157,7 +172,7 @@ DB_PATH=./memory_constellations.db npm run memory:release:prepare
 DB_PATH=./memory_constellations.db npm run memory:release:activate
 ```
 
-`requested_chat_read_mode=verified` 不保证有效读模式一定是 verified。投影 revision、source hash 或远端回执任一不一致时，消费者自动回落 legacy。显式回滚：
+`requested_chat_read_mode=verified` 不保证有效读模式一定是 verified。投影 revision、source hash、当前 Claim/Duty/Node 归属或远端回执任一不一致时，有效模式会变成 `blocked`，读取返回 503；不会自动回落 legacy。显式回滚：
 
 ```bash
 DB_PATH=./memory_constellations.db npm run memory:release:rollback

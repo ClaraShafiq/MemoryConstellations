@@ -81,6 +81,8 @@ DB_PATH=./memory_constellations.db npm run memory:health:repair -- --execute
 
 Scribe 必须输出可独立消费的最小完整语义观察、合法主体、闭集 domain/时间状态和逐字引文；同一表达批次不能仅因句子、domain 或时间状态不同而机械切碎。结构化维护者必须实现 `propose({ job, input })` 并返回 allowlist action。人格写作者必须独占非空第一人称 Judgment。聊天主模型只消费发布后的聊天包。
 
+Claim Review 是两个独立 job：适配器收到的 `review_pass` 必须原样回填为 `pass=a|b`。宿主只在两个 pass 对 support、attribution 和 temporal state 一致时发布。适配器不得读取另一个 pass 的输出，也不能把分歧强制折中。
+
 `input` 是宿主从正式表生成的最小只读快照，不包含任意 SQL 能力。无论模型或 IDE 如何替换，都不能绕过证据指纹、revision/CAS、租约、预算、producer role 和唯一写入者校验。
 
 ## 可插拔角色上下文
@@ -91,4 +93,6 @@ Scribe 必须输出可独立消费的最小完整语义观察、合法主体、�
 
 星图 UI 与服务端共同使用 `shared/memoryRoutes.js`。新增 `/api/memory` UI 端点时要同步更新该合同。
 
-`/api/messages`、`/api/recall`、`/api/memory/corrections` 是 loopback/受信集成接口，不自带面向公网的 API token 方案。公网部署必须在外层补 TLS、鉴权、速率和请求大小限制。
+`/api/messages`、`/api/recall`、`/api/memory/corrections` 和 `/api/memory/runtime/*` 是 loopback/受信集成接口，不自带面向公网的 API token 方案。公网部署必须在外层补 TLS、鉴权、速率和请求大小限制。
+
+外部聊天宿主若在 recall 后还会长时间调用聊天模型，应在整个回复窗口持有 `/api/memory/runtime/foreground/start` 返回的 token，并在 `foreground/end` 释放。租约最长十分钟；异常退出后会自动过期，正常释放会触发一分钟后台冷却。

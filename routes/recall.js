@@ -35,13 +35,24 @@ router.post('/recall', async (req, res) => {
                 message: '现代记忆发布物未通过门禁；请检查 /api/health 或显式回滚。' });
         }
         if (mode === 'verified') {
-            const vectorRows = await verifiedVectors.query(db, q, n);
-            const sqlRows = verifiedSearch.search(db, q, n);
-            const seen = new Set();
-            const rows = [...vectorRows, ...sqlRows].filter(row => !seen.has(row.projection_key) && seen.add(row.projection_key));
-            const packet = chatPacket.build(rows.slice(0, n));
-            return res.json({ success: true, query: q, count: packet.units.length,
-                formatted: chatPacket.format(packet), packet });
+            const gate = require('../services/memoryForegroundGate');
+            const lease = gate.acquire(db, { owner: 'verified-recall', ttlMs: 30000 });
+            try {
+                const sqlRows = verifiedSearch.search(db, q, n);
+                const vectorRows = await Promise.race([
+                    verifiedVectors.query(db, q, n).catch(() => []),
+                    new Promise(resolve => setTimeout(() => resolve([]), 300)),
+                ]);
+                const seen = new Set();
+                const rows = [...sqlRows, ...vectorRows]
+                    .filter(row => !seen.has(row.projection_key) && seen.add(row.projection_key));
+                const packet = chatPacket.build(rows.slice(0, n));
+                return res.json({ success: true, query: q, count: packet.units.length,
+                    formatted: chatPacket.format(packet), packet,
+                    retrieval: { sql_first: true, vector_timeout_ms: 300 } });
+            } finally {
+                gate.release(db, lease.token);
+            }
         }
         const memories = await searchHybrid(q, n);
 

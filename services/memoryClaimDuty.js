@@ -17,7 +17,11 @@ function snapshot(db, claimId) {
     if (!checked.available) protocol.fail(checked.reason);
     const claim = checked.claim;
     return { claim_id: claim.id, revision: claim.revision, input_hash: claim.input_hash,
-        body: claim.body, domain: claim.domain, temporal_state: claim.temporal_state, sources: claim.sources };
+        body: claim.body, domain: claim.domain, temporal_state: claim.temporal_state, sources: claim.sources,
+        duties: protocol.DUTIES, context_scopes: protocol.CONTEXT_SCOPES,
+        rules: ['A one-off evaluation is not a lasting preference.',
+            'partner_pattern and with_draco require explicit relationship evidence.',
+            'Qualified object attributes must retain uncertainty markers.'] };
 }
 
 function commit(db, decision) {
@@ -31,6 +35,8 @@ function commit(db, decision) {
         basis: decision.basis,
         state: decision.state,
         reviewer: decision.reviewer,
+        relationshipEvidence: decision.relationshipEvidence,
+        qualified: decision.qualified,
         priority: decision.priority,
     });
 }

@@ -1,6 +1,6 @@
 # 数据库迁移约定
 
-迁移集中在 `database.js`，由 `schema_version` 顺序记录。公共仓库当前最新版本为 v120。
+迁移集中在 `database.js`，由 `schema_version` 顺序记录。公共仓库当前最新版本为 v124。
 
 ## 规则
 
@@ -12,7 +12,7 @@
 - 迁移只创建协议、索引和安全默认值，不携带聊天、Profile、模型请求或生产状态。
 - schema 完成不代表 maintenance 或 verified 自动启用。
 
-## v104–v120
+## v104–v124
 
 | 版本 | 内容 |
 |---|---|
@@ -32,6 +32,10 @@
 | v118 | 检索投影正式支持 Saga |
 | v119 | 派生状态健康记录与 status-aware legacy FTS 触发器 |
 | v120 | 向量 receipt 有限恢复状态；纠错来源快照与幂等反馈标记 |
+| v121 | Claim 独立 A/B 审核表、前台租约与后台冷却状态；旧单审任务迁移为两个 pass |
+| v122 | Recovery 记录并保护已通过的兄弟 Claim |
+| v123 | Recovery 持久记录争议 Claim 闭集 |
+| v124 | Recovery 合同版本，确保合同变化可以形成新案件 |
 
 ## 空库验证
 
@@ -41,4 +45,4 @@ SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 npm run test:memory-extensions
 ```
 
-测试应打印 `schema: 120`。如果临时文件已经存在，请换新路径，不要在旧文件上误判“空库迁移通过”。`test:memory-v120-upgrade` 还会模拟 v119 原表并验证原地升级。完整测试矩阵见 [TESTING.md](TESTING.md)。
+测试应打印 `schema: 124`。记忆测试会在未提供 `DB_PATH` 时自动创建隔离临时库；显式提供路径时仍不得指向个人或生产数据库。`test:memory-v124-upgrade` 会模拟 v119/v120 结构并验证原地升级、历史数据保留和新增合同列。完整测试矩阵见 [TESTING.md](TESTING.md)。

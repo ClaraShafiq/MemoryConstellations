@@ -25,7 +25,8 @@ function publicJob(job) {
 function snapshotForJob(db, job) {
     let input;
     switch (job.stage) {
-    case 'claim_review': input = claimReview.snapshot(db, job.target_id); break;
+    case 'claim_review_a': input = claimReview.snapshot(db, job.target_id, 'a'); break;
+    case 'claim_review_b': input = claimReview.snapshot(db, job.target_id, 'b'); break;
     case 'claim_duty': input = claimDuty.snapshot(db, job.target_id); break;
     case 'claim_classification': input = classification.snapshot(db, job.target_id); break;
     case 'claim_recovery': input = recovery.snapshot(db, job.target_id); break;
@@ -36,7 +37,7 @@ function snapshotForJob(db, job) {
     case 'profile_facts':
     case 'profile_status': {
         const field = job.stage === 'profile_facts' ? 'facts' : 'status';
-        input = { field, projection: require('./memoryProfileProjection').snapshot(db, job.target_id),
+        input = { field, projection: require('./memoryProfileProjection').snapshot(db, job.target_id, field),
             current: profileFields.readField(db, job.target_id, field) };
         break;
     }
@@ -45,8 +46,15 @@ function snapshotForJob(db, job) {
         const claim = protocol.readClaim(db, job.target_id);
         const row = db.prepare('SELECT links_json FROM memory_claim_classification WHERE claim_id=?').get(claim.id);
         const links = row ? JSON.parse(row.links_json) : [];
-        input = { claim, offered_links: links.map(link => ({ ...link,
-            entity: db.prepare('SELECT id,name,category,status FROM entity_profiles WHERE id=?').get(link.entity_id) || null })) };
+        const fragmentClaims = db.prepare(`SELECT id FROM memory_claims
+            WHERE fragment_id=? AND claim_status='active' ORDER BY id`).all(claim.fragment_id)
+            .map(row => protocol.readClaim(db, row.id)).filter(item => protocol.eligible(db, item.id))
+            .map(item => ({ id: item.id, body: item.body, domain: item.domain,
+                temporal_state: item.temporal_state, sources: item.sources,
+                duty: db.prepare('SELECT duty,context_scope,state FROM memory_claim_duties WHERE claim_id=?').get(item.id) || null }));
+        input = { claim, fragment_claims: fragmentClaims, node_roles: [...classification.ROLES],
+            offered_links: links.map(link => ({ ...link,
+                entity: db.prepare('SELECT id,name,category,status FROM entity_profiles WHERE id=?').get(link.entity_id) || null })) };
         break;
     }
     default: protocol.fail('codex_job_snapshot_not_supported');
@@ -76,7 +84,8 @@ function apply(db, proposed, { priority = protocol.BACKFILL_JOB_PRIORITY } = {})
 
 function assertMatchesJob(job, action) {
     const expectedType = {
-        claim_review: 'review_claim', claim_duty: 'set_claim_duty', claim_classification: 'classify_claim',
+        claim_review_a: 'review_claim', claim_review_b: 'review_claim',
+        claim_duty: 'set_claim_duty', claim_classification: 'classify_claim',
         node_review: 'review_node', constellation_identity: 'resolve_identity',
         constellation_admission: 'admit_constellation', episode_publish: 'publish_episode',
         profile_facts: 'publish_profile_field', profile_status: 'publish_profile_field',
@@ -84,6 +93,8 @@ function assertMatchesJob(job, action) {
         correction_review: 'review_correction',
     }[job.stage];
     if (!expectedType || action.type !== expectedType) protocol.fail('codex_job_action_mismatch');
+    if (job.stage === 'claim_review_a' && action.pass !== 'a') protocol.fail('codex_review_pass_mismatch');
+    if (job.stage === 'claim_review_b' && action.pass !== 'b') protocol.fail('codex_review_pass_mismatch');
     const targetId = action.claimId ?? action.candidateId ?? action.entityId ?? action.fragmentId ?? action.receiptId;
     if (Number(targetId) !== Number(job.target_id)) protocol.fail('codex_job_target_mismatch');
     if (job.stage === 'profile_facts' && action.field !== 'facts') protocol.fail('codex_job_field_mismatch');
@@ -94,9 +105,10 @@ function assertMatchesJob(job, action) {
     if (proposedHash !== undefined && proposedHash !== job.input_hash) protocol.fail('codex_job_hash_mismatch');
 }
 
-async function runLeased(db, stage, backend, { limit = 10, priorityBand = 'current' } = {}) {
+async function runLeased(db, stage, backend, { limit = 10, priorityBand = 'current',
+    targetType = null, targetId = null } = {}) {
     if (!backend || typeof backend.propose !== 'function') protocol.fail('codex_backend_invalid');
-    const jobs = protocol.leaseJobs(db, stage, { limit, priorityBand });
+    const jobs = protocol.leaseJobs(db, stage, { limit, priorityBand, targetType, targetId });
     const results = [];
     for (const job of jobs) {
         try {
@@ -115,8 +127,10 @@ async function runLeased(db, stage, backend, { limit = 10, priorityBand = 'curre
             policy.validate(action);
             assertMatchesJob(job, action);
             const result = apply(db, action, { priority: job.priority });
-            protocol.finishJob(db, job, 'done');
-            results.push({ job_id: job.id, status: 'done', result });
+            const unresolved = result?.outcome === 'needs_review';
+            protocol.finishJob(db, job, unresolved ? 'needs_review' : 'done',
+                unresolved ? result.reason : null);
+            results.push({ job_id: job.id, status: unresolved ? 'needs_review' : 'done', result });
         } catch (error) {
             protocol.finishJob(db, job, error.code?.includes('cas') ? 'skipped' : 'needs_review', error.code || 'review_failed');
             results.push({ job_id: job.id, status: 'needs_review', error: error.code || error.message });

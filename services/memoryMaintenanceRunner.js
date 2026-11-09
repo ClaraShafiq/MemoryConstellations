@@ -1,11 +1,12 @@
 'use strict';
 
 const readMode = require('./memoryReadMode');
+const protocol = require('./memoryProtocol');
 
 let active = null;
 
 const REVIEW_STAGES = Object.freeze([
-    'claim_review', 'claim_recovery', 'claim_duty', 'claim_classification', 'node_review',
+    'claim_review_a', 'claim_review_b', 'claim_recovery', 'claim_duty', 'claim_classification', 'node_review',
     'constellation_discovery', 'constellation_identity', 'constellation_admission',
     'episode_publish', 'profile_facts', 'profile_status', 'correction_review',
 ]);
@@ -19,11 +20,11 @@ function configuredBackend(options) {
     });
 }
 
-async function drainReviews(db, backend, limit) {
+async function drainReviews(db, backend, limit, target = {}) {
     const result = {};
     for (const stage of REVIEW_STAGES) {
         const rows = await require('./memoryCodexExecutor').runLeased(db, stage, backend,
-            { limit, priorityBand: 'current' });
+            { limit, priorityBand: 'current', ...target });
         if (rows.length) result[stage] = rows;
     }
     return result;
@@ -43,25 +44,42 @@ function backlog(db) {
 }
 
 async function execute(db, options = {}) {
+    const targeted = options.targetId != null;
+    if (targeted && !options.targetType) protocol.fail('memory_target_type_required');
     if (readMode.semanticMode(db) !== 'running') return { outcome: 'paused', reason: 'maintenance_not_running' };
     const pending = backlog(db);
-    const result = { outcome: 'no_change', backlog: pending };
-    if (pending.messages) result.scribe = await require('./memoryScribe').checkAndRun();
+    const target = targeted ? { targetId: options.targetId, targetType: options.targetType } : {};
+    const result = { outcome: 'no_change', backlog: pending, target: targeted ? target : null };
+    const ensureForegroundIdle = () => {
+        if (!options.childProcess) return;
+        const state = require('./memoryForegroundGate').status(db);
+        if (state.blocked) protocol.fail(state.reason);
+    };
+    ensureForegroundIdle();
+    if (pending.messages && !targeted) result.scribe = await require('./memoryScribe').checkAndRun();
     const backend = configuredBackend(options);
     if (pending.current_jobs) {
-        result.pipeline = await require('./memoryPipeline').tick(db);
+        ensureForegroundIdle();
+        result.pipeline = await require('./memoryPipeline').tick(db, target);
         if (backend) {
-            result.reviews = await drainReviews(db, backend, options.reviewLimit || 10);
-            result.pipeline_after_reviews = await require('./memoryPipeline').tick(db);
+            ensureForegroundIdle();
+            result.reviews = await drainReviews(db, backend, options.reviewLimit || 10, target);
+            ensureForegroundIdle();
+            result.pipeline_after_reviews = await require('./memoryPipeline').tick(db, target);
         } else {
+            const targetSql = targeted ? ' AND target_type=? AND target_id=?' : '';
             result.reviewer_required = db.prepare(`SELECT COUNT(*) count FROM memory_jobs
-                WHERE status IN('queued','retry') AND priority>=? AND stage IN (${REVIEW_STAGES.map(() => '?').join(',')})`)
-                .get(require('./memoryProtocol').LIVE_JOB_PRIORITY, ...REVIEW_STAGES).count;
+                WHERE status IN('queued','retry') AND priority>=? AND stage IN (${REVIEW_STAGES.map(() => '?').join(',')})${targetSql}`)
+                .get(require('./memoryProtocol').LIVE_JOB_PRIORITY, ...REVIEW_STAGES,
+                    ...(targeted ? [options.targetType, Number(options.targetId)] : [])).count;
         }
     }
-    if (pending.vectors) result.vectors = await require('./memoryVectorProjection').drain(db,
+    if (pending.vectors && !targeted) {
+        ensureForegroundIdle();
+        result.vectors = await require('./memoryVectorProjection').drain(db,
         { limit: options.vectorLimit || 16, ...(options.vectorOptions || {}) });
-    if (result.scribe || result.pipeline || result.vectors) result.outcome = 'done';
+    }
+    if (result.scribe || result.pipeline || result.reviews || result.vectors) result.outcome = 'done';
     return result;
 }
 

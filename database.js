@@ -1213,6 +1213,7 @@ function initDatabase() {
         require('./services/memoryVectorProjection').SCHEMA,
         require('./services/memoryReleaseGate').SCHEMA,
         require('./services/memoryDerivedStateHealth').SCHEMA,
+        require('./services/memoryForegroundGate').SCHEMA,
     ].join('\n');
     runMigration(109, 'modern memory: controlled pipeline tables', modernSchemas, { critical: true });
     runMigration(110, 'modern memory: safe rollout defaults', `
@@ -1313,6 +1314,47 @@ function initDatabase() {
         CREATE INDEX idx_memory_vector_projection_ready
             ON memory_vector_projection(status,updated_at);
     `, { critical: true });
+    runMigration(121, 'independent claim review and foreground memory leases', `
+        CREATE TABLE IF NOT EXISTS memory_claim_review_passes (
+            claim_id INTEGER NOT NULL REFERENCES memory_claims(id) ON DELETE CASCADE,
+            claim_revision INTEGER NOT NULL,
+            input_hash TEXT NOT NULL,
+            contract_version TEXT NOT NULL,
+            pass TEXT NOT NULL CHECK(pass IN('a','b')),
+            support_state TEXT NOT NULL CHECK(support_state IN('supported','rejected','pending')),
+            attribution_state TEXT NOT NULL CHECK(attribution_state IN('supported','rejected','pending')),
+            temporal_state TEXT NOT NULL,
+            reviewer TEXT NOT NULL,
+            reason TEXT,
+            reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(claim_id,claim_revision,input_hash,contract_version,pass)
+        );
+        ${require('./services/memoryForegroundGate').SCHEMA}
+        UPDATE memory_jobs SET status='skipped',error_code='review_contract_replaced',
+            lease_token=NULL,lease_until=NULL,updated_at=CAST(strftime('%s','now') AS INTEGER)*1000
+            WHERE stage='claim_review' AND status IN('queued','retry','running');
+        INSERT OR IGNORE INTO memory_jobs(stage,target_type,target_id,input_revision,input_hash,status,
+            priority,attempts,next_attempt_at,created_at,updated_at)
+        SELECT 'claim_review_a','claim',c.id,c.revision,c.input_hash,'queued',
+            COALESCE((SELECT MAX(j.priority) FROM memory_jobs j WHERE j.target_id=c.id),-1),0,0,
+            CAST(strftime('%s','now') AS INTEGER)*1000,CAST(strftime('%s','now') AS INTEGER)*1000
+        FROM memory_claims c WHERE c.claim_status='active';
+        INSERT OR IGNORE INTO memory_jobs(stage,target_type,target_id,input_revision,input_hash,status,
+            priority,attempts,next_attempt_at,created_at,updated_at)
+        SELECT 'claim_review_b','claim',c.id,c.revision,c.input_hash,'queued',
+            COALESCE((SELECT MAX(j.priority) FROM memory_jobs j WHERE j.target_id=c.id),-1),0,0,
+            CAST(strftime('%s','now') AS INTEGER)*1000,CAST(strftime('%s','now') AS INTEGER)*1000
+        FROM memory_claims c WHERE c.claim_status='active';
+    `, { critical: true });
+    runMigration(122, 'claim recovery preserves verified siblings',
+        `ALTER TABLE memory_claim_recoveries ADD COLUMN preserved_claim_ids_json TEXT NOT NULL DEFAULT '[]'
+            CHECK(json_valid(preserved_claim_ids_json));`, { critical: true });
+    runMigration(123, 'claim recovery records disputed claims',
+        `ALTER TABLE memory_claim_recoveries ADD COLUMN disputed_claim_ids_json TEXT NOT NULL DEFAULT '[]'
+            CHECK(json_valid(disputed_claim_ids_json));`, { critical: true });
+    runMigration(124, 'claim recovery contract version',
+        `ALTER TABLE memory_claim_recoveries ADD COLUMN contract_version TEXT NOT NULL DEFAULT 'claim-recovery-v2';`,
+        { critical: true });
 
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {

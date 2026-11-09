@@ -6,13 +6,16 @@ const { getWorldContext } = require('./worldContext');
 const protocol = require('./memoryProtocol');
 const subjects = require('./memoryConversationSubjects');
 
-const CONTRACT = 'complete-semantic-unit-v2';
+const CONTRACT = 'complete-semantic-unit-v3';
 const MAX_BODY_CHARS = 180;
 const MIN_RECOVERY_BATCH = 15;
 const FAILURE_BACKOFF_SECONDS = 60 * 60;
 
 const GENERIC_OBJECT_RE = /(?:[这那](?:件|个)[^，。！？\n]{0,12}(?:衣服|东西|物品|商品|款式|事情|地方)|(?:奇怪的|某个?|某种|什么|一些|有些|不明的|乱七八糟的)(?:东西|事情|事|人|关系|因素|问题)|外物|任何(?:事|东西|事物)|\b(?:(?:this|that|some|strange|unknown|external|any)\s+(?:thing|matter|issue|place|factor)s?|something\s+(?:strange|unknown|external)|something|anything)\b)/i;
 const BARE_ACTION_RE = /^(?:(?:(?:the\s+)?(?:user|assistant)|[^，。！？,.!?\s]{1,32})(?:当时|目前|现在|刚刚|已经|还|尚)?(?:尚未|还没|没有|没|未)?(?:通关|看完|读完|写完|完成|开始|继续|买下|玩过|看过|读过)(?:了|过|呢)?|(?:the\s+)?(?:user|assistant)\s+(?:(?:has|have|had|is|was)\s+)?(?:not\s+)?(?:finished|completed|started|continued|bought|watched|read|played)(?:\s+(?:it|that))?)[。！？.!?]?$/i;
+const DANGLING_REFERENCE_RE = /^(?:他|她|它|这个|那个|这件事|那件事|其|it|this|that|they|he|she)\b|(?:的\s*(?:Pro|Plus|Max)|'s\s+(?:Pro|Plus|Max))\s*[。.!]?$/i;
+const FICTION_MARKER_RE = /(?:小说|作品|设定|角色扮演|虚构|剧本|参考材料|fiction|fictional|novel|role[- ]?play|reference material|story setting)/i;
+const GRAPHIC_INTIMACY_RE = /(?:性交|插入|射精|阴茎|阴道|肛门|口交|genitals?|penetrat(?:e|ion)|ejaculat(?:e|ion)|oral sex|anal sex)/i;
 
 function decodeMessage(row) {
     return { ...row, content: protocol.messageText(row) };
@@ -25,7 +28,7 @@ function lastCursor(db) {
 }
 
 function pendingMessages(db, cursor, limit = 60) {
-    return db.prepare(`SELECT id,chat_id,sender,content,is_encrypted,timestamp,picked_up_at,status,message_type
+    return db.prepare(`SELECT id,chat_id,sender,content,is_encrypted,timestamp,picked_up_at,status,message_type,chat_mode
         FROM messages WHERE status='sent' AND message_type!='image'
           AND (COALESCE(picked_up_at,timestamp)>? OR (COALESCE(picked_up_at,timestamp)=? AND id>?))
         ORDER BY COALESCE(picked_up_at,timestamp),id LIMIT ?`)
@@ -37,6 +40,7 @@ function buildPrompt(messages, feedback = '') {
         message_id: message.id,
         speaker: subjects.sourceSpeaker(message.sender),
         timestamp: message.timestamp,
+        chat_mode: message.chat_mode || 'default',
         text: message.content,
     }));
     return {
@@ -44,14 +48,17 @@ function buildPrompt(messages, feedback = '') {
 Do not decide constellation identity, admission, profile fields, personality, or relationships.
 Do not use prior memory. Do not merge independent claims.
 Preserve who the observation is about. An assistant self-statement is not a user fact.
+Keep user facts, third-party information, and assistant/persona attitudes in separate source domains. A user's phrase such as "I think" is not an assistant opinion.
 "Atomic" does not mean one sentence or one clause per entry. An entry must remain understandable outside the chat: who, what object, and what happened or was believed must be explicit.
 Messages from the same chat, speaker, and timestamp are one expression burst. Understand the burst as a whole before splitting it. Merge background, action, result, feeling, or explanation when they concern the same object and will be retrieved or updated together. A domain or temporal-state difference alone is not a reason to split.
 Split only when each part concerns an independent object or future use and remains complete by itself.
 If one speaker expresses relationship insecurity and the other gives a concrete reassurance or explanation, preserve both sides as one domain=interaction entry with both exact quotes. Use subject=unknown when no single subject represents the complete interaction; do not infer a relationship label.
 Never leave a bare action without its object. Never reduce a concrete explanation back to vague phrases such as "that thing", "something strange", or "anything". If the object cannot be grounded in exact evidence, omit the entry.
+Fiction, role-play, novel settings, and reference material must use domain=fiction and say explicitly in body that they are fictional/reference material. Never turn them into the user's real experience.
+Do not discard consensual affectionate interaction merely because it is intimate. Preserve only a high-level, non-graphic interaction observation, mark sensitivity=intimacy, and bind only the minimum safe exact quote. Omit graphic sexual detail.
 Each evidence message_id may appear at most once per entry. When one message contains multiple supporting spans, quote the smallest continuous source range covering them.
 Keep body at or below ${MAX_BODY_CHARS} characters.
-Return JSON only: {"entries":[{"body":"neutral, independently consumable semantic unit","subject":"user|assistant|third_party|unknown","domain":"user_statement|observed_activity|interaction|companion_opinion|inference|fiction|third_party","temporal_state":"unknown|planned|in_progress|completed|cancelled|historical","event_from":null,"event_until":null,"time_precision":"unknown|day","evidence":[{"message_id":1,"quote":"exact substring"}]}]}.
+Return JSON only: {"entries":[{"body":"neutral, independently consumable semantic unit","subject":"user|assistant|third_party|unknown","domain":"user_statement|observed_activity|interaction|companion_opinion|inference|fiction|third_party","sensitivity":"none|intimacy","temporal_state":"unknown|planned|in_progress|completed|cancelled|historical","event_from":null,"event_until":null,"time_precision":"unknown|day","evidence":[{"message_id":1,"quote":"exact substring"}]}]}.
 Before returning, audit sibling entries from the same expression burst and merge any that only make sense together. If evidence is insufficient, omit the entry.${feedback ? `\n\nPrevious-attempt audit:\n${feedback}` : ''}`,
         user: JSON.stringify({ contract: CONTRACT, messages: input }),
     };
@@ -90,9 +97,21 @@ function validateEntry(messageMap, entry) {
         };
     });
     const subject = subjects.validateSubject(entry.subject || 'unknown', sources);
+    const sourceMessages = entry.evidence.map(item => messageMap.get(Number(item.message_id)));
+    const roleplay = sourceMessages.some(message => message?.chat_mode === 'roleplay');
+    if (roleplay && entry.domain !== 'fiction') protocol.fail('scribe_roleplay_must_be_fiction');
+    if (entry.domain === 'fiction' && !roleplay && !FICTION_MARKER_RE.test(entry.body)
+        && !sources.some(source => FICTION_MARKER_RE.test(source.quote))) protocol.fail('scribe_fiction_scope_missing');
+    const sensitivity = entry.sensitivity || 'none';
+    if (!['none', 'intimacy'].includes(sensitivity)) protocol.fail('scribe_sensitivity_invalid');
+    if (sensitivity === 'intimacy') {
+        if (entry.domain !== 'interaction') protocol.fail('scribe_intimacy_domain_invalid');
+        if (GRAPHIC_INTIMACY_RE.test(entry.body) || sources.some(source => GRAPHIC_INTIMACY_RE.test(source.quote)))
+            protocol.fail('scribe_intimacy_graphic_detail');
+    }
     return {
         body: entry.body.trim(), domain: entry.domain,
-        subject,
+        subject, sensitivity,
         temporal: {
             state: entry.temporal_state || 'unknown',
             event_from: entry.event_from || null,
@@ -106,6 +125,7 @@ function validateEntry(messageMap, entry) {
 function incompleteBodyReason(body) {
     const text = String(body || '').trim();
     if (GENERIC_OBJECT_RE.test(text)) return 'scribe_generic_object';
+    if (DANGLING_REFERENCE_RE.test(text)) return 'scribe_dangling_reference';
     return BARE_ACTION_RE.test(text) ? 'scribe_missing_action_object' : null;
 }
 
@@ -224,7 +244,7 @@ async function persist(messages, cursor, rawEntries, { advanceCursor = true } = 
                 VALUES('observation','unassigned',?,0.5,'chat',?,'frozen',?,?,'frozen',?)`).run(
                 entry.body, entry.sources.map(source => source.source_time).filter(Boolean).sort().at(-1)?.slice(0, 10) || null,
                 JSON.stringify(sourceIds), JSON.stringify({ contract: CONTRACT, subject: entry.subject,
-                    domain: entry.domain, temporal: entry.temporal,
+                    domain: entry.domain, sensitivity: entry.sensitivity, temporal: entry.temporal,
                     evidence: entry.sources.map(source => ({ message_id: source.message_id, quote: source.quote,
                         speaker: source.speaker, source_time: source.source_time })) }), identity,
             );
@@ -264,7 +284,7 @@ async function replayMessages(messageIds, { extractEntries = extract } = {}) {
         protocol.fail('scribe_replay_ids_invalid');
     const db = getDb();
     const marks = ids.map(() => '?').join(',');
-    const messages = db.prepare(`SELECT id,chat_id,sender,content,is_encrypted,timestamp,picked_up_at,status,message_type
+    const messages = db.prepare(`SELECT id,chat_id,sender,content,is_encrypted,timestamp,picked_up_at,status,message_type,chat_mode
         FROM messages WHERE id IN(${marks}) AND status='sent' ORDER BY COALESCE(picked_up_at,timestamp),id`).all(...ids);
     if (messages.length !== ids.length) protocol.fail('scribe_replay_message_missing');
     const decoded = messages.map(decodeMessage);

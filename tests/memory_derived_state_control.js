@@ -1,5 +1,7 @@
 'use strict';
 
+require('./test_env');
+
 const assert = require('node:assert/strict');
 const { initDatabase } = require('../database');
 
@@ -12,7 +14,7 @@ async function main() {
     const legacyFts = require('../services/memoryLegacyFts');
     const health = require('../services/memoryDerivedStateHealth');
 
-    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 120);
+    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 124);
 
     const fragmentId = Number(db.prepare(`INSERT INTO memory_fragments(
         type,entity,content,status,source_msg_ids,observation_state)
@@ -90,7 +92,7 @@ async function main() {
         'needs_review');
     assert.equal(health.mergeStatus('healthy', 'unverifiable'), 'unverifiable');
 
-    console.log(JSON.stringify({ ok: true, schema: 120, remote_status: repaired.after.status,
+    console.log(JSON.stringify({ ok: true, schema: 124, remote_status: repaired.after.status,
         fts_status: legacyFts.inspect(db).status }));
 }
 

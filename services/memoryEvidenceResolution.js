@@ -48,6 +48,9 @@ function derive(db, claimId, now = Date.now()) {
         return { state: 'ineligible', reason: 'claim_not_verified', entityIds: [] };
     }
     const classification = db.prepare('SELECT * FROM memory_claim_classification WHERE claim_id=?').get(claimId);
+    const grouped = nodes.supported(db, claimId);
+    if (!classification && grouped.length) return { state: 'grounded', reason: 'verified_object_group',
+        entityIds: [...new Set(grouped.map(row => row.entity_id))] };
     if (!classification) return { state: 'needs_resolution', reason: 'classification_missing', entityIds: [] };
     if (classification.input_hash !== claim.input_hash || classification.claim_revision !== claim.revision)
         return { state: 'needs_resolution', reason: 'classification_stale', entityIds: [] };
@@ -63,8 +66,13 @@ function derive(db, claimId, now = Date.now()) {
     if (classification.outcome === 'topic_only') return { state: 'topic_only', reason: 'topic_navigation_only', entityIds: [] };
     const offered = JSON.parse(classification.links_json);
     const supported = nodes.supported(db, claimId);
-    const pending = offered.filter(link => !supported.some(row => row.entity_id === link.entity_id && row.role === link.role));
+    const reviewed = db.prepare(`SELECT entity_id,role,verdict FROM memory_node_reviews
+        WHERE claim_id=? AND claim_revision=? AND input_hash=?`).all(claimId, claim.revision, claim.input_hash);
+    const pending = offered.filter(link => !reviewed.some(row =>
+        row.entity_id === link.entity_id && row.role === link.role));
     if (pending.length) return { state: 'node_candidate', reason: 'node_review_pending', entityIds: [] };
+    if (!supported.length && reviewed.some(row => row.verdict === 'rejected'))
+        return { state: 'needs_resolution', reason: 'node_review_rejected', entityIds: [] };
     return { state: 'grounded', reason: 'grounded', entityIds: [...new Set(supported.map(row => row.entity_id))] };
 }
 

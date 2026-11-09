@@ -57,7 +57,7 @@ function refreshClaim(db, claimId) {
 function refreshSaga(db, sagaId) {
     const row = db.prepare(`SELECT p.*,s.title,s.description,s.status FROM memory_saga_publications p
         JOIN memory_sagas s ON s.id=p.saga_id WHERE p.saga_id=?`).get(sagaId);
-    if (!row || row.status !== 'active') {
+    if (!row || row.status !== 'active' || !policy.readableSaga(db, row)) {
         remove(db, `saga:${sagaId}`);
         return false;
     }
@@ -69,7 +69,7 @@ function refreshSaga(db, sagaId) {
 function refreshEpisode(db, memoryId) {
     const row = db.prepare(`SELECT p.*,m.title,m.content,m.status FROM memory_episode_publications p
         JOIN memories m ON m.id=p.memory_id WHERE p.memory_id=?`).get(memoryId);
-    if (!row) {
+    if (!row || !policy.readableEpisode(db, row)) {
         remove(db, `episode:${memoryId}`);
         return false;
     }
@@ -85,7 +85,7 @@ function refreshProfile(db, entityId) {
         return 0;
     }
     const rows = db.prepare('SELECT * FROM memory_profile_field_publications WHERE entity_id=? ORDER BY field').all(entityId);
-    const readable = new Map(rows.filter(row => policy.readableProfileField(row)).map(row => [row.field, row]));
+    const readable = new Map(rows.filter(row => policy.readableProfileField(db, row)).map(row => [row.field, row]));
     let count = 0;
     for (const field of ['facts', 'status', 'judgment']) {
         if (!readable.has(field)) remove(db, `profile:${entityId}:${field}`);
@@ -103,6 +103,7 @@ function search(db, query, limit = 8) {
     const terms = String(query || '').normalize('NFKC').toLocaleLowerCase().split(/\s+/).filter(Boolean);
     if (!terms.length) return [];
     return db.prepare('SELECT * FROM memory_search_projection ORDER BY updated_at DESC LIMIT 500').all()
+        .filter(row => policy.projectionCurrent(db, row))
         .map(row => ({ ...row, text: protocol.decrypt(row.text_enc), metadata: JSON.parse(row.metadata_json) }))
         .map(row => ({ ...row, score: terms.reduce((n, term) => n + (row.text.toLocaleLowerCase().includes(term) ? 1 : 0), 0) }))
         .filter(row => row.score > 0).sort((a, b) => b.score - a.score || b.updated_at - a.updated_at)

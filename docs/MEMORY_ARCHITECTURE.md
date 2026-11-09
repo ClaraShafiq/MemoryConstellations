@@ -11,6 +11,8 @@
 7. 实时任务与历史回补分车道；在线 runner 只消费实时车道。
 8. maintenance running 与 verified read mode 是两个独立状态。
 9. modern 模式启用后，旧 Scribe、Archivist、Skills、Insight、Flash 和认知融合写入口必须停用。
+10. Claim 的独立 A/B 审核分歧时不发布；只有输入或合同版本变化才形成新案件。
+11. Profile 与 verified 检索只消费当前 eligible Claim、正式 Duty 和当前 Node Review 归属。
 
 ## 从消息到 Claim
 
@@ -22,6 +24,8 @@
 - 消息 ID、逐字引文、speaker、来源时间和消息指纹。
 
 assistant 自我陈述不能被标成 user 事实。主体若不是来源 speaker，必须由引文中的显式角色名支持。`replayMessages()` 可对最多 20 条明确消息精确重放，且不推进主游标。
+
+角色扮演、小说设定和参考材料必须保留 `fiction/reference material` 范围，不能转成用户现实经历。亲密互动不统一丢弃：只允许以 `interaction` 保存非图形化、高层语义和最小安全引文。消息 ID、来源指纹和引文绑定由宿主从数据库完成，模型不能自行发明编号。
 
 Scribe 会先把同一聊天、同一说话者、同一时间戳的相邻消息作为一个表达批次理解。相同对象的背景、动作、结果、感受和解释应在未来会共同检索或更新时保留为一个完整单元；domain 或时间状态不同本身不是拆分理由。不同对象且各自能独立消费时才拆分。首次结果若把同一批次过度切碎，宿主会带审计意见重试一次。
 
@@ -40,9 +44,15 @@ Scribe 会先把同一聊天、同一说话者、同一时间戳的相邻消息�
 - `memoryClassification.js`：关联实体、topic only、无独立节点或需要继续裁决；
 - `memoryNodeReview.js`：对每个候选实体/role 做逐项证据审查。
 
+Review 使用 `claim_review_a` 与 `claim_review_b` 两个独立 job。两个 pass 在相同 claim revision、input hash 和合同版本上完全一致，宿主才发布支持、主体与时间结论；分歧保留为 `needs_review`。问句可以提供当前对象锚，但不能证明问句中的命题，发布事实仍需陈述性逐字证据。
+
+Duty 固定十类：`stable_fact / core_trait / partner_pattern / current_state / event / preference / opinion / fiction / third_party / unresolved`。情境范围固定五类：`general / with_draco / specific_event / reference_material / unknown`。其中 `with_draco` 是历史兼容的协议值，在公共部署中表示与配置的 assistant/persona 有明确证据的关系情境。单次评价不能自动升级为偏好；`partner_pattern` 和关系范围必须有显式关系证据；对象材料的保留推测可以作为 qualified stable fact，但正文必须继续保留不确定措辞。
+
+Classification 只提出 `subject / participant / location / organization / work / topic / mention` 候选。Node Review 决定最终角色。只有同一 Fragment 中唯一、明确命名的物件，才允许把已核验的类型、颜色、材质、质感、长期用途和相关事件组成闭集送审；锚点不唯一时禁止聚合。事件仍保持 `event` Duty，因此可以归属对象和进入 Episode，但不会进入 Facts。
+
 Claim Review 之后的 Duty 与 Classification 继承原 job priority。已拒、来源变化或未支持的 Claim 在 Duty/Classification 前置检查中零模型结束。
 
-被拒 Claim 会为其来源 Fragment 创建 `claim_recovery` job。`memoryClaimRecovery.js` 只读取绑定的原始消息和逐字引文；它禁止用 Fragment 派生正文作分类后备。恢复成功会创建新的原子 Claim，并以 CAS 方式把旧的非人工锁定 Claim 标为 superseded。
+被拒 Claim 会为其来源 Fragment 创建 `claim_recovery` job。`memoryClaimRecovery.js` 只读取绑定的原始消息和逐字引文；它禁止用 Fragment 派生正文作分类后备。恢复输入区分 disputed 与 preserved Claim；成功时只 CAS supersede 争议项，已经通过的兄弟 Claim 和人工锁定项保持不变。同 domain、同逐字证据组的机器重复项只保留一个；不同 domain 或不同证据不合并。代词恢复只能使用描述之前已经建立的对象锚。
 
 `memoryEvidenceResolution.js` 保存状态与明确 reason code：`ineligible / needs_resolution / deferred / unassigned / topic_only / node_candidate / grounded`。相同证据指纹的重复 `needs_resolution` 会转为 `deferred`；时间流逝本身不触发重开。来源或上游结论变化后，新的指纹才允许重新裁决。
 
@@ -70,13 +80,13 @@ Claim Review 之后的 Duty 与 Classification 继承原 job priority。已拒�
 
 ## Profile 三字段
 
-`memoryProfileProjection.js` 只组装当前仍 eligible 且 grounded 到目标实体的 Claim。核心 user/assistant 身份走独立配置，不落普通第三方 Profile。
+`memoryProfileProjection.js` 只组装当前仍 eligible、Duty revision 当前、且由当前 `subject` Node Review grounded 到目标实体的 Claim。核心 user/assistant 身份走独立配置，不落普通第三方 Profile。
 
-- Facts：基于现有可信 items 与新增/纠正 Claim 执行 `add/revise/withdraw`；不会因一次生成遗漏而删除未触及事实。
+- Facts：基于现有可信 items 与新增/纠正 Claim 执行 `add/revise/withdraw`；不会因一次生成遗漏而删除未触及事实；event/current state 不得混入，带“可能”的稳定属性不得去掉不确定性。
 - Status：同样差量更新，但只允许 current state/event，并拒绝历史、取消或过旧 completed 证据。
 - Judgment：最多三个稳定态度 facet，支持 `add/reinforce/revise/withdraw`。普通事实再多也不能创建态度。
 
-每个字段有独立 revision、input hash、producer、model role、persona hash、Claim 清单和 history。空 Judgment 可由 evidence gate 发布为 tombstone；非空值要求 `producer=persona_writer`、`model_role=companion_persona` 和合法 persona hash。客观 Agent 的任何 Judgment action 都在 policy 层被拒绝。
+每个字段按自己的证据集合计算独立 input hash，并有独立 revision、producer、model role、persona hash、Claim 清单和 history。新增 Facts 不会仅因共享总指纹而让旧 Judgment 失效。空 Judgment 可由 evidence gate 发布为 tombstone；非空值要求 `producer=persona_writer`、`model_role=companion_persona` 和合法 persona hash。客观 Agent 的任何 Judgment action 都在 policy 层被拒绝。
 
 ## 受控维护 Agent
 
@@ -97,17 +107,18 @@ Claim Review 之后的 Duty 与 Classification 继承原 job priority。已拒�
 
 - priority 100 及以上：实时消息与实时纠错。
 - priority 100 以下：导入、存量修复和显式 backfill。
-- `memoryMaintenanceRunner.js` 单飞执行 Scribe、当前车道受控审查、确定性推进和向量同步。
+- `memoryBackgroundSupervisor.js` 每次只启动一个短生命周期子进程；`memoryMaintenanceRunner.js` 在子进程中执行 Scribe、当前车道受控审查、确定性推进和向量同步，避免模型与向量工作阻塞 Web 事件循环。
+- 外部聊天宿主可用前台租约覆盖完整回复窗口；租约存续和结束后一分钟冷却期间，不会启动新的后台阶段。
 - 没有配置审查 backend 时，runner 保留 model job 并在结果/健康状态中暴露 backlog，不伪造完成。
 - 过期租约进入 retry；连续尝试达到上限后进入 needs_review，不无限自旋。
 - 向量 receipt 同样在崩溃后回收过期租约，五次失败后进入 `needs_review`；维护 runner 会把过期 `running` 计入待处理积压。
 - `memoryModelBudget.js` 以 UTC 日和角色计数。默认 limit=0，模型调用禁用；预算耗尽 fail-closed。
 
-历史回补必须显式使用 `priorityBand=backfill` 的维护操作，在线 runner 不会自然消费它。
+历史回补必须显式使用 `priorityBand=backfill` 的维护操作，在线 runner 不会自然消费它。单对象 canary 使用精确 `targetId/targetType` 过滤，不会顺带租用其他积压任务。
 
 ## SQL、向量与 verified 门禁
 
-`memorySearchProjection.js` 只投影可读 Claim、已发布 Episode/Saga 和非空 Profile 字段。每个 projection key 带 revision 与 source hash。
+`memorySearchProjection.js` 只投影可读 Claim、已发布 Episode/Saga 和非空 Profile 字段。每个 projection key 带 revision 与 source hash。SQL 搜索和向量命中在返回前都会重新核验来源、Claim、Duty、Node 归属和字段输入是否仍为当前值。
 
 `memoryVectorProjection.js` 为每次 upsert/delete 保存租约、尝试次数和 acknowledged receipt。Chroma 使用独立 collection `memory_constellations_verified`；远端对象的 `projection_key / revision / source_hash` 必须与 SQL manifest 一致。查询结果也会再次按本地 receipt 过滤。
 
@@ -118,7 +129,7 @@ Claim Review 之后的 Duty 与 Classification 继承原 job priority。已拒�
 3. 消费：`memoryReadMode.get()` 每次确认 release 仍 ready；若 requested=verified 但门禁失效，则 effective=`blocked`，读取接口 fail-closed；
 4. `rollback`：只有显式 rollback 才恢复 legacy，不删除现代发布历史。
 
-`memoryChatPacket.js` 最终生成有长度上限并带 revision/input hash 的注入包。maintenance running 只描述写入链；只有有效 read mode 为 verified 才表示聊天消费者正在读取现代发布物。
+`memoryChatPacket.js` 最终生成有长度上限并带 revision/input hash 的注入包。`/api/recall` 先读取当前 SQL 发布物，向量查询最多等待 300ms；向量不可达不会阻塞 SQL 召回。maintenance running 只描述写入链；只有有效 read mode 为 verified 才表示聊天消费者正在读取现代发布物。
 
 ## 派生状态健康与确定性修复
 

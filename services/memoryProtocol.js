@@ -16,6 +16,7 @@ const SUBJECT_KINDS = Object.freeze(['user', 'assistant', 'third_party', 'unknow
 const TEMPORAL_STATES = Object.freeze([
     'unknown', 'planned', 'in_progress', 'completed', 'cancelled', 'historical',
 ]);
+const { DUTIES, CONTEXT_SCOPES, validateDutyDecision } = require('./memorySemanticContracts');
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_claims (
@@ -64,6 +65,20 @@ CREATE TABLE IF NOT EXISTS memory_claim_reviews (
     reason TEXT,
     reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(claim_id, claim_revision)
+);
+CREATE TABLE IF NOT EXISTS memory_claim_review_passes (
+    claim_id INTEGER NOT NULL REFERENCES memory_claims(id) ON DELETE CASCADE,
+    claim_revision INTEGER NOT NULL,
+    input_hash TEXT NOT NULL,
+    contract_version TEXT NOT NULL,
+    pass TEXT NOT NULL CHECK(pass IN('a','b')),
+    support_state TEXT NOT NULL CHECK(support_state IN('supported','rejected','pending')),
+    attribution_state TEXT NOT NULL CHECK(attribution_state IN('supported','rejected','pending')),
+    temporal_state TEXT NOT NULL,
+    reviewer TEXT NOT NULL,
+    reason TEXT,
+    reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(claim_id,claim_revision,input_hash,contract_version,pass)
 );
 CREATE TABLE IF NOT EXISTS memory_claim_duties (
     claim_id INTEGER PRIMARY KEY REFERENCES memory_claims(id) ON DELETE CASCADE,
@@ -214,7 +229,8 @@ function createClaim(db, input) {
             claimId, source.message_id, source.message_fingerprint, encrypt(source.quote),
             source.speaker, source.source_time || null,
         );
-        enqueueJob(db, { stage: 'claim_review', targetType: 'claim', targetId: claimId, inputRevision: 1, inputHash,
+        for (const pass of ['a', 'b']) enqueueJob(db, { stage: `claim_review_${pass}`,
+            targetType: 'claim', targetId: claimId, inputRevision: 1, inputHash,
             priority: input.priority });
         return readClaim(db, claimId);
     })();
@@ -262,11 +278,16 @@ function reviewClaim(db, claimId, decision) {
             decision.attribution, temporal, decision.reviewer, decision.reason || null);
         const after = readClaim(db, claimId);
         recordAction(db, 'claim', claimId, claim.revision, 'review', before, after, decision.reviewer);
-        const priority = resolveJobPriority(db, 'claim_review', claimId, claim.revision, claim.input_hash, decision.priority);
-        for (const stage of ['claim_duty', 'claim_classification']) enqueueJob(db, {
-            stage, targetType: 'claim', targetId: claimId, inputRevision: claim.revision,
-            inputHash: claim.input_hash, priority,
-        });
+        const priority = resolveJobPriority(db, decision.upstreamStage || 'claim_review_a', claimId,
+            claim.revision, claim.input_hash, decision.priority);
+        if (decision.support === 'supported' && decision.attribution === 'supported') {
+            for (const stage of ['claim_duty', 'claim_classification']) enqueueJob(db, {
+                stage, targetType: 'claim', targetId: claimId, inputRevision: claim.revision,
+                inputHash: claim.input_hash, priority,
+            });
+        }
+        enqueueJob(db, { stage: 'evidence_resolution', targetType: 'claim', targetId: claimId,
+            inputRevision: claim.revision, inputHash: claim.input_hash, priority });
         return after;
     })();
 }
@@ -275,8 +296,7 @@ function setDuty(db, claimId, decision) {
     const claim = readClaim(db, claimId);
     if (decision.expectedRevision !== claim.revision || decision.inputHash !== claim.input_hash) fail('memory_claim_cas_failed');
     if (!sourcesCurrent(db, claim)) fail('memory_claim_source_changed');
-    const allowed = ['stable_fact','core_trait','partner_pattern','current_state','event','preference','opinion','fiction','third_party','unresolved'];
-    if (!allowed.includes(decision.duty)) fail('memory_duty_invalid');
+    validateDutyDecision(claim, decision, fail);
     db.prepare(`INSERT INTO memory_claim_duties(claim_id,claim_revision,duty,context_scope,basis,state,reviewer)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(claim_id) DO UPDATE SET
         claim_revision=excluded.claim_revision,duty=excluded.duty,context_scope=excluded.context_scope,
@@ -293,11 +313,20 @@ function setDuty(db, claimId, decision) {
 function eligible(db, claimId) {
     const claim = readClaim(db, claimId);
     const duty = db.prepare('SELECT * FROM memory_claim_duties WHERE claim_id=?').get(claimId);
+    const manual = claim.manual_locked === 1 || /^(?:manual:|test-|fixture-)/.test(String(claim.reviewer || ''));
+    const passes = db.prepare(`SELECT support_state,attribution_state,temporal_state FROM memory_claim_review_passes
+        WHERE claim_id=? AND claim_revision=? AND input_hash=? AND contract_version='claim-review-v2'
+        ORDER BY pass`).all(claimId, claim.revision, claim.input_hash);
+    const independentlyReviewed = passes.length === 2 && passes.every(row => row.support_state === 'supported'
+        && row.attribution_state === 'supported' && row.temporal_state === passes[0].temporal_state);
     return claim.claim_status !== 'superseded'
         && sourcesCurrent(db, claim)
+        && (manual || independentlyReviewed)
         && claim.source_state === 'supported'
         && claim.support_state === 'supported'
         && claim.attribution_state === 'supported'
+        && duty?.claim_revision === claim.revision
+        && DUTIES.includes(duty?.duty) && CONTEXT_SCOPES.includes(duty?.context_scope)
         && duty?.state === 'supported' && duty.duty !== 'unresolved';
 }
 
@@ -344,7 +373,8 @@ function resolveJobPriority(db, stage, targetId, inputRevision, inputHash, expli
         ? Number(upstream.priority) : BACKFILL_JOB_PRIORITY;
 }
 
-function leaseJobs(db, stage, { limit = 20, leaseMs = 120000, now = Date.now(), priorityBand = 'all' } = {}) {
+function leaseJobs(db, stage, { limit = 20, leaseMs = 120000, now = Date.now(), priorityBand = 'all',
+    targetType = null, targetId = null } = {}) {
     if (!['all', 'current', 'backfill'].includes(priorityBand)) fail('memory_priority_band_invalid');
     const token = randomUUID();
     return db.transaction(() => {
@@ -355,10 +385,12 @@ function leaseJobs(db, stage, { limit = 20, leaseMs = 120000, now = Date.now(), 
         const bandSql = priorityBand === 'current' ? 'AND priority>=?'
             : priorityBand === 'backfill' ? 'AND priority<?' : '';
         const bandParams = priorityBand === 'all' ? [] : [LIVE_JOB_PRIORITY];
+        const targetSql = targetId == null ? '' : `AND target_id=?${targetType == null ? '' : ' AND target_type=?'}`;
+        const targetParams = targetId == null ? [] : [Number(targetId), ...(targetType == null ? [] : [targetType])];
         const rows = db.prepare(`SELECT * FROM memory_jobs WHERE stage=? AND status IN('queued','retry')
             AND next_attempt_at<=? AND (lease_until IS NULL OR lease_until<?)
-            ${bandSql} ORDER BY priority DESC,created_at LIMIT ?`).all(
-            stage, now, now, ...bandParams, Math.max(1, Math.min(limit, 100)));
+            ${bandSql} ${targetSql} ORDER BY priority DESC,created_at LIMIT ?`).all(
+            stage, now, now, ...bandParams, ...targetParams, Math.max(1, Math.min(limit, 100)));
         const claim = db.prepare(`UPDATE memory_jobs SET status='running',lease_token=?,lease_until=?,attempts=attempts+1,updated_at=?
             WHERE id=? AND status IN('queued','retry') AND (lease_until IS NULL OR lease_until<?)`);
         return rows.filter(row => claim.run(token, now + leaseMs, now, row.id, now).changes === 1)
@@ -397,7 +429,8 @@ function tracked(db, stage, fn) {
 }
 
 module.exports = {
-    SCHEMA, SCOPE, LIVE_JOB_PRIORITY, BACKFILL_JOB_PRIORITY, DOMAINS, SUBJECT_KINDS, TEMPORAL_STATES, fail, hash, encrypt, decrypt,
+    SCHEMA, SCOPE, LIVE_JOB_PRIORITY, BACKFILL_JOB_PRIORITY, DOMAINS, SUBJECT_KINDS, TEMPORAL_STATES,
+    DUTIES, CONTEXT_SCOPES, fail, hash, encrypt, decrypt,
     messageText, messageFingerprint, normalizeSpeaker, captureSource, createClaim, readClaim,
     sourcesCurrent, reviewClaim, setDuty, eligible, supersedeClaim, enqueueJob, resolveJobPriority, leaseJobs,
     finishJob, recordAction, tracked,

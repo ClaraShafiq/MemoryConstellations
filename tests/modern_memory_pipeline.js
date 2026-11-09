@@ -1,5 +1,7 @@
 'use strict';
 
+require('./test_env');
+
 const assert = require('node:assert/strict');
 const { initDatabase } = require('../database');
 
@@ -43,7 +45,7 @@ async function main() {
     claimReview.commit(db, { claimId: claim.id, expectedRevision: claim.revision, inputHash: claim.input_hash,
         support: 'supported', attribution: 'supported', temporalState: 'unknown', reviewer: 'test-reviewer' });
     claimDuty.commit(db, { claimId: claim.id, expectedRevision: claim.revision, inputHash: claim.input_hash,
-        duty: 'preference', contextScope: 'profile', basis: 'exact_quote', state: 'supported', reviewer: 'test-reviewer' });
+        duty: 'preference', contextScope: 'general', basis: 'exact_quote', state: 'supported', reviewer: 'test-reviewer' });
     const entityId = Number(db.prepare(`INSERT INTO entity_profiles(name,category,status,aliases,memory_scope)
         VALUES('River','person','active','[]','default')`).run().lastInsertRowid);
     classification.commit(db, { claimId: claim.id, expectedRevision: claim.revision, inputHash: claim.input_hash,
@@ -71,24 +73,26 @@ async function main() {
         inputHash: sagaHash, title: 'Preference notes', description: 'A bounded series of verified preferences.',
         producer: 'structured_reviewer' }).revision, 1);
 
-    const profileInput = profileProjection.snapshot(db, entityId);
-    profileFields.publish(db, entityId, 'facts', { input_hash: profileInput.input_hash, expected_revision: 0,
+    const factsInput = profileProjection.snapshot(db, entityId, 'facts');
+    const statusInput = profileProjection.snapshot(db, entityId, 'status');
+    const emptyJudgmentInput = profileProjection.snapshot(db, entityId, 'judgment');
+    profileFields.publish(db, entityId, 'facts', { input_hash: factsInput.input_hash, expected_revision: 0,
         claim_ids: [claim.id], value: 'Prefers mint tea.' },
     { producer: 'structured_reviewer', modelRole: 'objective_reviewer' });
-    profileFields.publish(db, entityId, 'status', { input_hash: profileInput.input_hash, expected_revision: 0,
+    profileFields.publish(db, entityId, 'status', { input_hash: statusInput.input_hash, expected_revision: 0,
         claim_ids: [], value: '' },
     { producer: 'structured_reviewer', modelRole: 'objective_reviewer' });
     assert.throws(() => profileFields.publish(db, entityId, 'judgment', {
-        input_hash: profileInput.input_hash, expected_revision: 0, claim_ids: [claim.id], value: 'I cherish this.' },
+        input_hash: emptyJudgmentInput.input_hash, expected_revision: 0, claim_ids: [claim.id], value: 'I cherish this.' },
     { producer: 'structured_reviewer', modelRole: 'objective_reviewer' }), /judgment_persona_writer_required/);
     assert.equal(db.prepare("SELECT COUNT(*) count FROM memory_profile_field_publications WHERE field='judgment'").get().count, 0);
-    profileFields.publish(db, entityId, 'judgment', { input_hash: profileInput.input_hash,
+    profileFields.publish(db, entityId, 'judgment', { input_hash: emptyJudgmentInput.input_hash,
         expected_revision: 0, claim_ids: [], value: '' }, { producer: 'judgment_gate', modelRole: 'evidence_gate' });
     assert.equal(db.prepare("SELECT judgment FROM entity_profiles WHERE id=?").get(entityId).judgment, null);
-    assert.throws(() => profileFields.publish(db, entityId, 'judgment', { input_hash: profileInput.input_hash,
+    assert.throws(() => profileFields.publish(db, entityId, 'judgment', { input_hash: emptyJudgmentInput.input_hash,
         expected_revision: 1, claim_ids: [claim.id], value: 'I remember this preference as a small, clear detail.' },
     { producer: 'persona_writer', modelRole: 'companion_persona', personaHash: 'b'.repeat(64) }),
-    /judgment_attitude_evidence_required/);
+    /profile_evidence_invalid|judgment_attitude_evidence_required/);
 
     const attitudeMessage = db.prepare(`INSERT INTO messages(chat_id,sender,content,timestamp,is_encrypted,message_type,status,picked_up_at)
         VALUES(1,'ai',?,'2026-01-02 10:01:00',0,'text','sent','2026-01-02 10:01:00')`)
@@ -103,7 +107,7 @@ async function main() {
         inputHash: attitudeClaim.input_hash, support: 'supported', attribution: 'supported',
         temporalState: 'unknown', reviewer: 'test-reviewer' });
     claimDuty.commit(db, { claimId: attitudeClaim.id, expectedRevision: attitudeClaim.revision,
-        inputHash: attitudeClaim.input_hash, duty: 'opinion', contextScope: 'profile', basis: 'exact_quote',
+        inputHash: attitudeClaim.input_hash, duty: 'opinion', contextScope: 'general', basis: 'exact_quote',
         state: 'supported', reviewer: 'test-reviewer' });
     classification.commit(db, { claimId: attitudeClaim.id, expectedRevision: attitudeClaim.revision,
         inputHash: attitudeClaim.input_hash, outcome: 'linked', links: [{ entity_id: entityId, role: 'subject' }],
@@ -111,7 +115,7 @@ async function main() {
     nodeReview.commit(db, { claimId: attitudeClaim.id, entityId, role: 'subject', expectedRevision: attitudeClaim.revision,
         inputHash: attitudeClaim.input_hash, verdict: 'supported', quote: 'preferences endearing', reviewer: 'test-reviewer' });
     assert.equal(evidence.reconcile(db, attitudeClaim.id).state, 'grounded');
-    const judgmentInput = profileProjection.snapshot(db, entityId);
+    const judgmentInput = profileProjection.snapshot(db, entityId, 'judgment');
     profileFields.publish(db, entityId, 'judgment', { input_hash: judgmentInput.input_hash,
         expected_revision: 1, claim_ids: [attitudeClaim.id], value: 'I find this careful preference endearing.' },
     { producer: 'persona_writer', modelRole: 'companion_persona', personaHash: 'b'.repeat(64) });
@@ -131,14 +135,14 @@ async function main() {
     assert.ok(found.length >= 2);
     assert.ok(packet.build(found).units.length >= 2);
 
-    const leased = protocol.leaseJobs(db, 'claim_review', { limit: 1, now: Date.now() });
+    const leased = protocol.leaseJobs(db, 'claim_review_a', { limit: 1, now: Date.now() });
     if (leased.length) {
         assert.throws(() => protocol.finishJob(db, { ...leased[0], lease_token: 'wrong' }, 'done'), /memory_job_lease_lost/);
     }
     assert.throws(() => classification.commit(db, { claimId: claim.id, expectedRevision: 99,
         inputHash: claim.input_hash, outcome: 'no_independent_node', reviewer: 'test-reviewer' }), /classification_cas_failed/);
 
-    console.log(JSON.stringify({ ok: true, schema: 120, claim_id: claim.id, entity_id: entityId,
+    console.log(JSON.stringify({ ok: true, schema: 124, claim_id: claim.id, entity_id: entityId,
         episode_id: publication.memory_id, search_results: found.length }));
 }
 

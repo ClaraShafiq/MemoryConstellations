@@ -1,6 +1,7 @@
 'use strict';
 
 const protocol = require('./memoryProtocol');
+const { NODE_ROLES } = require('./memorySemanticContracts');
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_claim_classification (
@@ -27,7 +28,7 @@ CREATE TABLE IF NOT EXISTS memory_node_reviews (
 );
 `;
 
-const ROLES = new Set(['subject','participant','location','organization','work','mention']);
+const ROLES = new Set(NODE_ROLES);
 
 function availability(db, claimId) {
     const claim = protocol.readClaim(db, claimId);

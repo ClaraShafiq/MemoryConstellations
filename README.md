@@ -9,8 +9,11 @@ Memory Constellations 是一条面向长期 AI 关系的可审计记忆管线。
 ```mermaid
 flowchart LR
   M[原始消息] --> S[Scribe 最小完整语义观察]
-  S --> C[Claim<br/>主体·时间·来源]
-  C --> E[待裁决证据池]
+  S --> C[Claim Recovery + A/B Review]
+  C --> D[Duty + Context Scope]
+  D --> L[Classification 候选]
+  L --> N[Node Review]
+  N --> E[Evidence Resolution<br/>待裁决证据池]
   E --> K[星座<br/>发现·身份·别名·准入]
   E --> P[Episode]
   P --> G[Saga]
@@ -23,7 +26,7 @@ flowchart LR
   R --> Q[有界聊天注入包]
 ```
 
-暂时无法归属的 Claim 不会丢弃。它保留在证据池中；相同证据指纹的重复裁决进入 `deferred`，只有来源、审查结论或相关上下文变化才重开。被拒 Claim 进入精确消息恢复流程，不会退回派生 Fragment 正文重新猜测。
+暂时无法归属的 Claim 不会丢弃。它保留在证据池中；相同证据指纹的重复裁决进入 `deferred`，只有来源、合同版本、审查结论或相关上下文变化才重开。A/B 审核互相独立，分歧不强行发布。被拒 Claim 进入精确消息恢复流程，不会退回派生 Fragment 正文重新猜测，也不会撤回同 Fragment 中已经通过的兄弟 Claim。
 
 ## 层级边界
 
@@ -39,6 +42,8 @@ flowchart LR
 | Macro Insight | 规划中的跨事件认知层；当前没有正式聊天路由验收 |
 
 Facts、Status、Judgment 各自拥有 revision、来源、历史和回滚边界。Facts 以当前可信基线为底，只对新增或纠正 Claim 做 `add/revise/withdraw`；Status 只接收近期动态。Judgment 以稳定态度 facet 保存，支持 `add/reinforce/revise/withdraw`，但必须来自 assistant 原始态度证据或经审核的 seed。证据不足、调用失败或解析失败不得覆盖旧值。
+
+Duty 固定为 `stable_fact / core_trait / partner_pattern / current_state / event / preference / opinion / fiction / third_party / unresolved`；情境范围固定为 `general / with_draco / specific_event / reference_material / unknown`。公开配置中的 `with_draco` 是兼容协议值，语义是“与本部署 assistant/persona 的明确关系情境”，不是要求使用某个角色名。对象角色固定为 `subject / participant / location / organization / work / topic / mention`。
 
 ## 四类执行者
 
@@ -66,7 +71,7 @@ DB_PATH=./memory_constellations.db npm run setup:llm
 DB_PATH=./memory_constellations.db npm start
 ```
 
-先在 `.env` 填写两个不同的随机密钥、登录密码和你自己的模型 endpoint；再编辑公共角色配置。首次启动会从空库迁移到 schema v120，不需要任何外部生产数据。完整步骤见 [OSS_SETUP.md](OSS_SETUP.md)。
+先在 `.env` 填写两个不同的随机密钥、登录密码和你自己的模型 endpoint；再编辑公共角色配置。首次启动会从空库迁移到 schema v124，不需要任何外部生产数据。完整步骤见 [OSS_SETUP.md](OSS_SETUP.md)。
 
 ## 手动部署与 Agent 辅助部署
 
@@ -88,7 +93,9 @@ DB_PATH=/tmp/memory-lanes.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32
 DB_PATH=/tmp/memory-extensions.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-extensions
 DB_PATH=/tmp/memory-derived-state.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-derived-state
 DB_PATH=/tmp/memory-correction-feedback.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-correction-feedback
-DB_PATH=/tmp/memory-v120-upgrade.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-v120-upgrade
+SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-latest-contracts
+SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-background
+SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-v124-upgrade
 npm run test:llm-config
 npm run check:docs
 npm run check:privacy
@@ -96,6 +103,8 @@ curl http://127.0.0.1:3000/api/health
 ```
 
 `pipeline.mode=modern` 只选择现代调度器；`npm run memory:maintenance:start` 才让正式写入/审核链运行。聊天消费者切到现代发布物是另一件事：必须先完成向量回执并执行 `memory:release:prepare`，确认无 blocker 后再执行 `memory:release:activate`。激活后若投影变化或门禁失效，verified 读取会 fail-closed 并返回 503；它不会悄悄读取可能已经陈旧的 legacy 记忆。只有 `memory:release:rollback` 会显式恢复 legacy。
+
+modern 调度由受监督子进程执行。外部聊天宿主应在生成回复前调用 `/api/memory/runtime/foreground/start`，结束后调用 `/api/memory/runtime/foreground/end`；租约存续及结束后一分钟冷却期间不会启动新的后台阶段。`/api/recall` 自身会自动登记短租约，并采用 SQL 优先、向量最多等待 300ms 的有界读取。
 
 派生状态使用统一健康入口：
 
@@ -142,6 +151,7 @@ DB_PATH=./memory_constellations.db npm run memory:health:repair -- --execute
 - [同步状态](docs/PORTING_STATUS.md)
 - [测试与验收](docs/TESTING.md)
 - [故障排查](docs/TROUBLESHOOTING.md)
+- [记忆管线常见坑](docs/MEMORY_PITFALLS.md)
 - [费用边界](docs/COST.md)
 
 License: MIT（见 [LICENSE](LICENSE)）。

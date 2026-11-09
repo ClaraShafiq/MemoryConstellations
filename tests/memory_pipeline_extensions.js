@@ -1,5 +1,7 @@
 'use strict';
 
+require('./test_env');
+
 const assert = require('node:assert/strict');
 const { initDatabase } = require('../database');
 
@@ -27,7 +29,7 @@ async function main() {
     const codex = require('../services/memoryCodexExecutor');
     const pipeline = require('../services/memoryPipeline');
 
-    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 120);
+    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 124);
     db.prepare("INSERT INTO chats(id,name) VALUES(1,'Fictional Pipeline Test')").run();
 
     let minute = 0;
@@ -52,7 +54,7 @@ async function main() {
             support: 'supported', attribution: 'supported', temporalState: claim.temporal_state,
             reviewer: 'fixture-reviewer' });
         claimDuty.commit(db, { claimId: claim.id, expectedRevision: claim.revision, inputHash: claim.input_hash,
-            duty, contextScope: 'profile', basis: 'exact_quote', state: 'supported', reviewer: 'fixture-reviewer' });
+            duty, contextScope: 'general', basis: 'exact_quote', state: 'supported', reviewer: 'fixture-reviewer' });
         classification.commit(db, { claimId: claim.id, expectedRevision: claim.revision, inputHash: claim.input_hash,
             outcome: entityId ? 'linked' : 'no_independent_node',
             links: entityId ? [{ entity_id: entityId, role: 'subject' }] : [], topics: [], reviewer: 'fixture-reviewer' });
@@ -122,7 +124,7 @@ async function main() {
         inputHash: ambiguousClaim.input_hash, support: 'supported', attribution: 'supported',
         temporalState: 'unknown', reviewer: 'fixture-reviewer' });
     claimDuty.commit(db, { claimId: ambiguousClaim.id, expectedRevision: ambiguousClaim.revision,
-        inputHash: ambiguousClaim.input_hash, duty: 'event', contextScope: 'episode', basis: 'exact_quote',
+        inputHash: ambiguousClaim.input_hash, duty: 'event', contextScope: 'specific_event', basis: 'exact_quote',
         state: 'supported', reviewer: 'fixture-reviewer' });
     classification.commit(db, { claimId: ambiguousClaim.id, expectedRevision: ambiguousClaim.revision,
         inputHash: ambiguousClaim.input_hash, outcome: 'needs_resolution', links: [], topics: [],
@@ -150,7 +152,7 @@ async function main() {
         VALUES('User','person','active','[]','default')`).run().lastInsertRowid);
     assert.throws(() => profileProjection.snapshot(db, coreEntity), /profile_core_identity_managed_separately/);
 
-    let profileInput = profileProjection.snapshot(db, entityId);
+    let profileInput = profileProjection.snapshot(db, entityId, 'facts');
     const firstFacts = profileFields.publish(db, entityId, 'facts', { input_hash: profileInput.input_hash,
         expected_revision: 0, operations: [
             { action: 'add', text: 'Prefers mint tea.', claim_ids: [mintClaim.id] },
@@ -171,13 +173,13 @@ async function main() {
         temporalState: 'unknown', reviewer: 'fixture-reviewer' });
     const correctedClaim = protocol.readClaim(db, applied.replacement_claim_id);
     assert.equal(reviewSupported(correctedClaim, 'preference', entityId).state, 'grounded');
-    const correctionReviewJob = db.prepare("SELECT * FROM memory_jobs WHERE stage='claim_review' AND target_id=?")
+    const correctionReviewJob = db.prepare("SELECT * FROM memory_jobs WHERE stage='claim_review_a' AND target_id=?")
         .get(correctedClaim.id);
     const agentPacket = codex.snapshotForJob(db, correctionReviewJob);
     assert.equal(agentPacket.input.claim_id, correctedClaim.id);
     assert.equal(agentPacket.input.sources[0].quote, 'prefers cedar tea');
     assert.equal('body_enc' in agentPacket.input, false);
-    profileInput = profileProjection.snapshot(db, entityId);
+    profileInput = profileProjection.snapshot(db, entityId, 'facts');
     const mintItem = firstFacts.items.find(item => item.text.includes('mint'));
     const revisedFacts = profileFields.publish(db, entityId, 'facts', { input_hash: profileInput.input_hash,
         expected_revision: 1, operations: [{ action: 'revise', target_id: mintItem.id,
@@ -185,7 +187,7 @@ async function main() {
     { producer: 'structured_reviewer', modelRole: 'objective_reviewer' });
     assert.deepEqual(revisedFacts.items.map(item => item.text).sort(), ['Keeps a blue notebook.', 'Prefers cedar tea.']);
 
-    profileInput = profileProjection.snapshot(db, entityId);
+    profileInput = profileProjection.snapshot(db, entityId, 'judgment');
     let judgment = profileFields.publish(db, entityId, 'judgment', { input_hash: profileInput.input_hash,
         expected_revision: 0, operations: [{ action: 'add', text: 'I find the careful note-taking endearing.',
             claim_ids: [attitudeClaim.id] }] },
@@ -193,6 +195,7 @@ async function main() {
     const facetId = judgment.items[0].id;
     const seedId = profileFields.recordJudgmentSeed(db, entityId, {
         text: 'The companion consistently values careful observations.', reviewer: 'fixture-reviewer' });
+    profileInput = profileProjection.snapshot(db, entityId, 'judgment');
     judgment = profileFields.publish(db, entityId, 'judgment', { input_hash: profileInput.input_hash,
         expected_revision: 1, operations: [{ action: 'reinforce', target_id: facetId, seed_ids: [seedId] }] },
     { producer: 'persona_writer', modelRole: 'companion_persona', personaHash: 'a'.repeat(64) });
@@ -245,19 +248,25 @@ async function main() {
     assert.throws(() => budget.reserve(db, 'fixture', { limit: 1, now: Date.UTC(2026, 10, 1) }),
     /memory_model_budget_exhausted/);
 
-    db.prepare("UPDATE memory_jobs SET status='skipped',lease_token=NULL,lease_until=NULL WHERE stage='claim_review'").run();
+    db.prepare("UPDATE memory_jobs SET status='skipped',lease_token=NULL,lease_until=NULL WHERE stage IN('claim_review_a','claim_review_b')").run();
     const agentMessage = addMessage('user', 'River uses a green index card.');
     const agentClaim = await observe(agentMessage, { body: 'River uses a green index card.', subject: 'user',
         domain: 'user_statement', temporal_state: 'unknown', quote: 'uses a green index card' });
-    process.env.MEMORY_MAINTENANCE_DAILY_CALL_LIMIT = '1';
-    const agentResults = await codex.runLeased(db, 'claim_review', { propose: async packet => {
+    process.env.MEMORY_MAINTENANCE_DAILY_CALL_LIMIT = '2';
+    const reviewer = { propose: async packet => {
         assert.equal(packet.input.claim_id, agentClaim.id);
         assert.equal(packet.input.sources[0].quote, 'uses a green index card');
         return { type: 'review_claim', claimId: packet.job.target_id,
             expectedRevision: packet.job.input_revision, inputHash: packet.job.input_hash,
-            support: 'supported', attribution: 'supported', reviewer: 'fixture-agent' };
-    } }, { limit: 1, priorityBand: 'current' });
+            pass: packet.input.review_pass, support: 'supported', attribution: 'supported',
+            reviewer: `fixture-agent-${packet.input.review_pass}` };
+    } };
+    const firstPass = await codex.runLeased(db, 'claim_review_a', reviewer,
+        { limit: 1, priorityBand: 'current', targetId: agentClaim.id });
+    const agentResults = await codex.runLeased(db, 'claim_review_b', reviewer,
+        { limit: 1, priorityBand: 'current', targetId: agentClaim.id });
     delete process.env.MEMORY_MAINTENANCE_DAILY_CALL_LIMIT;
+    assert.equal(firstPass[0].status, 'done');
     assert.equal(agentResults[0].status, 'done');
     assert.equal(protocol.readClaim(db, agentClaim.id).support_state, 'supported');
 
@@ -279,7 +288,7 @@ async function main() {
     assert.equal(expired.status, 'retry');
     assert.equal(expired.error_code, 'lease_expired');
 
-    console.log(JSON.stringify({ ok: true, schema: 120, recovered_claims: recovered.claim_ids.length,
+    console.log(JSON.stringify({ ok: true, schema: 124, recovered_claims: recovered.claim_ids.length,
         facts_revision: revisedFacts.revision, vector_receipts: vectors.manifest(db).rows.length }));
 }
 

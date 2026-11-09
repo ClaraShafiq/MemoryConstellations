@@ -5,7 +5,8 @@ const { getDb } = require('../database');
 const readMode = require('../services/memoryReadMode');
 const release = require('../services/memoryReleaseGate');
 const vectors = require('../services/memoryVectorProjection');
-const runner = require('../services/memoryMaintenanceRunner');
+const background = require('../services/memoryBackgroundSupervisor');
+const foreground = require('../services/memoryForegroundGate');
 const derivedHealth = require('../services/memoryDerivedStateHealth');
 const router = express.Router();
 
@@ -25,7 +26,8 @@ router.get('/health', (_req, res) => {
             schema_version: version, chat_read_mode: mode.effective,
             requested_chat_read_mode: readMode.requested(db),
             chat_read_state: mode,
-            semantic_maintenance: readMode.semanticMode(db), maintenance_runner: runner.status(),
+            semantic_maintenance: readMode.semanticMode(db), maintenance_runner: background.status(),
+            foreground_gate: foreground.status(db),
             verified_release: { ready: release.isReady(db), vector_manifest_ready: manifest.ready,
                 expected: manifest.expected, done: manifest.done, blockers: manifest.blockers },
             derived_memory_health: derived, counts });

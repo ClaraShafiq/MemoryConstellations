@@ -91,6 +91,9 @@ app.use('/api', require('./routes/ingest'));
 // ── Memory recall API（外部机器人回复前查记忆）──
 app.use('/api', require('./routes/recall'));
 
+// ── Foreground lease API for external chat hosts ──
+app.use('/api', require('./routes/memory-runtime'));
+
 // ── Structured correction evidence inbox (never edits a finished profile directly) ──
 app.use('/api', require('./routes/memory-corrections'));
 

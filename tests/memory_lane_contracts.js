@@ -1,5 +1,7 @@
 'use strict';
 
+require('./test_env');
+
 const assert = require('node:assert/strict');
 const { initDatabase } = require('../database');
 
@@ -11,7 +13,7 @@ async function main() {
     const codex = require('../services/memoryCodexExecutor');
     const { config } = require('../services/memoryConfig');
 
-    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 120);
+    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 124);
     db.prepare("INSERT OR IGNORE INTO chats(id,name) VALUES(1,'Lane Contract Test')").run();
 
     const addMessage = (content, timestamp) => Number(db.prepare(`INSERT INTO messages(
@@ -28,7 +30,7 @@ async function main() {
     const firstMessage = addMessage('River prefers jasmine tea.', '2026-01-02 10:00:00');
     const currentClaim = await observe(firstMessage, 'River prefers jasmine tea.', 'prefers jasmine tea',
         { at: '2000-01-01 00:00:00', id: 0 });
-    const currentReviewJob = db.prepare("SELECT * FROM memory_jobs WHERE stage='claim_review' AND target_id=?").get(currentClaim.id);
+    const currentReviewJob = db.prepare("SELECT * FROM memory_jobs WHERE stage='claim_review_a' AND target_id=?").get(currentClaim.id);
     assert.equal(currentReviewJob.priority, protocol.LIVE_JOB_PRIORITY);
 
     const backfillMessage = addMessage('River once visited a museum.', '2026-01-02 11:00:00');
@@ -39,21 +41,21 @@ async function main() {
     const backfillClaim = protocol.createClaim(db, { fragmentId: backfillFragment,
         body: 'River once visited a museum.', domain: 'user_statement', temporal: { state: 'historical' },
         sources: [protocol.captureSource(db, backfillMessage, 'visited a museum')] });
-    assert.equal(db.prepare("SELECT priority FROM memory_jobs WHERE stage='claim_review' AND target_id=?")
+    assert.equal(db.prepare("SELECT priority FROM memory_jobs WHERE stage='claim_review_a' AND target_id=?")
         .get(backfillClaim.id).priority, protocol.BACKFILL_JOB_PRIORITY);
 
-    const leasedCurrent = protocol.leaseJobs(db, 'claim_review', { limit: 1, priorityBand: 'current' });
+    const leasedCurrent = protocol.leaseJobs(db, 'claim_review_a', { limit: 1, priorityBand: 'current' });
     assert.equal(leasedCurrent[0].target_id, currentClaim.id);
     claimReview.commit(db, { claimId: currentClaim.id, expectedRevision: currentClaim.revision,
         inputHash: currentClaim.input_hash, support: 'supported', attribution: 'supported',
-        temporalState: 'unknown', reviewer: 'lane-test', priority: leasedCurrent[0].priority });
+        temporalState: 'unknown', reviewer: 'test-lane', priority: leasedCurrent[0].priority });
     protocol.finishJob(db, leasedCurrent[0], 'done');
     for (const stage of ['claim_duty', 'claim_classification']) {
         assert.equal(db.prepare('SELECT priority FROM memory_jobs WHERE stage=? AND target_id=?')
             .get(stage, currentClaim.id).priority, protocol.LIVE_JOB_PRIORITY);
     }
-    assert.equal(protocol.leaseJobs(db, 'claim_review', { limit: 5, priorityBand: 'current' }).length, 0);
-    const leasedBackfill = protocol.leaseJobs(db, 'claim_review', { limit: 1, priorityBand: 'backfill' });
+    assert.equal(protocol.leaseJobs(db, 'claim_review_a', { limit: 5, priorityBand: 'current' }).length, 0);
+    const leasedBackfill = protocol.leaseJobs(db, 'claim_review_a', { limit: 1, priorityBand: 'backfill' });
     assert.equal(leasedBackfill[0].target_id, backfillClaim.id);
     protocol.finishJob(db, leasedBackfill[0], 'no_change');
     protocol.enqueueJob(db, { stage: 'lane_probe', targetType: 'claim', targetId: backfillClaim.id,
@@ -71,18 +73,19 @@ async function main() {
     const rejectedMessage = addMessage('River might buy a notebook someday.', '2026-01-02 12:00:00');
     const rejectedClaim = await observe(rejectedMessage, 'River will buy a notebook.', 'might buy a notebook someday',
         { at: '2026-01-02 10:00:00', id: firstMessage });
-    const rejectedReviewJob = protocol.leaseJobs(db, 'claim_review', { limit: 1, priorityBand: 'current' })[0];
+    const rejectedReviewJob = protocol.leaseJobs(db, 'claim_review_a', { limit: 1, priorityBand: 'current' })[0];
     claimReview.commit(db, { claimId: rejectedClaim.id, expectedRevision: rejectedClaim.revision,
         inputHash: rejectedClaim.input_hash, support: 'rejected', attribution: 'supported',
-        temporalState: 'planned', reviewer: 'lane-test', priority: rejectedReviewJob.priority });
+        temporalState: 'planned', reviewer: 'test-lane', priority: rejectedReviewJob.priority });
     protocol.finishJob(db, rejectedReviewJob, 'done');
     let modelCalls = 0;
     const rejectedResult = await codex.runLeased(db, 'claim_classification', {
         propose: async () => { modelCalls++; throw new Error('must_not_call_model'); },
     }, { limit: 1, priorityBand: 'current' });
     assert.equal(modelCalls, 0);
-    assert.equal(rejectedResult[0].status, 'no_change');
-    assert.equal(rejectedResult[0].error, 'classification_no_supported_claims');
+    assert.deepEqual(rejectedResult, []);
+    assert.equal(db.prepare("SELECT COUNT(*) count FROM memory_jobs WHERE stage='claim_classification' AND target_id=?")
+        .get(rejectedClaim.id).count, 0);
 
     const stableCursor = scribe.lastCursor(db);
     const failingMessage = addMessage('A neutral message that remains pending.', '2026-01-02 13:00:00');
@@ -106,7 +109,7 @@ async function main() {
     const legacyCognitive = await require('../services/cognitiveModel').runUserModelCycle();
     assert.equal(legacyCognitive.reason, 'modern_memory_protocol');
 
-    console.log(JSON.stringify({ ok: true, schema: 120, live_priority: protocol.LIVE_JOB_PRIORITY,
+    console.log(JSON.stringify({ ok: true, schema: 124, live_priority: protocol.LIVE_JOB_PRIORITY,
         backfill_priority: protocol.BACKFILL_JOB_PRIORITY, model_calls_for_rejected_claim: modelCalls }));
 }
 

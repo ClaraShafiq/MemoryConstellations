@@ -24,7 +24,15 @@
 
 查看 `/api/health` 的 backlog 和 job `error_code`。若 runner 报 `reviewer_required`，说明只启动了确定性调度，没有配置 `maintenanceBackend` 或启用 Codex 适配器。若错误为 `memory_model_calls_disabled/exhausted`，设置或提高明确的每日上限；不要绕过预算表。
 
+Review 现在分为 `claim_review_a` 和 `claim_review_b`。只有一个 pass 完成时是正常等待；`independent_review_disagreement` 表示两个独立判断不一致，Claim 不会发布。不要手工把其中一个覆盖成另一个；应补充/纠正来源，或在审核合同真实升级后重新形成案件。
+
 被拒、失效或来源变化的 Claim 本来就不会调用 Duty/Classification 模型。被拒项应进入 `claim_recovery`，并且只能从原消息恢复。
+
+Recovery 若报 `claim_recovery_disputed_claims_required`，说明没有明确争议闭集；不能用“重跑整个 Fragment”代替。恢复后应检查 `preserved_claim_ids_json`，确认已通过兄弟 Claim 没有被连带撤回。
+
+## 后台维护一直显示 foreground cooldown
+
+检查 `GET /api/memory/runtime/status`。外部聊天宿主必须在回复完成后调用 `foreground/end`；即使没有正常释放，租约也会在 TTL 后过期。正常释放后的一分钟冷却是为了避免刚结束回复就启动模型/向量批次，不应通过删表绕过。若没有活动租约但长期不恢复，再检查系统时间和 `memory_runtime_state.cooldown_until`。
 
 ## 证据池长期 needs_resolution/deferred
 

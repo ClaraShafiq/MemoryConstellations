@@ -35,11 +35,11 @@ function registerCronJobs() {
     } else {
         cron.schedule('*/2 * * * *', () => {
             const { getDb } = require('../database');
-            require('../services/memoryMaintenanceRunner').tick(getDb()).catch(err => {
+            require('../services/memoryBackgroundSupervisor').tick(getDb()).catch(err => {
                 console.error('[Cron] Modern memory pipeline error:', err.message);
             });
         }, TZ_OPT);
-        console.log('[Cron] Modern controlled pipeline registered: every 2 minutes');
+        console.log('[Cron] Modern controlled pipeline child process registered: every 2 minutes');
     }
 
     // ── Scribe：每 5 分钟去问一次「该不该提取了」──

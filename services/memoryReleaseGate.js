@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS memory_release_state (
 
 async function prepare(db, options = {}) {
     const localBlockers = require('./memoryDerivedStateHealth').releaseBlockers(db, {
-        runnerActive: require('./memoryMaintenanceRunner').status().active,
+        runnerActive: require('./memoryBackgroundSupervisor').status().active,
     });
     if (localBlockers.length) {
         return { ready: false, blockers: localBlockers, manifest_digest: vectors.manifest(db).digest };
