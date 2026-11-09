@@ -17,77 +17,61 @@ const { chromaDBOperation } = require('./memory');
 const { WORLD_CONTEXT } = require('./worldContext');
 const { renderTagSpecForPrompt } = require('./tagRouting');
 const { hashFragmentContent } = require('../utils/text');
-const { spawn } = require('child_process');
-const path = require('path');
 
-// 将新写入的 fragments 自动索引到 ChromaDB
-function indexNewFragments(fragmentIds) {
-    return new Promise((resolve, reject) => {
-        if (!fragmentIds || fragmentIds.length === 0) return resolve(0);
+// 将新写入的 fragments 自动索引到向量库（chroma-lite 的 /index_batch）
+// 旧实现 spawn venv/bin/python + chroma_helper.py；本机没有该 venv，且子进程的 'error'
+// 事件未监听时 ENOENT 会直接把整个 MC 进程带走（fail-loud），所以改走 HTTP。
+async function indexNewFragments(fragmentIds) {
+    if (!fragmentIds || fragmentIds.length === 0) return 0;
 
-        const db = getDb();
-        const placeholders = fragmentIds.map(() => '?').join(',');
-        const fragments = db.prepare(`
-            SELECT id, type, entity, content, emotional_weight, source, source_date
-            FROM memory_fragments WHERE id IN (${placeholders})
-        `).all(...fragmentIds);
+    const db = getDb();
+    const placeholders = fragmentIds.map(() => '?').join(',');
+    const fragments = db.prepare(`
+        SELECT id, type, entity, content, emotional_weight, source, source_date
+        FROM memory_fragments WHERE id IN (${placeholders})
+    `).all(...fragmentIds);
 
-        const items = fragments.map(f => ({
-            id: `fragment_${f.id}`,
-            text: `${f.entity}: ${f.content}`,
-            metadata: {
-                type: f.type,
-                entity: f.entity,
-                content: f.content,
-                emotional_weight: f.emotional_weight,
-                source: f.source,
-                source_date: f.source_date,
-            }
-        }));
+    const items = fragments.map(f => ({
+        id: `fragment_${f.id}`,
+        text: (() => {
+            const body = String(f.content || "").replace(/\s+/g, " ").trim();
+            const head = `${f.entity}：`;
+            const headAscii = `${f.entity}:`;
+            return body.startsWith(head) || body.startsWith(headAscii) ? body : `${f.entity}: ${body}`;
+        })(),
+        metadata: {
+            type: f.type,
+            entity: f.entity,
+            content: f.content,
+            emotional_weight: f.emotional_weight,
+            source: f.source,
+            source_date: f.source_date,
+        }
+    }));
 
-        const python = spawn(path.join(__dirname, '..', 'venv', 'bin', 'python'), [
-            path.join(__dirname, '..', 'chroma_helper.py'),
-            'index_batch',
-            JSON.stringify({ items })
-        ]);
+    try {
+        const result = await chromaDBOperation('index_batch', { items });
+        const update = db.prepare('UPDATE memory_fragments SET chroma_id = ? WHERE id = ?');
+        const duplicates = Array.isArray(result.duplicates) ? result.duplicates : [];
+        const dupIds = new Set(duplicates.map(d => String(d.new_id)));
 
-        let stdout = '';
-        python.stdout.on('data', (d) => stdout += d.toString());
-        python.stderr.on('data', (d) => console.error('[Scribe] Chroma index error:', d.toString()));
-        python.on('close', (code) => {
-            if (code === 0) {
-                try {
-                    const result = JSON.parse(stdout);
-                    // 更新 chroma_id
-                    const update = db.prepare('UPDATE memory_fragments SET chroma_id = ? WHERE id = ?');
-                    for (const item of items) {
-                        update.run(item.id, item.id.replace('fragment_', ''));
-                    }
-                    console.log(`[Scribe] ChromaDB indexed ${result.indexed} new fragments`);
+        for (const item of items) {
+            if (dupIds.has(item.id)) continue;
+            update.run(item.id, Number(item.id.replace('fragment_', '')));
+        }
+        for (const d of duplicates) {
+            update.run(`dup_of_${d.existing_id}`, Number(String(d.new_id).replace('fragment_', '')));
+            console.log(`[Curator] 重复跳过: ${d.new_id} ≈ ${d.existing_id} (sim=${d.similarity})`);
+            console.log(`  new: ${d.new_preview}`);
+            console.log(`  old: ${d.existing_preview}`);
+        }
 
-                    // 处理重复项：标记 chroma_id 指向已存在的记忆
-                    if (result.duplicates?.length > 0) {
-                        for (const d of result.duplicates) {
-                            const newRawId = d.new_id.replace('fragment_', '');
-                            db.prepare('UPDATE memory_fragments SET chroma_id = ? WHERE id = ?')
-                                .run(`dup_of_${d.existing_id}`, newRawId);
-                            console.log(`[Curator] 重复跳过: ${d.new_id} ≈ ${d.existing_id} (sim=${d.similarity})`);
-                            console.log(`  new: ${d.new_preview}`);
-                            console.log(`  old: ${d.existing_preview}`);
-                        }
-                    }
-
-                    resolve(result.indexed);
-                } catch (e) {
-                    console.error('[Scribe] Chroma index parse error:', e.message);
-                    resolve(0);
-                }
-            } else {
-                console.error(`[Scribe] Chroma index failed (exit ${code})`);
-                resolve(0);
-            }
-        });
-    });
+        console.log(`[Scribe] 向量索引完成: ${result.indexed ?? (items.length - dupIds.size)} 条入库，重复跳过 ${duplicates.length} 条`);
+        return result.indexed ?? 0;
+    } catch (e) {
+        console.error('[Scribe] 向量索引失败（碎片已入库，不影响后续）:', e.message);
+        return 0;
+    }
 }
 
 const SCRIBE_CONFIG = {
