@@ -24,6 +24,8 @@
 </div>
 
 <div id="panel">
+  <div class="p-resize p-resize-br" data-dir="br" title="拖动调整卡片大小"></div>
+  <div class="p-resize p-resize-bl" data-dir="bl" title="拖动调整卡片大小"></div>
   <button id="panel-close">✕</button>
   <div class="p-accent" id="p-accent"></div>
   <div class="p-cat" id="p-cat"></div>
@@ -255,6 +257,112 @@
   document.getElementById('export-btn').addEventListener('click', function () {
     window.location.href = '/api/export/memory';
   });
+})();
+</script>
+
+<div id="display-controls">
+  <label>亮度 <input id="dc-bright" type="range" min="0.8" max="2.2" step="0.05"><span class="dc-val" id="dc-bright-val"></span></label>
+  <label>字号 <input id="dc-font" type="range" min="10" max="18" step="0.5"><span class="dc-val" id="dc-font-val"></span></label>
+  <button id="dc-reset" title="恢复默认亮度与字号">重置</button>
+</div>
+
+<script>
+/* 显示控制：亮度 / 正文字号 / 面板拖拽尺寸，全部存 localStorage */
+(function () {
+  var KEY = 'mc-display-v1';
+  var DEF = { bright: 1.35, font: 11.5 };
+  var cfg = Object.assign({}, DEF);
+  try { Object.assign(cfg, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch (e) {}
+
+  var root = document.documentElement;
+  var bEl = document.getElementById('dc-bright');
+  var fEl = document.getElementById('dc-font');
+  var bVal = document.getElementById('dc-bright-val');
+  var fVal = document.getElementById('dc-font-val');
+
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(cfg)); } catch (e) {} }
+  function apply() {
+    root.style.setProperty('--ui-bright', cfg.bright);
+    root.style.setProperty('--pbody-fs', cfg.font + 'px');
+    bEl.value = cfg.bright; fEl.value = cfg.font;
+    bVal.textContent = (+cfg.bright).toFixed(2) + '×';
+    fVal.textContent = (+cfg.font).toFixed(1) + 'px';
+  }
+
+  bEl.addEventListener('input', function () { cfg.bright = +this.value; apply(); });
+  bEl.addEventListener('change', save);
+  fEl.addEventListener('input', function () { cfg.font = +this.value; apply(); });
+  fEl.addEventListener('change', save);
+  document.getElementById('dc-reset').addEventListener('click', function () {
+    cfg.bright = DEF.bright; cfg.font = DEF.font;
+    delete cfg.panelW; delete cfg.panelH;
+    root.style.removeProperty('--panel-w');
+    root.style.removeProperty('--panel-mh');
+    root.style.removeProperty('--pbody-mh');
+    apply(); save();
+  });
+
+  apply();
+
+  /* 面板拖拽：右下 / 左下两个把手，尺寸记进 localStorage（卡片、观星手记、认知模型通用） */
+  function attachResize(el, keyW, keyH, opts) {
+    if (!el) return;
+    opts = opts || {};
+    var mk = function (dir) {
+      var d = document.createElement('div');
+      d.className = 'p-resize p-resize-' + dir;
+      d.dataset.dir = dir;
+      d.title = '拖动调整大小';
+      el.appendChild(d);
+      return d;
+    };
+    var handles = [mk('br'), mk('bl')];
+    if (cfg[keyW]) el.style.width = cfg[keyW] + 'px';
+    if (cfg[keyH] && !el.classList.contains('collapsed')) el.style.height = cfg[keyH] + 'px';
+
+    var drag = null;
+    handles.forEach(function (h) {
+      h.addEventListener('pointerdown', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        h.setPointerCapture(e.pointerId);
+        drag = { dir: h.dataset.dir, x0: e.clientX, y0: e.clientY, w0: el.offsetWidth, h0: el.offsetHeight };
+        el.classList.add('dragging');
+      });
+      h.addEventListener('pointermove', function (e) {
+        if (!drag) return;
+        var dx = e.clientX - drag.x0, dy = e.clientY - drag.y0;
+        var w = drag.dir === 'br' ? drag.w0 + dx : drag.w0 - dx;
+        var hh = drag.h0 + dy;
+        w = Math.max(opts.minW || 240, Math.min(w, Math.round(window.innerWidth * 0.78)));
+        hh = Math.max(opts.minH || 120, Math.min(hh, Math.round(window.innerHeight * 0.92)));
+        cfg[keyW] = Math.round(w);
+        cfg[keyH] = Math.round(hh);
+        el.style.width = cfg[keyW] + 'px';
+        el.style.height = cfg[keyH] + 'px';
+        if (opts.onResize) opts.onResize(cfg[keyW], cfg[keyH]);
+      });
+      var stop = function () { if (drag) { drag = null; el.classList.remove('dragging'); save(); } };
+      h.addEventListener('pointerup', stop);
+      h.addEventListener('pointercancel', stop);
+    });
+  }
+
+  var panel = document.getElementById('panel');
+  if (panel) {
+    if (cfg.panelW) root.style.setProperty('--panel-w', cfg.panelW + 'px');
+    if (cfg.panelH) root.style.setProperty('--panel-mh', cfg.panelH + 'px');
+    attachResize(panel, 'panelW', 'panelH', {
+      minW: 240, minH: 180,
+      onResize: function (w, h) {
+        root.style.setProperty('--panel-w', w + 'px');
+        root.style.setProperty('--panel-mh', h + 'px');
+        root.style.setProperty('--pbody-mh', Math.max(150, Math.round(h * 0.45)) + 'px');
+      }
+    });
+  }
+
+  attachResize(document.getElementById('archlog'), 'archW', 'archH', { minW: 240, minH: 120 });
+  attachResize(document.getElementById('model-panel'), 'modelW', 'modelH', { minW: 240, minH: 120 });
 })();
 </script>
 
