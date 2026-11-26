@@ -1,6 +1,11 @@
 const { getDb } = require('../database');
 const { encryption } = require('../encryption');
 const { AI } = require('./nameResolver');
+const {
+    isMissingEmotionalWeight,
+    normalizeEmotionalWeight,
+    segmentedDecay,
+} = require('../utils/emotionalWeight');
 
 // ── 检索排除源（从 memory_config.json 读取）──
 const EXCLUDED_SOURCES = (() => {
@@ -16,42 +21,6 @@ const EXCLUDE_SOURCE_SQL = EXCLUDED_SOURCES.length > 0
     ? `AND mf.source NOT IN (${EXCLUDED_SOURCES.map(() => '?').join(',')})`
     : '';
 const EXCLUDE_SOURCE_PARAMS = EXCLUDED_SOURCES;
-
-// 时间衰减：半衰期由 emotional_weight 决定
-// ew ≥ 0.8 → λ=0.005 (140天半衰期)  重要记忆持久
-// ew ≥ 0.6 → λ=0.01  (70天半衰期)   标准
-// ew ≥ 0.4 → λ=0.02  (35天半衰期)   轻度记忆较快消退
-// ew  < 0.4 → λ=0.04  (17天半衰期)   琐碎信息快速沉底
-function getDecayLambda(emotionalWeight) {
-  const ew = emotionalWeight || 0.5;
-  if (ew >= 0.8) return 0.005;
-  if (ew >= 0.6) return 0.01;
-  if (ew >= 0.4) return 0.02;
-  return 0.04;
-}
-
-// 分段衰减（Ombre Brain 启发）：前3天新鲜度主导，3天后情绪强度主导
-// 短线：timeWeight=0.7 emotionWeight=0.3 → 新鲜事优先浮现
-// 长线：timeWeight=0.3 emotionWeight=0.7 → 高ew记忆顽强存活，低ew琐碎快速沉底
-const STM_TIME_WEIGHT = 0.7;     // ≤3天：时间新鲜度权重
-const LTM_EMOTION_WEIGHT = 0.7;  // >3天：情绪强度权重
-const SEGMENT_DAYS = 3;          // 分段切换天数
-
-function segmentedDecay(days, emotionalWeight) {
-  const ew = emotionalWeight || 0.5;
-  const lambda = getDecayLambda(ew);
-  // 纯时间衰减
-  const timeDecay = Math.exp(-lambda * days);
-  // 情绪保留：越高ew记忆越不容易被时间冲淡
-  const emotionRetention = 0.3 + ew * 0.7;
-
-  if (days <= SEGMENT_DAYS) {
-    // 短期：新鲜度为王。近期发生的事即使分量轻也值得浮现
-    return STM_TIME_WEIGHT * timeDecay + (1 - STM_TIME_WEIGHT) * emotionRetention;
-  }
-  // 长期：情绪接管。3天后时间不再是最重要的——ew=0.8的记忆可能比ew=0.3的存活长4倍
-  return (1 - LTM_EMOTION_WEIGHT) * timeDecay + LTM_EMOTION_WEIGHT * emotionRetention;
-}
 
 // 召回分数底线：低于此值的碎片不返回（被衰减+低权重自然淘汰）
 // YantrikDB 思路：召回端多道关卡，信号弱时宁可空返回也不塞噪音
@@ -386,7 +355,8 @@ async function searchHybrid(userMessage, limit = 6) {
     if (!itemMap.has(key)) {
       itemMap.set(key, {
         ...item,
-        emotional_weight: item.weight || 0.5,
+        emotional_weight: item.weight,
+        _ewUnset: isMissingEmotionalWeight(item.weight),
         _created_at: item.created_at || '',
         _read_count: item.read_count || 0,
       });
@@ -404,11 +374,12 @@ async function searchHybrid(userMessage, limit = 6) {
       itemMap.set(key, {
         id: item.id,
         content: item.content,
-        weight: item.emotional_weight || 0.5,
+        weight: normalizeEmotionalWeight(item.emotional_weight),
         date_label: item.date_label || '',
         source_table: item.source_table,
         _similarity: 0,
-        emotional_weight: item.emotional_weight || 0.5,
+        emotional_weight: item.emotional_weight,
+        _ewUnset: isMissingEmotionalWeight(item.emotional_weight),
         _created_at: item.created_at || '',
         _read_count: item.read_count || 0,
         _entity_id: item.entity_id,
@@ -433,7 +404,8 @@ async function searchHybrid(userMessage, limit = 6) {
         date_label: item.source_date || item.valid_from || '',
         source_table: sourceTable,
         _similarity: item._similarity || 0,
-        emotional_weight: item.emotional_weight || 0.5,
+        emotional_weight: item.emotional_weight,
+        _ewUnset: isMissingEmotionalWeight(item.emotional_weight),
         _created_at: item.created_at || '',
         _read_count: item.read_count || 0,
       });
@@ -443,8 +415,9 @@ async function searchHybrid(userMessage, limit = 6) {
       if (!existing._read_count && item.read_count) {
         existing._read_count = item.read_count;
       }
-      if (!existing.emotional_weight || existing.emotional_weight === 0.5) {
-        existing.emotional_weight = item.emotional_weight || 0.5;
+      if (existing._ewUnset) {
+        existing.emotional_weight = item.emotional_weight;
+        existing._ewUnset = isMissingEmotionalWeight(item.emotional_weight);
       }
       if (!existing._created_at) {
         existing._created_at = item.created_at || '';
@@ -495,7 +468,7 @@ async function searchHybrid(userMessage, limit = 6) {
   const decayed = ranked.map(item => {
     const dateForDecay = item._created_at || item.date_label;
     const days = daysAgo(dateForDecay);
-    const ew = item.emotional_weight || 0.5;
+    const ew = normalizeEmotionalWeight(item.emotional_weight);
     const actualDays = intent === 'long_term' ? days * 0.4 : days;  // long_term 意图下时间走得慢
     const decay = segmentedDecay(actualDays, ew);
     const importance = 0.4 + ew * 0.6;
@@ -531,7 +504,7 @@ async function searchHybrid(userMessage, limit = 6) {
 
       for (const f of floatFrags) {
         const daysOld = daysAgo(f.created_at);
-        const ew = f.emotional_weight || 0.5;
+        const ew = normalizeEmotionalWeight(f.emotional_weight);
         finalResults.push({
           ...f,
           weight: ew,

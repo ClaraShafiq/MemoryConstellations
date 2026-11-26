@@ -10,6 +10,7 @@ const { getEmbedding, getEmbeddingAPIKey } = require('../services/llm');
 const { chromaDBOperation } = require('../services/memory');
 const { sqlNow, formatUtcInAppTimeZone } = require('../utils/time');
 const { validateEndpoint, buildSafeUrl } = require('../utils/ssrf-guard');
+const { getDecayLambda, normalizeEmotionalWeight } = require('../utils/emotionalWeight');
 const MEMORY_API = require('../shared/memoryRoutes');
 
 const router = express.Router();
@@ -349,15 +350,8 @@ router.get(MEMORY_API.universe, requireAuth, (req, res) => {
         // Build constellations: each entity = one constellation with its linked fragments as stars
         const maxFrags = Math.max(1, ...normalEntities.map(e => e.fragment_count || 0));
 
-        // 衰减λ按情绪权重四档（与 Librarian segmentedDecay 同语义）：
+        // 衰减λ与 Librarian segmentedDecay 共用同一套阈值：
         // 高情绪记忆亮得久，琐事快速变暗
-        const ewLambda = (ew) => {
-            if (ew >= 0.8) return 0.005;   // 半衰期 ~139天
-            if (ew >= 0.6) return 0.01;    // ~69天
-            if (ew >= 0.4) return 0.02;    // ~35天
-            return 0.04;                   // ~17天
-        };
-
         const constellations = normalEntities.map(ent => {
             const frags = db.prepare(`
                 SELECT mf.id, COALESCE(mf.content, '') AS title, mf.content,
@@ -378,7 +372,7 @@ router.get(MEMORY_API.universe, requireAuth, (req, res) => {
 
             const stars = frags.map(f => {
                 const daysSince = Math.max(0, f.days_since_access || 0);
-                const λ = ewLambda(f.emotional_weight || 0.3);
+                const λ = getDecayLambda(normalizeEmotionalWeight(f.emotional_weight, 0.3));
                 const decay = Math.exp(-λ * daysSince);
                 // read_count = Librarian 检索命中次数（聊天里被想起 → 星星更亮）
                 const recallBonus = Math.min(0.3, Math.log(1 + (f.read_count || 0)) * 0.08);
@@ -1384,8 +1378,12 @@ router.put('/api/fragment/:id', requireAuth, (req, res) => {
         const updates = [];
         const params = [];
         if (emotional_weight !== undefined) {
+            const parsed = parseFloat(emotional_weight);
+            if (!Number.isFinite(parsed)) {
+                return res.status(400).json({ error: 'emotional_weight 必须是 0 到 1 之间的数字' });
+            }
             updates.push('emotional_weight = ?');
-            params.push(parseFloat(emotional_weight));
+            params.push(normalizeEmotionalWeight(parsed));
         }
         if (status) {
             updates.push('status = ?');

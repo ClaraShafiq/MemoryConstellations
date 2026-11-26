@@ -246,6 +246,13 @@ function addEvidence(id, fragmentId, confirms = true, opts = {}) {
     const entry = db.prepare('SELECT * FROM user_model WHERE id = ?').get(id);
     if (!entry) return null;
 
+    // 同一个 fragment 只算一次证据；批次重试 / backfill 重放同一份证据时，
+    // 不应继续抬高 confidence 或 evidence_count。
+    if (fragmentId != null) {
+        const existingFragmentIds = safeParseJson(entry.source_fragment_ids);
+        if (existingFragmentIds.includes(fragmentId)) return null;
+    }
+
     const { sourceMsgIds = [] } = opts; // message IDs that produced this evidence
 
     // ── Source diversity: check if this is truly independent evidence ──

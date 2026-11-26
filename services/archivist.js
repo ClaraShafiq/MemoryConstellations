@@ -19,6 +19,7 @@ const { getTagRouting } = require('./tagRouting');
 const { config: memoryConfig, SKIP_NAMES, USER, AI } = require('./memoryConfig');
 const SKIP_PH = SKIP_NAMES.map(() => '?').join(', '); // SQL placeholder string for NOT IN clauses
 const { runUserModelCycle, matchEvidenceFromFragments, harvestFacts, processModelDecay, resolveExpiredStates, MIN_GAP_USER_MODEL } = require('./cognitiveModel');
+const { normalizeEmotionalWeight } = require('../utils/emotionalWeight');
 
 function modernProtocolEnabled() {
     return memoryConfig.pipeline?.mode === 'modern';
@@ -4302,7 +4303,7 @@ ${buildLandscapeIndex()}
                 }
 
                 // Average emotional weight
-                const avgEW = indices.reduce((s, i) => s + (fragments[i]?.emotional_weight || 0.5), 0) / indices.length;
+                const avgEW = indices.reduce((s, i) => s + normalizeEmotionalWeight(fragments[i]?.emotional_weight), 0) / indices.length;
                 const mergedWeight = Math.min(10, Math.round(sig * 0.7 + (5 + avgEW * 3) * 0.3));
 
                 const finalDate = cluster.corrected_date || fragments[indices[0]]?.source_date || '';
