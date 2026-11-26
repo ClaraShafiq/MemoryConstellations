@@ -18,6 +18,7 @@
     "test:memory-latest-contracts": "node tests/memory_latest_contracts.js",
     "test:memory-background": "node tests/memory_background_runtime.js",
     "test:memory-correction-feedback": "node tests/memory_correction_feedback.js",
+    "test:memory-emotional-weight": "node tests/emotional_weight_contracts.js",
     "test:memory-v124-upgrade": "node tests/memory_v120_upgrade.js",
     "memory:release:status": "node scripts/memory_release.js status",
     "memory:release:prepare": "node scripts/memory_release.js prepare",

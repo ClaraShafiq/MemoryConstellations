@@ -17,6 +17,7 @@ const { chromaDBOperation, getLocalEmbedding } = require('./memory');
 const { encryption } = require('../encryption');
 const { updateEntityProfiles } = require('./entityProfile');
 const { WORLD_CONTEXT } = require('./worldContext');
+const { normalizeEmotionalWeight } = require('../utils/emotionalWeight');
 
 const CONFIG = {
     LOOKBACK_DAYS: 7,            // 查找最近N天的活跃碎片（null=不限时间）
@@ -311,7 +312,7 @@ async function consolidateGroup(group) {
     }
 
     // 计算合并后的权重（emotional_weight 为基础，significance 为主调）
-    const avgEW = group.reduce((s, f) => s + (f.emotional_weight || 0.5), 0) / group.length;
+    const avgEW = group.reduce((s, f) => s + normalizeEmotionalWeight(f.emotional_weight), 0) / group.length;
     // significance 5-6 → weight 5-6, 7-8 → weight 7-8, 9-10 → weight 9-10
     const sigWeight = Math.round(significance);
     const mergedWeight = Math.min(10, Math.round(sigWeight * 0.7 + (5 + avgEW * 3) * 0.3));

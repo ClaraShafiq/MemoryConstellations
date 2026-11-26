@@ -3,6 +3,7 @@
 // =================================================================
 const { getDb } = require('../database');
 const { getLocalEmbedding } = require('./memory');
+const { normalizeEmotionalWeight } = require('../utils/emotionalWeight');
 
 const MAX_POOL_SIZE = 5;
 const TTL_MS = 30 * 60 * 1000;
@@ -150,7 +151,7 @@ function updatePool(fragments) {
     pool.set(key, {
       key,
       content: f.content || '',
-      emotional_weight: f.emotional_weight || 0.5,
+      emotional_weight: normalizeEmotionalWeight(f.emotional_weight),
       _rrf: f._rrf || 0,
       topicEmbedding: emb || [],
       lastBoostedAt: Date.now(),

@@ -17,6 +17,7 @@ const { chromaDBOperation } = require('./memory');
 const { WORLD_CONTEXT } = require('./worldContext');
 const { renderTagSpecForPrompt } = require('./tagRouting');
 const { hashFragmentContent } = require('../utils/text');
+const { normalizeEmotionalWeight } = require('../utils/emotionalWeight');
 const { spawn } = require('child_process');
 const path = require('path');
 
@@ -845,7 +846,7 @@ async function runScribe(messages, since) {
                 entry.type || 'observation',
                 primaryEntity,
                 entry.content,
-                entry.emotional_weight ?? 0.3,
+                normalizeEmotionalWeight(entry.emotional_weight, 0.3),
                 fragmentSource,
                 sourceDate,
                 sourceMsgIds,
