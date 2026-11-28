@@ -10,7 +10,7 @@ SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 npm run test:memory-modern
 ```
 
-覆盖空库 v124、Scribe 逐字引文和主体、Claim/Duty/Classification/Node Review、证据池、星座身份/别名/准入、Episode、Saga、Facts/Status、Judgment 证据门、Codex Judgment 禁令、搜索投影、CAS 和租约。
+覆盖空库 v125、Scribe 逐字引文和主体、Fragment 直读/Classification/Node Review、证据池、星座身份/别名/准入、Episode、Saga、Facts/Status、Judgment 证据门、Codex Judgment 禁令、搜索投影、CAS 和租约。
 
 ## 最新语义合同与后台隔离
 
@@ -19,7 +19,7 @@ SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-latest-cont
 SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-background
 ```
 
-第一组覆盖完整语义单元、fiction 现实域隔离、悬空代词/缩写、问句锚、局部 Recovery、唯一命名物件完整属性组、不确定属性、单次评价和历史事件边界，以及独立 A/B 分歧不发布。第二组覆盖前台租约、一分钟冷却、精确 target 不消费全库积压、子进程入口和有限失败状态。两者会自行创建并清理临时库。
+第一组覆盖 Claim 表物理删除、Fragment 直接证据、旧写接口 fail-closed、fiction 现实域隔离、来源变化失效和下游 fragment target。第二组覆盖前台租约、一分钟冷却、精确 target 不消费全库积压、子进程入口和有限失败状态。两者会自行创建并清理临时库。
 
 ## Scribe 完整语义单元
 
@@ -39,7 +39,7 @@ SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 npm run test:memory-lanes
 ```
 
-覆盖实时/回补租约隔离、Review 后 Duty/Classify 继承车道、拒绝项在 Duty/Classification 前零模型结束、Scribe 失败不推进游标、60→30→15 缩批与冷却，以及 modern 模式下旧写入旁路 fail-closed。
+覆盖实时/回补租约隔离、Fragment 分类下游继承车道、来源变化在分类前零模型结束、Scribe 失败不推进游标、60→30→15 缩批与冷却，以及 modern 模式下旧写入旁路 fail-closed。
 
 ## 扩展安全合同
 
@@ -52,7 +52,6 @@ npm run test:memory-extensions
 覆盖：
 
 - 精确消息重放不推进主游标，assistant 自我陈述不能误归 user；
-- 被拒 Claim Recovery 只读原消息并 supersede 旧 Claim；
 - 不变证据进入 deferred，分类变化后重开；
 - 星座发现类型门槛和核心身份隔离；
 - 纠错先入收件箱，不直接改 Profile；
@@ -72,7 +71,7 @@ npm run test:memory-derived-state
 
 覆盖 status-aware legacy FTS、SQL 投影 dry-run/执行修复、远端多余向量发现与删除、三态健康、legacy 下本地 manifest blocker、过期向量租约唤醒及五次失败转人工检查。fixture 全部为新建的中性虚构内容。
 
-## 纠错反馈与 v124 升级
+## 纠错反馈与 v125 升级
 
 ```bash
 DB_PATH=/tmp/memory-correction-feedback.sqlite \
@@ -80,10 +79,10 @@ SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 npm run test:memory-correction-feedback
 
 SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
-npm run test:memory-v124-upgrade
+npm run test:memory-v125-upgrade
 ```
 
-第一组验证 fragment 纠错按来源消息交集降权、无关碎片不受影响、即时处理与后台重试不会重复应用，并拒绝没有正确内容的普通纠错。第二组模拟 v119/v120 表结构，验证历史纠错记录、向量 receipt 和 Recovery 数据原地保留，并补齐 v121–v124 的双审、租约与恢复合同。
+第一组验证 fragment 纠错按来源消息交集降权、无关碎片不受影响、即时处理与后台重试不会重复应用，并拒绝没有正确内容的普通纠错。第二组构造带旧 Claim、Episode/Profile 发布与固定 input hash 的 v124 库，验证 v125 物理拔表后旧证据 ID、逐字来源和发布历史原地保留。
 
 ## 其他定向测试
 
@@ -114,7 +113,7 @@ npm run check:privacy
 - effective 与 requested chat read mode；
 - semantic maintenance 状态；
 - maintenance runner 是否 active；
-- Claim、证据池、Episode、Profile、搜索单元计数；
+- Fragment、兼容证据锚、证据池、Episode、Profile、搜索单元计数；
 - verified release 和向量 manifest blocker。
 - 派生状态三态、积压新鲜度、过期租约与 legacy FTS（仅 legacy 模式）。
 

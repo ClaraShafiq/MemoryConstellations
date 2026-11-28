@@ -9,8 +9,8 @@ Memory Constellations 是一条面向长期 AI 关系的可审计记忆管线。
 ```mermaid
 flowchart LR
   M[原始消息] --> S[Scribe 最小完整语义观察]
-  S --> C[Claim Recovery + A/B Review]
-  C --> D[Duty + Context Scope]
+  S --> C[active / quoted Fragment]
+  C --> D[确定性职责 + 来源指纹]
   D --> L[Classification 候选]
   L --> N[Node Review]
   N --> E[Evidence Resolution<br/>待裁决证据池]
@@ -26,16 +26,16 @@ flowchart LR
   R --> Q[有界聊天注入包]
 ```
 
-暂时无法归属的 Claim 不会丢弃。它保留在证据池中；相同证据指纹的重复裁决进入 `deferred`，只有来源、合同版本、审查结论或相关上下文变化才重开。A/B 审核互相独立，分歧不强行发布。被拒 Claim 进入精确消息恢复流程，不会退回派生 Fragment 正文重新猜测，也不会撤回同 Fragment 中已经通过的兄弟 Claim。
+暂时无法归属的 Fragment 证据不会丢弃。它保留在证据池中；相同证据指纹的重复裁决进入 `deferred`，只有来源、分类结论或相关上下文变化才重开。v125 已物理删除 Claim/Review/Duty/Recovery 表；旧 Claim ID 仅作为兼容证据锚保留，确保既有 Episode/Profile 引用和 input hash 不漂移。
 
 ## 层级边界
 
 | 层 | 唯一职责 |
 |---|---|
 | Fragment / Scribe observation | 从同一表达批次提取带逐字引文的最小完整语义单元，不提前创建星座或判断人格 |
-| Claim / evidence pool | 保存主体、来源、时间、支持度、职责、归属和阻断原因 |
+| Fragment evidence pool | 保存主体、来源、时间、确定性职责、归属和阻断原因 |
 | Constellation | 维护有导航价值的实体身份、证据化别名和准入状态 |
-| Episode | 把合格 Claim 组织成一次有边界、可版本化的事件叙事 |
+| Episode | 把合格 Fragment 证据组织成一次有边界、可版本化的事件叙事 |
 | Saga | 只用已发布 Episode 组织长程叙事弧线 |
 | Profile | 分别发布 Facts、Status、Judgment，不把三者混成一段文本 |
 | Search projection | 把允许消费的发布物同步到 SQL 与带回执的向量投影 |
@@ -50,7 +50,7 @@ Duty 固定为 `stable_fact / core_trait / partner_pattern / current_state / eve
 | 角色 | 可以做 | 不可以做 |
 |---|---|---|
 | 确定性代码 | 指纹、逐字校验、状态机、预算、租约、CAS、正式写库、发布门禁 | 猜测语义 |
-| 结构化模型 / 维护 Agent | 客观分类、证据审核、Claim Recovery、星座维护、Facts、Status、管线工程 | 任意 SQL；第一人称 Judgment |
+| 结构化模型 / 维护 Agent | 碎片分类、节点证据审核、星座维护、Facts、Status、管线工程 | 任意 SQL；第一人称 Judgment |
 | 人格写作者 | 在 persona 已绑定且态度证据充分时生成非空 Judgment | 修改 Facts/Status；用事实数量硬造态度 |
 | 聊天主模型 | 消费有界记忆包并回复 | 绕过发布协议直接改成品记忆 |
 
@@ -71,7 +71,7 @@ DB_PATH=./memory_constellations.db npm run setup:llm
 DB_PATH=./memory_constellations.db npm start
 ```
 
-先在 `.env` 填写两个不同的随机密钥、登录密码和你自己的模型 endpoint；再编辑公共角色配置。首次启动会从空库迁移到 schema v124，不需要任何外部生产数据。完整步骤见 [OSS_SETUP.md](OSS_SETUP.md)。
+先在 `.env` 填写两个不同的随机密钥、登录密码和你自己的模型 endpoint；再编辑公共角色配置。首次启动会从空库迁移到 schema v125，不需要任何外部生产数据。完整步骤见 [OSS_SETUP.md](OSS_SETUP.md)。
 
 ## 手动部署与 Agent 辅助部署
 
@@ -95,7 +95,7 @@ DB_PATH=/tmp/memory-derived-state.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand
 DB_PATH=/tmp/memory-correction-feedback.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-correction-feedback
 SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-latest-contracts
 SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-background
-SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-v124-upgrade
+SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-v125-upgrade
 npm run test:llm-config
 npm run check:docs
 npm run check:privacy
@@ -115,7 +115,7 @@ DB_PATH=./memory_constellations.db npm run memory:health:repair
 DB_PATH=./memory_constellations.db npm run memory:health:repair -- --execute
 ```
 
-`check` 只检查本地新鲜度、积压、租约、SQL/向量 receipt；`verify` 还核对远端缺失、陈旧、待删除和多余向量。`repair` 默认只预演；`--execute` 才会从正式 Claim/Episode/Saga/Profile 发布物重建投影并修复远端。legacy 模式会同时检查旧 FTS，modern 模式不会让旧索引重新成为权威来源。
+`check` 只检查本地新鲜度、积压、租约、SQL/向量 receipt；`verify` 还核对远端缺失、陈旧、待删除和多余向量。`repair` 默认只预演；`--execute` 才会从活跃 Fragment 证据和正式 Episode/Saga/Profile 发布物重建投影并修复远端。legacy 模式会同时检查旧 FTS，modern 模式不会让旧索引重新成为权威来源。
 
 本地向量账目缺口无论聊天当前读取 legacy 还是 verified 都会报告；读模式只决定正式消费者与是否需要远端验收，不会隐藏本地 receipt 漂移。健康报告覆盖新鲜度、租约、receipt、manifest 和适用的旧 FTS，不代表正文语义或模型判断已经正确。
 

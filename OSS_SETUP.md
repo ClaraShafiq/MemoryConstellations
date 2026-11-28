@@ -59,7 +59,7 @@ MEMORY_MAINTENANCE_DAILY_CALL_LIMIT=0
 DB_PATH=./memory_constellations.db npm run setup:llm
 ```
 
-该命令从空库迁移到 schema v124，把 API key 加密写入指定数据库，并设置为默认模型连接。之后所有启动、维护和发布命令都要使用相同 `DB_PATH`。
+该命令从空库迁移到 schema v125，把 API key 加密写入指定数据库，并设置为默认模型连接。之后所有启动、维护和发布命令都要使用相同 `DB_PATH`。
 
 ## 4. 运行聚焦测试
 
@@ -71,7 +71,7 @@ DB_PATH=/tmp/memory-lanes.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32
 DB_PATH=/tmp/memory-extensions.sqlite SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-extensions
 SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-latest-contracts
 SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-background
-SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-v124-upgrade
+SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) npm run test:memory-v125-upgrade
 npm run test:llm-config
 npm run test:contracts
 npm run test:ssrf
@@ -93,7 +93,7 @@ DB_PATH=./memory_constellations.db npm start
 curl http://127.0.0.1:3000/api/health
 ```
 
-初始响应应包含 `ok: true`、`schema_version: 124`、`chat_read_mode: legacy`、`semantic_maintenance: backfill`、各层计数和 verified 向量 blocker。健康接口不返回记忆正文。
+初始响应应包含 `ok: true`、`schema_version: 125`、`chat_read_mode: legacy`、`semantic_maintenance: backfill`、各层计数和 verified 向量 blocker。健康接口不返回记忆正文。
 
 ## 6. 接入消息与纠错证据
 
@@ -107,7 +107,7 @@ curl -X POST http://127.0.0.1:3000/api/recall \
   -d '{"query":"local notebook","limit":8}'
 ```
 
-`POST /api/memory/corrections` 只提交带消息 ID 和逐字引文的纠错证据，不直接改 Profile。受控审查通过后才创建 correction Claim 并让旧 Claim 失效。
+`POST /api/memory/corrections` 只提交带消息 ID 和逐字引文的纠错证据，不直接改 Profile。受控审查通过后才创建 domain=`correction` 的新 Fragment，并让旧证据锚失效。
 
 上述三个集成路由默认按 loopback/受信内网设计。公网开放前必须增加反向代理鉴权、TLS、速率限制和请求大小限制。
 
@@ -172,7 +172,7 @@ DB_PATH=./memory_constellations.db npm run memory:release:prepare
 DB_PATH=./memory_constellations.db npm run memory:release:activate
 ```
 
-`requested_chat_read_mode=verified` 不保证有效读模式一定是 verified。投影 revision、source hash、当前 Claim/Duty/Node 归属或远端回执任一不一致时，有效模式会变成 `blocked`，读取返回 503；不会自动回落 legacy。显式回滚：
+`requested_chat_read_mode=verified` 不保证有效读模式一定是 verified。投影 revision、source hash、当前 Fragment 来源/职责/Node 归属或远端回执任一不一致时，有效模式会变成 `blocked`，读取返回 503；不会自动回落 legacy。显式回滚：
 
 ```bash
 DB_PATH=./memory_constellations.db npm run memory:release:rollback
@@ -183,7 +183,7 @@ DB_PATH=./memory_constellations.db npm run memory:release:rollback
 不能用测试通过或表计数代替真实验收。至少确认：
 
 1. 一条全新自然消息被 Scribe 拆成正确的原子观察，逐字引文和主体无误。
-2. Claim Review、Duty、Classification、Node Review 和证据池完成；拒绝项可恢复而不读 Fragment 正文。
+2. Fragment Classification、Node Review 和证据池完成；来源变化时在模型调用前 fail-closed。
 3. 星座候选、Episode、Profile 字段和搜索投影按证据发布。
 4. Judgment 证据不足时不生成，失败时保留旧值。
 5. `release:prepare` 远端核验通过，激活后 `/api/recall` 返回带 revision/source hash 的现代聊天包。

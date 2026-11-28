@@ -7,7 +7,7 @@ const { isCoreIdentity } = require('./memoryConfig');
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_search_projection (
     projection_key TEXT PRIMARY KEY,
-    target_type TEXT NOT NULL CHECK(target_type IN('claim','episode','saga','profile')),
+    target_type TEXT NOT NULL CHECK(target_type IN('claim','fragment','episode','saga','profile')),
     target_id INTEGER NOT NULL,
     field TEXT,
     revision INTEGER NOT NULL,
@@ -40,16 +40,20 @@ function remove(db, key) {
 }
 
 function refreshClaim(db, claimId) {
-    if (!db.prepare('SELECT 1 FROM memory_claims WHERE id=?').get(claimId)) {
+    let claim;
+    try { claim = protocol.readClaim(db, claimId); } catch (_) {
         remove(db, `claim:${claimId}`);
+        remove(db, `fragment:${claimId}`);
         return false;
     }
-    const claim = protocol.readClaim(db, claimId);
     if (!policy.readableClaim(db, claimId)) {
         remove(db, `claim:${claimId}`);
+        remove(db, `fragment:${claimId}`);
         return false;
     }
-    put(db, `claim:${claimId}`, 'claim', claimId, null, claim.revision, claim.input_hash, claim.body,
+    const direct = claim.synthetic === true;
+    put(db, `${direct ? 'fragment' : 'claim'}:${claimId}`, direct ? 'fragment' : 'claim',
+        claimId, null, claim.revision, claim.input_hash, claim.body,
         { domain: claim.domain, temporal_state: claim.temporal_state });
     return true;
 }

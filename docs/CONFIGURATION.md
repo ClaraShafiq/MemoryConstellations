@@ -81,7 +81,7 @@ DB_PATH=./memory_constellations.db npm run memory:health:repair -- --execute
 
 Scribe 必须输出可独立消费的最小完整语义观察、合法主体、闭集 domain/时间状态和逐字引文；同一表达批次不能仅因句子、domain 或时间状态不同而机械切碎。结构化维护者必须实现 `propose({ job, input })` 并返回 allowlist action。人格写作者必须独占非空第一人称 Judgment。聊天主模型只消费发布后的聊天包。
 
-Claim Review 是两个独立 job：适配器收到的 `review_pass` 必须原样回填为 `pass=a|b`。宿主只在两个 pass 对 support、attribution 和 temporal state 一致时发布。适配器不得读取另一个 pass 的输出，也不能把分歧强制折中。
+v125 的运行时维护从 `fragment_classification` 开始，不再调度 Claim Review、Duty 或 Recovery。适配器收到的是宿主已校验逐字来源的 Fragment 证据快照；它只能返回 allowlist 中的分类、节点审核和发布 action。
 
 `input` 是宿主从正式表生成的最小只读快照，不包含任意 SQL 能力。无论模型或 IDE 如何替换，都不能绕过证据指纹、revision/CAS、租约、预算、producer role 和唯一写入者校验。
 

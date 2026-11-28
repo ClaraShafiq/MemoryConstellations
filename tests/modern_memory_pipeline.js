@@ -8,8 +8,6 @@ const { initDatabase } = require('../database');
 async function main() {
     const db = initDatabase();
     const protocol = require('../services/memoryProtocol');
-    const claimReview = require('../services/memoryClaimReview');
-    const claimDuty = require('../services/memoryClaimDuty');
     const classification = require('../services/memoryClassification');
     const nodeReview = require('../services/memoryNodeReview');
     const evidence = require('../services/memoryEvidenceResolution');
@@ -32,20 +30,17 @@ async function main() {
     const messageId = Number(msg.lastInsertRowid);
     const scribeResult = await scribe.runBatch(db.prepare('SELECT * FROM messages WHERE id=?').all(messageId),
         { at: '2000-01-01 00:00:00', id: 0 }, { extractEntries: async () => [{
-            body: 'River prefers mint tea.', subject: 'user', domain: 'user_statement', temporal_state: 'unknown',
+            body: 'River prefers mint tea.', memory_type: 'preference', subject: 'user', domain: 'user_statement', temporal_state: 'unknown',
             evidence: [{ message_id: messageId, quote: 'prefer mint tea' }],
         }] });
     assert.equal(scribeResult.observations_written, 1);
-    const fragment = db.prepare("SELECT * FROM memory_fragments WHERE observation_state='frozen'").get();
-    assert.equal(fragment.status, 'frozen');
-    const claim = protocol.readClaim(db, db.prepare('SELECT id FROM memory_claims').get().id);
+    const fragment = db.prepare("SELECT * FROM memory_fragments WHERE observation_state='quoted'").get();
+    assert.equal(fragment.status, 'active');
+    assert.equal(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_claims'").get(), undefined);
+    const claim = protocol.readClaim(db, require('../services/memoryFragmentEvidence').syntheticId(fragment.id));
     assert.equal(claim.sources[0].quote, 'prefer mint tea');
     assert.equal(claim.subject_kind, 'user');
 
-    claimReview.commit(db, { claimId: claim.id, expectedRevision: claim.revision, inputHash: claim.input_hash,
-        support: 'supported', attribution: 'supported', temporalState: 'unknown', reviewer: 'test-reviewer' });
-    claimDuty.commit(db, { claimId: claim.id, expectedRevision: claim.revision, inputHash: claim.input_hash,
-        duty: 'preference', contextScope: 'general', basis: 'exact_quote', state: 'supported', reviewer: 'test-reviewer' });
     const entityId = Number(db.prepare(`INSERT INTO entity_profiles(name,category,status,aliases,memory_scope)
         VALUES('River','person','active','[]','default')`).run().lastInsertRowid);
     classification.commit(db, { claimId: claim.id, expectedRevision: claim.revision, inputHash: claim.input_hash,
@@ -102,13 +97,8 @@ async function main() {
         { extractEntries: async () => [{ body: 'The assistant finds River\'s careful preferences endearing.',
             subject: 'assistant', domain: 'companion_opinion', temporal_state: 'unknown',
             evidence: [{ message_id: attitudeMessageId, quote: 'preferences endearing' }] }] });
-    const attitudeClaim = protocol.readClaim(db, db.prepare('SELECT id FROM memory_claims ORDER BY id DESC LIMIT 1').get().id);
-    claimReview.commit(db, { claimId: attitudeClaim.id, expectedRevision: attitudeClaim.revision,
-        inputHash: attitudeClaim.input_hash, support: 'supported', attribution: 'supported',
-        temporalState: 'unknown', reviewer: 'test-reviewer' });
-    claimDuty.commit(db, { claimId: attitudeClaim.id, expectedRevision: attitudeClaim.revision,
-        inputHash: attitudeClaim.input_hash, duty: 'opinion', contextScope: 'general', basis: 'exact_quote',
-        state: 'supported', reviewer: 'test-reviewer' });
+    const attitudeFragment = db.prepare("SELECT id FROM memory_fragments WHERE observation_state='quoted' ORDER BY id DESC LIMIT 1").get();
+    const attitudeClaim = protocol.readClaim(db, require('../services/memoryFragmentEvidence').syntheticId(attitudeFragment.id));
     classification.commit(db, { claimId: attitudeClaim.id, expectedRevision: attitudeClaim.revision,
         inputHash: attitudeClaim.input_hash, outcome: 'linked', links: [{ entity_id: entityId, role: 'subject' }],
         topics: [], reviewer: 'test-reviewer' });
@@ -135,14 +125,14 @@ async function main() {
     assert.ok(found.length >= 2);
     assert.ok(packet.build(found).units.length >= 2);
 
-    const leased = protocol.leaseJobs(db, 'claim_review_a', { limit: 1, now: Date.now() });
+    const leased = protocol.leaseJobs(db, 'fragment_classification', { limit: 1, now: Date.now() });
     if (leased.length) {
         assert.throws(() => protocol.finishJob(db, { ...leased[0], lease_token: 'wrong' }, 'done'), /memory_job_lease_lost/);
     }
     assert.throws(() => classification.commit(db, { claimId: claim.id, expectedRevision: 99,
         inputHash: claim.input_hash, outcome: 'no_independent_node', reviewer: 'test-reviewer' }), /classification_cas_failed/);
 
-    console.log(JSON.stringify({ ok: true, schema: 124, claim_id: claim.id, entity_id: entityId,
+    console.log(JSON.stringify({ ok: true, schema: 125, evidence_id: claim.id, entity_id: entityId,
         episode_id: publication.memory_id, search_results: found.length }));
 }
 

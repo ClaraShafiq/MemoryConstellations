@@ -6,7 +6,7 @@ const protocol = require('./memoryProtocol');
 let active = null;
 
 const REVIEW_STAGES = Object.freeze([
-    'claim_review_a', 'claim_review_b', 'claim_recovery', 'claim_duty', 'claim_classification', 'node_review',
+    'fragment_classification', 'node_review',
     'constellation_discovery', 'constellation_identity', 'constellation_admission',
     'episode_publish', 'profile_facts', 'profile_status', 'correction_review',
 ]);

@@ -11,14 +11,15 @@
 7. 实时任务与历史回补分车道；在线 runner 只消费实时车道。
 8. maintenance running 与 verified read mode 是两个独立状态。
 9. modern 模式启用后，旧 Scribe、Archivist、Skills、Insight、Flash 和认知融合写入口必须停用。
-10. Claim 的独立 A/B 审核分歧时不发布；只有输入或合同版本变化才形成新案件。
-11. Profile 与 verified 检索只消费当前 eligible Claim、正式 Duty 和当前 Node Review 归属。
+10. Fragment 是权威观察；新写入不得重建 Claim/Review/Duty/Recovery 层。
+11. Profile 与 verified 检索只消费来源仍有效的 Fragment 证据、确定性职责和当前 Node Review 归属。
 
-## 从消息到 Claim
+## 从消息到 Fragment 证据
 
 `memoryScribe.js` 使用 `(picked_up_at/timestamp, message_id)` 复合游标读取消息。每条观察保存：
 
 - 中性、脱离聊天仍能理解的完整语义正文；
+- `fact / preference / event / intention / state / observation / reflection` 用途类型；
 - `user / assistant / third_party / unknown` 主体；
 - domain 与时间状态；
 - 消息 ID、逐字引文、speaker、来源时间和消息指纹。
@@ -31,42 +32,38 @@ Scribe 会先把同一聊天、同一说话者、同一时间戳的相邻消息�
 
 观察正文不得只剩没有对象的动作，也不得把具体解释退化为“某件事”“奇怪的东西”等含糊占位。一个 entry 对同一消息只能保留一条 evidence；多个精确片段由宿主收拢为覆盖它们的最小连续逐字引文，无法精确定位则 fail-closed。关系不安与对方的具体回应可作为一个 `interaction` 单元保留双方证据；公共主体闭集无法由单一对象代表整段互动时使用 `unknown`，不据此推断关系标签。
 
-提取失败不会写 Fragment、Claim 或成功游标。同一游标连续稳定失败时，批量依次从 60 缩到 30、15；15 仍失败后冷却一小时。成功推进后恢复正常批量。
+提取成功直接写入 active/quoted Fragment，并以结构化 `observation_json` 保存主体、domain、时间和逐字来源；随后排入 `fragment_classification`。提取失败不会写 Fragment 或成功游标。同一游标连续稳定失败时，批量依次从 60 缩到 30、15；15 仍失败后冷却一小时。成功推进后恢复正常批量。
 
 `WORLD_CONTEXT` 不再是硬编码私人 persona。`worldContext.js` 提供可替换 provider；公共默认只描述 user/assistant 的通用边界。
 
-## Claim 审查、恢复与证据池
+## Fragment 适配、分类与证据池
 
-一个 Claim 必须依次满足：
+新 Fragment 的来源支持、主体和时间由 Scribe 的宿主校验直接确定；职责由 `memory_type`、domain 和时间状态确定性推导。后续依次执行：
 
-- `memoryClaimReview.js`：来源支持、主体归属、时间状态；
-- `memoryClaimDuty.js`：stable fact、current state、event、preference、opinion 等职责；
 - `memoryClassification.js`：关联实体、topic only、无独立节点或需要继续裁决；
 - `memoryNodeReview.js`：对每个候选实体/role 做逐项证据审查。
 
-Review 使用 `claim_review_a` 与 `claim_review_b` 两个独立 job。两个 pass 在相同 claim revision、input hash 和合同版本上完全一致，宿主才发布支持、主体与时间结论；分歧保留为 `needs_review`。问句可以提供当前对象锚，但不能证明问句中的命题，发布事实仍需陈述性逐字证据。
+`memoryFragmentEvidence.js` 是兼容适配层。新 Fragment 使用 `1000000000 + fragment_id` 作为证据 ID；v124 以前的 Claim ID 则保存在 `memory_fragment_evidence_refs` 账本中。下游仍有 `claim_id` / `claim_ids` 字段名以保持既有 Episode/Profile payload 和 input hash 稳定，但它们表示证据锚，不代表 Claim 表仍存在。
 
 Duty 固定十类：`stable_fact / core_trait / partner_pattern / current_state / event / preference / opinion / fiction / third_party / unresolved`。情境范围固定五类：`general / with_draco / specific_event / reference_material / unknown`。其中 `with_draco` 是历史兼容的协议值，在公共部署中表示与配置的 assistant/persona 有明确证据的关系情境。单次评价不能自动升级为偏好；`partner_pattern` 和关系范围必须有显式关系证据；对象材料的保留推测可以作为 qualified stable fact，但正文必须继续保留不确定措辞。
 
 Classification 只提出 `subject / participant / location / organization / work / topic / mention` 候选。Node Review 决定最终角色。只有同一 Fragment 中唯一、明确命名的物件，才允许把已核验的类型、颜色、材质、质感、长期用途和相关事件组成闭集送审；锚点不唯一时禁止聚合。事件仍保持 `event` Duty，因此可以归属对象和进入 Episode，但不会进入 Facts。
 
-Claim Review 之后的 Duty 与 Classification 继承原 job priority。已拒、来源变化或未支持的 Claim 在 Duty/Classification 前置检查中零模型结束。
-
-被拒 Claim 会为其来源 Fragment 创建 `claim_recovery` job。`memoryClaimRecovery.js` 只读取绑定的原始消息和逐字引文；它禁止用 Fragment 派生正文作分类后备。恢复输入区分 disputed 与 preserved Claim；成功时只 CAS supersede 争议项，已经通过的兄弟 Claim 和人工锁定项保持不变。同 domain、同逐字证据组的机器重复项只保留一个；不同 domain 或不同证据不合并。代词恢复只能使用描述之前已经建立的对象锚。
+Classification 与后续 Node Review 继承原 job priority。来源变化或不合格 Fragment 在分类前置检查中零模型结束。旧 `memoryClaimReview.js`、`memoryClaimDuty.js` 与 `memoryClaimRecovery.js` 只保留迁移期代码形状，不在 v125 运行时调度中使用；对应正式表已物理删除。
 
 `memoryEvidenceResolution.js` 保存状态与明确 reason code：`ineligible / needs_resolution / deferred / unassigned / topic_only / node_candidate / grounded`。相同证据指纹的重复 `needs_resolution` 会转为 `deferred`；时间流逝本身不触发重开。来源或上游结论变化后，新的指纹才允许重新裁决。
 
 ## 结构化纠错
 
-`POST /api/memory/corrections` 只接收消息 ID、逐字引文、纠正文和可选目标 Claim。`memoryCorrection.js` 将其保存为收件箱 receipt 并排入实时审查车道。
+`POST /api/memory/corrections` 只接收消息 ID、逐字引文、纠正文和可选目标 Fragment/兼容证据 ID。`memoryCorrection.js` 将其保存为收件箱 receipt 并排入实时审查车道。
 
-对话角色不能直接改成品 Profile。审查通过后，宿主创建 domain=`correction` 的新 Claim，并以 CAS 让旧 Claim 失效。Facts/Status 的 `revise` 或 `withdraw` 必须引用 correction Claim；未被操作的字段项原样保留。
+对话角色不能直接改成品 Profile。审查通过后，宿主创建 domain=`correction` 的新 active/quoted Fragment，并以 CAS 让旧证据锚失效。Facts/Status 的 `revise` 或 `withdraw` 必须引用 correction 证据；未被操作的字段项原样保留。
 
 ## 星座
 
 星座分为发现、身份、准入三个阶段：
 
-1. `memoryConstellationDiscovery.js` 只接受可用证据池 Claim，并要求候选名称出现在 Claim 或引文中。
+1. `memoryConstellationDiscovery.js` 只接受可用证据池 Fragment 证据，并要求候选名称出现在正文或引文中。
 2. `memoryConstellationIdentity.js` 解析身份和逐字有据的别名；核心 user/assistant 身份不能作为普通第三方 Profile 创建。
 3. `memoryConstellation.js` 决定 admitted、contained 或 rejected；普通细节不能以 admitted 方式独立成星。
 
@@ -74,19 +71,19 @@ Claim Review 之后的 Duty 与 Classification 继承原 job priority。已拒�
 
 ## Episode 与 Saga
 
-`memoryEpisodeCandidates.js` 只接受 grounded 或 unassigned 的合格 Claim。没有实体或仍在进行中的内容标为 transient；其他候选进入 `episode_publish` 受控审查。
+`memoryEpisodeCandidates.js` 只接受 grounded 或 unassigned 的合格 Fragment 证据。没有实体或仍在进行中的内容标为 transient；其他候选进入 `episode_publish` 受控审查。
 
-`episodeWriter.js` 校验 candidate input hash 和完整 Claim 清单后，发布版本化 Episode 并保留历史。`memorySagaProjection.js` 只能引用已发布 Episode；Saga 是叙事组织层，不替代 Claim 证据或星座身份。
+`episodeWriter.js` 校验 candidate input hash 和完整证据锚清单后，发布版本化 Episode 并保留历史。`memorySagaProjection.js` 只能引用已发布 Episode；Saga 是叙事组织层，不替代 Fragment 证据或星座身份。
 
 ## Profile 三字段
 
-`memoryProfileProjection.js` 只组装当前仍 eligible、Duty revision 当前、且由当前 `subject` Node Review grounded 到目标实体的 Claim。核心 user/assistant 身份走独立配置，不落普通第三方 Profile。
+`memoryProfileProjection.js` 只组装当前仍 eligible、职责当前、且由当前 `subject` Node Review grounded 到目标实体的 Fragment 证据。核心 user/assistant 身份走独立配置，不落普通第三方 Profile。
 
 - Facts：基于现有可信 items 与新增/纠正 Claim 执行 `add/revise/withdraw`；不会因一次生成遗漏而删除未触及事实；event/current state 不得混入，带“可能”的稳定属性不得去掉不确定性。
 - Status：同样差量更新，但只允许 current state/event，并拒绝历史、取消或过旧 completed 证据。
 - Judgment：最多三个稳定态度 facet，支持 `add/reinforce/revise/withdraw`。普通事实再多也不能创建态度。
 
-每个字段按自己的证据集合计算独立 input hash，并有独立 revision、producer、model role、persona hash、Claim 清单和 history。新增 Facts 不会仅因共享总指纹而让旧 Judgment 失效。空 Judgment 可由 evidence gate 发布为 tombstone；非空值要求 `producer=persona_writer`、`model_role=companion_persona` 和合法 persona hash。客观 Agent 的任何 Judgment action 都在 policy 层被拒绝。
+每个字段按自己的证据集合计算独立 input hash，并有独立 revision、producer、model role、persona hash、证据锚清单和 history。新增 Facts 不会仅因共享总指纹而让旧 Judgment 失效。空 Judgment 可由 evidence gate 发布为 tombstone；非空值要求 `producer=persona_writer`、`model_role=companion_persona` 和合法 persona hash。客观 Agent 的任何 Judgment action 都在 policy 层被拒绝。
 
 ## 受控维护 Agent
 
@@ -118,7 +115,7 @@ Claim Review 之后的 Duty 与 Classification 继承原 job priority。已拒�
 
 ## SQL、向量与 verified 门禁
 
-`memorySearchProjection.js` 只投影可读 Claim、已发布 Episode/Saga 和非空 Profile 字段。每个 projection key 带 revision 与 source hash。SQL 搜索和向量命中在返回前都会重新核验来源、Claim、Duty、Node 归属和字段输入是否仍为当前值。
+`memorySearchProjection.js` 只投影可读 Fragment 证据、已发布 Episode/Saga 和非空 Profile 字段。每个 projection key 带 revision 与 source hash。SQL 搜索和向量命中在返回前都会重新核验来源、职责、Node 归属和字段输入是否仍为当前值。
 
 `memoryVectorProjection.js` 为每次 upsert/delete 保存租约、尝试次数和 acknowledged receipt。Chroma 使用独立 collection `memory_constellations_verified`；远端对象的 `projection_key / revision / source_hash` 必须与 SQL manifest 一致。查询结果也会再次按本地 receipt 过滤。
 
@@ -145,7 +142,7 @@ Claim Review 之后的 Duty 与 Classification 继承原 job priority。已拒�
 
 `memoryVectorProjection.js` 同时核验 upsert 和 delete receipt，并分页列出 verified 专用 collection 的 ID，因此能发现远端缺失、metadata 陈旧、应删除仍存在以及无本地来源的多余向量。release prepare 会阻止过期租约、未完成 receipt 和正在运行的维护批次；prepare 结果在激活前还有短时有效期。
 
-`memoryProjectionReconciler.js` 只从正式 Claim、Episode、Saga、Profile publication 重建 SQL 搜索投影，再按 revision/source hash 安排向量操作。它不调用模型，也不从旧 FTS 或旧向量库反向制造事实。修复命令默认 dry-run，必须显式 `--execute` 才写入。
+`memoryProjectionReconciler.js` 只从活跃 Fragment 证据、旧 ID 账本、Episode、Saga、Profile publication 重建 SQL 搜索投影，再按 revision/source hash 安排向量操作。它不调用模型，也不从旧 FTS 或旧向量库反向制造事实。修复命令默认 dry-run，必须显式 `--execute` 才写入。
 
 旧 FTS 和现代检索不会合并为双权威：legacy 模式下检查并以 active Fragment/legacy Memory 重建旧 FTS；modern 模式下旧索引标记为不适用，正式读取只由发布物、SQL 投影、向量 receipt 和 release gate 决定。
 

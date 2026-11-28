@@ -6,7 +6,8 @@ const { getWorldContext } = require('./worldContext');
 const protocol = require('./memoryProtocol');
 const subjects = require('./memoryConversationSubjects');
 
-const CONTRACT = 'complete-semantic-unit-v3';
+const CONTRACT = 'complete-semantic-unit-v4';
+const MEMORY_TYPES = Object.freeze(['fact', 'preference', 'event', 'intention', 'state', 'observation', 'reflection']);
 const MAX_BODY_CHARS = 180;
 const MIN_RECOVERY_BATCH = 15;
 const FAILURE_BACKOFF_SECONDS = 60 * 60;
@@ -58,7 +59,8 @@ Fiction, role-play, novel settings, and reference material must use domain=ficti
 Do not discard consensual affectionate interaction merely because it is intimate. Preserve only a high-level, non-graphic interaction observation, mark sensitivity=intimacy, and bind only the minimum safe exact quote. Omit graphic sexual detail.
 Each evidence message_id may appear at most once per entry. When one message contains multiple supporting spans, quote the smallest continuous source range covering them.
 Keep body at or below ${MAX_BODY_CHARS} characters.
-Return JSON only: {"entries":[{"body":"neutral, independently consumable semantic unit","subject":"user|assistant|third_party|unknown","domain":"user_statement|observed_activity|interaction|companion_opinion|inference|fiction|third_party","sensitivity":"none|intimacy","temporal_state":"unknown|planned|in_progress|completed|cancelled|historical","event_from":null,"event_until":null,"time_precision":"unknown|day","evidence":[{"message_id":1,"quote":"exact substring"}]}]}.
+Choose memory_type by the observation's future use: fact=stable identity or attribute; preference=lasting like/dislike/habit; event=bounded occurrence; intention=plan; state=temporary condition; observation=ongoing observed activity; reflection=unresolved interpretation.
+Return JSON only: {"entries":[{"body":"neutral, independently consumable semantic unit","memory_type":"fact|preference|event|intention|state|observation|reflection","subject":"user|assistant|third_party|unknown","domain":"user_statement|observed_activity|interaction|companion_opinion|inference|fiction|third_party","sensitivity":"none|intimacy","temporal_state":"unknown|planned|in_progress|completed|cancelled|historical","event_from":null,"event_until":null,"time_precision":"unknown|day","evidence":[{"message_id":1,"quote":"exact substring"}]}]}.
 Before returning, audit sibling entries from the same expression burst and merge any that only make sense together. If evidence is insufficient, omit the entry.${feedback ? `\n\nPrevious-attempt audit:\n${feedback}` : ''}`,
         user: JSON.stringify({ contract: CONTRACT, messages: input }),
     };
@@ -80,6 +82,8 @@ function validateEntry(messageMap, entry) {
     const incomplete = incompleteBodyReason(entry.body);
     if (incomplete) protocol.fail(incomplete);
     if (!protocol.DOMAINS.includes(entry.domain)) protocol.fail('scribe_domain_invalid');
+    const memoryType = entry.memory_type || entry.type || null;
+    if (memoryType !== null && !MEMORY_TYPES.includes(memoryType)) protocol.fail('scribe_memory_type_invalid');
     if (!protocol.TEMPORAL_STATES.includes(entry.temporal_state || 'unknown')) protocol.fail('scribe_temporal_invalid');
     if (!Array.isArray(entry.evidence) || entry.evidence.length === 0) protocol.fail('scribe_evidence_required');
     const seenMessageIds = new Set();
@@ -110,7 +114,7 @@ function validateEntry(messageMap, entry) {
             protocol.fail('scribe_intimacy_graphic_detail');
     }
     return {
-        body: entry.body.trim(), domain: entry.domain,
+        body: entry.body.trim(), domain: entry.domain, memory_type: memoryType,
         subject, sensitivity,
         temporal: {
             state: entry.temporal_state || 'unknown',
@@ -235,24 +239,24 @@ async function persist(messages, cursor, rawEntries, { advanceCursor = true } = 
             const sourceIds = [...new Set(entry.sources.map(source => source.message_id))].sort((a, b) => a - b);
             const identity = protocol.hash({ contract: CONTRACT, sources: entry.sources.map(source => ({
                 message_id: source.message_id, quote: source.quote,
-            })), body: entry.body, subject: entry.subject, domain: entry.domain, temporal: entry.temporal });
-            const existing = db.prepare('SELECT id FROM memory_claims WHERE claim_key=?').get(`scribe:${identity}`);
+            })), body: entry.body, memory_type: entry.memory_type,
+            subject: entry.subject, domain: entry.domain, temporal: entry.temporal });
+            const existing = db.prepare('SELECT id FROM memory_fragments WHERE content_hash=?').get(identity);
             if (existing) continue;
             const fragmentResult = db.prepare(`INSERT INTO memory_fragments(
                 type,entity,content,emotional_weight,source,source_date,status,source_msg_ids,
                 observation_json,observation_state,content_hash)
-                VALUES('observation','unassigned',?,0.5,'chat',?,'frozen',?,?,'frozen',?)`).run(
+                VALUES('observation','unassigned',?,0.5,'chat',?,'active',?,?,'quoted',?)`).run(
                 entry.body, entry.sources.map(source => source.source_time).filter(Boolean).sort().at(-1)?.slice(0, 10) || null,
-                JSON.stringify(sourceIds), JSON.stringify({ contract: CONTRACT, subject: entry.subject,
+                JSON.stringify(sourceIds), JSON.stringify({ contract: CONTRACT, memory_type: entry.memory_type,
+                    subject: entry.subject,
                     domain: entry.domain, sensitivity: entry.sensitivity, temporal: entry.temporal,
                     evidence: entry.sources.map(source => ({ message_id: source.message_id, quote: source.quote,
+                        message_fingerprint: source.message_fingerprint,
                         speaker: source.speaker, source_time: source.source_time })) }), identity,
             );
-            protocol.createClaim(db, {
-                fragmentId: Number(fragmentResult.lastInsertRowid), claimKey: `scribe:${identity}`,
-                body: entry.body, subjectKind: entry.subject, domain: entry.domain, temporal: entry.temporal,
-                sources: entry.sources, priority: protocol.LIVE_JOB_PRIORITY,
-            });
+            require('./memoryFragmentEvidence').enqueueDirect(
+                db, Number(fragmentResult.lastInsertRowid), protocol.LIVE_JOB_PRIORITY);
             written++;
         }
         if (advanceCursor) db.prepare(`INSERT INTO scribe_runs(processed_until,processed_until_id,messages_processed,fragments_written,status)
@@ -323,7 +327,7 @@ async function checkAndRun(options = {}) {
     return protocol.tracked(db, 'scribe', () => runBatch(messages, cursor));
 }
 
-module.exports = { CONTRACT, MAX_BODY_CHARS, MIN_RECOVERY_BATCH, FAILURE_BACKOFF_SECONDS, lastCursor, pendingMessages,
+module.exports = { CONTRACT, MEMORY_TYPES, MAX_BODY_CHARS, MIN_RECOVERY_BATCH, FAILURE_BACKOFF_SECONDS, lastCursor, pendingMessages,
     buildPrompt, parseEntries, validateEntry, incompleteBodyReason, coalesceDuplicateEvidence,
     sameBurstSplitDiagnostics, auditEntries, extractWithAudit, persist, runBatch, replayMessages,
     recoveryState, checkAndRun };

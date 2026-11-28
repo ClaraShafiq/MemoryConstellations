@@ -1,6 +1,6 @@
 # 数据库迁移约定
 
-迁移集中在 `database.js`，由 `schema_version` 顺序记录。公共仓库当前最新版本为 v124。
+迁移集中在 `database.js`，由 `schema_version` 顺序记录。公共仓库当前最新版本为 v125。
 
 ## 规则
 
@@ -12,7 +12,7 @@
 - 迁移只创建协议、索引和安全默认值，不携带聊天、Profile、模型请求或生产状态。
 - schema 完成不代表 maintenance 或 verified 自动启用。
 
-## v104–v124
+## v104–v125
 
 | 版本 | 内容 |
 |---|---|
@@ -36,6 +36,12 @@
 | v122 | Recovery 记录并保护已通过的兄弟 Claim |
 | v123 | Recovery 持久记录争议 Claim 闭集 |
 | v124 | Recovery 合同版本，确保合同变化可以形成新案件 |
+| v125 | Fragment 成为权威观察；回填旧 Claim 证据锚账本，重建下游外键并物理删除 Claim/Review/Duty/Recovery 表 |
+
+v125 保留旧 Claim ID 作为 `memory_fragment_evidence_refs.evidence_id`，因此既有 Episode/Profile 的
+`claim_ids`、input hash 与发布历史无需重写。新碎片使用 `1000000000 + fragment_id` 作为兼容证据 ID；
+这是协议适配值，不是恢复 Claim 实体。新写入直接产生 active/quoted Fragment 并排入
+`fragment_classification`。
 
 ## 空库验证
 
@@ -45,4 +51,4 @@ SANCTUARY_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 npm run test:memory-extensions
 ```
 
-测试应打印 `schema: 124`。记忆测试会在未提供 `DB_PATH` 时自动创建隔离临时库；显式提供路径时仍不得指向个人或生产数据库。`test:memory-v124-upgrade` 会模拟 v119/v120 结构并验证原地升级、历史数据保留和新增合同列。完整测试矩阵见 [TESTING.md](TESTING.md)。
+测试应打印 `schema: 125`。记忆测试会在未提供 `DB_PATH` 时自动创建隔离临时库；显式提供路径时仍不得指向个人或生产数据库。`test:memory-v125-upgrade` 会构造带旧 Claim、Episode/Profile 发布和固定 input hash 的 v124 库，验证原地拔表后证据 ID、逐字来源和发布历史保持不变。完整测试矩阵见 [TESTING.md](TESTING.md)。

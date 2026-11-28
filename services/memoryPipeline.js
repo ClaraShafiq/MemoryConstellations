@@ -40,7 +40,7 @@ async function tick(db, options = {}) {
         const profileQueue = processStage(db, 'profile_projection', job => profiles.enqueueFields(db, job.target_id,
             { priority: job.priority }), 30, filter);
         const projected = processStage(db, 'search_projection', job => {
-            if (job.target_type === 'claim') return search.refreshClaim(db, job.target_id);
+            if (job.target_type === 'claim' || job.target_type === 'fragment') return search.refreshClaim(db, job.target_id);
             if (job.target_type === 'memory') return search.refreshEpisode(db, job.target_id);
             if (job.target_type === 'saga') return search.refreshSaga(db, job.target_id);
             if (job.target_type === 'entity') return search.refreshProfile(db, job.target_id);

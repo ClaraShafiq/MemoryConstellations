@@ -55,7 +55,7 @@ function commit(db, decision) {
                 claim.input_hash, quote ? protocol.encrypt(quote) : null, decision.reviewer);
             const priority = protocol.resolveJobPriority(db, 'node_review', anchor.id,
                 anchor.revision, anchor.input_hash, decision.priority);
-            protocol.enqueueJob(db, { stage: 'evidence_resolution', targetType: 'claim', targetId: claim.id,
+            protocol.enqueueJob(db, { stage: 'evidence_resolution', targetType: 'fragment', targetId: claim.id,
                 inputRevision: claim.revision, inputHash: claim.input_hash, priority });
         }
         return { claim_id: anchor.id, claim_ids: claims.map(claim => claim.id),
@@ -66,8 +66,10 @@ function commit(db, decision) {
 function supported(db, claimId) {
     return db.prepare(`SELECT entity_id,role,claim_revision,input_hash FROM memory_node_reviews
         WHERE claim_id=? AND verdict='supported'`).all(claimId).filter(row => {
-        const claim = db.prepare('SELECT revision,input_hash FROM memory_claims WHERE id=?').get(claimId);
-        return claim && Number(row.claim_revision) === Number(claim.revision) && row.input_hash === claim.input_hash;
+        try {
+            const claim = protocol.readClaim(db, claimId);
+            return Number(row.claim_revision) === Number(claim.revision) && row.input_hash === claim.input_hash;
+        } catch (_) { return false; }
     });
 }
 

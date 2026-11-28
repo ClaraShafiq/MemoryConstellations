@@ -2,6 +2,7 @@
 
 const search = require('./memorySearchProjection');
 const vectors = require('./memoryVectorProjection');
+const fragmentEvidence = require('./memoryFragmentEvidence');
 
 function ids(rows, field) {
     return rows.map(row => Number(row[field])).filter(Number.isSafeInteger);
@@ -22,12 +23,20 @@ function applyLocal(db) {
     const scanned = { claims: 0, episodes: 0, sagas: 0, profiles: 0 };
 
     const claimIds = unionIds(
-        ids(db.prepare('SELECT id FROM memory_claims').all(), 'id'),
+        ids(db.prepare('SELECT evidence_id AS id FROM memory_fragment_evidence_refs WHERE active=1').all(), 'id'),
         ids(db.prepare("SELECT target_id FROM memory_search_projection WHERE target_type='claim'").all(), 'target_id'),
+        ids(db.prepare("SELECT target_id FROM memory_search_projection WHERE target_type='fragment'").all(), 'target_id'),
+        db.prepare(`SELECT f.id FROM memory_fragments f
+            WHERE f.status='active' AND f.observation_state='quoted'
+              AND NOT EXISTS (SELECT 1 FROM memory_fragment_evidence_refs r WHERE r.fragment_id=f.id)`)
+            .all().map(row => fragmentEvidence.syntheticId(row.id)),
     );
     for (const id of claimIds) {
         scanned.claims++;
-        if (search.refreshClaim(db, id)) expected.add(`claim:${id}`);
+        if (search.refreshClaim(db, id)) {
+            const evidence = require('./memoryProtocol').readClaim(db, id);
+            expected.add(`${evidence.synthetic ? 'fragment' : 'claim'}:${id}`);
+        }
     }
 
     const episodeIds = unionIds(

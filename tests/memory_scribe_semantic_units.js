@@ -9,8 +9,8 @@ async function main() {
     const db = initDatabase();
     const scribe = require('../services/memoryScribe');
 
-    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 124);
-    assert.equal(scribe.CONTRACT, 'complete-semantic-unit-v3');
+    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 125);
+    assert.equal(scribe.CONTRACT, 'complete-semantic-unit-v4');
     db.prepare("INSERT OR IGNORE INTO chats(id,name) VALUES(1,'Fictional Harbor Workshop')").run();
 
     const insertMessage = db.prepare(`INSERT INTO messages(
@@ -27,16 +27,16 @@ async function main() {
             if (calls === 1) {
                 assert.equal(options.feedback, '');
                 return [
-                    { body: 'The user finished reading the fictional harbor guide.', subject: 'user',
+                    { body: 'The user finished reading the fictional harbor guide.', memory_type: 'event', subject: 'user',
                         domain: 'observed_activity', temporal_state: 'completed',
                         evidence: [{ message_id: guideId, quote: 'finished reading the fictional harbor guide' }] },
-                    { body: 'The user organized the matching route notes.', subject: 'user',
+                    { body: 'The user organized the matching route notes.', memory_type: 'event', subject: 'user',
                         domain: 'observed_activity', temporal_state: 'completed',
                         evidence: [{ message_id: notesId, quote: 'organized the matching route notes' }] },
                 ];
             }
             assert.match(options.feedback, /over-split/);
-            return [{ body: 'The user finished the fictional harbor guide and organized its matching route notes.',
+            return [{ body: 'The user finished the fictional harbor guide and organized its matching route notes.', memory_type: 'event',
                 subject: 'user', domain: 'observed_activity', temporal_state: 'completed',
                 evidence: [
                     { message_id: guideId, quote: 'finished reading the fictional harbor guide' },
@@ -73,8 +73,9 @@ async function main() {
     assert.match(prompt.system, /smallest complete semantic units/);
     assert.match(prompt.system, /same chat, speaker, and timestamp/);
     assert.match(prompt.system, /Each evidence message_id may appear at most once/);
+    assert.match(prompt.system, /memory_type/);
 
-    console.log(JSON.stringify({ ok: true, schema: 124, contract: scribe.CONTRACT,
+    console.log(JSON.stringify({ ok: true, schema: 125, contract: scribe.CONTRACT,
         attempts: result.extraction_attempts, observations: result.observations_written }));
 }
 

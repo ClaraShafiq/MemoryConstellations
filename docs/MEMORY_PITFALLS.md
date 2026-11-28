@@ -10,9 +10,9 @@ atomic 指最小但完整、脱离聊天仍能理解的语义单元。同一对�
 
 问句可以让系统知道当前在谈哪个对象，但“它是不是蓝色？”不能证明它是蓝色。发布属性必须有后续陈述性逐字证据。
 
-## Recovery 重做整个 Fragment
+## 只改写入口却保留 Claim 外键
 
-局部争议只能替换 `disputed_claim_ids`。重做整个 Fragment 会撤回已经通过的兄弟 Claim，也会让重复机器 Claim 越积越多。Recovery receipt 必须同时记录 preserved 与 disputed 闭集。
+把 Scribe 改成写 Fragment 不等于完成 Claim 拔除。Classification、Node Review、证据池、身份别名、纠错和检索表若仍引用 `memory_claims`，升级时会留下隐式依赖。v125 必须先把旧 ID、逐字来源和职责回填到证据账本，重建所有相关表去掉外键，再删除 Claim/Review/Duty/Recovery 表；既有 Episode/Profile 的证据 ID、payload 和 input hash 不得重算。
 
 ## 用后出现的同名对象解释前面的代词
 
@@ -24,7 +24,7 @@ atomic 指最小但完整、脱离聊天仍能理解的语义单元。同一对�
 
 ## Classification 直接决定归属
 
-Classification 只提出七类候选角色；Node Review 才决定 Claim 对星座的正式角色，Evidence Resolution 再投影最终状态。唯一命名物件的属性组也必须满足同 Fragment、唯一锚、来源完整三项条件。
+Classification 只提出七类候选角色；Node Review 才决定 Fragment 证据对星座的正式角色，Evidence Resolution 再投影最终状态。
 
 ## 让 event 混进 Facts
 

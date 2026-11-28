@@ -7,9 +7,10 @@ const identity = require('./memoryConstellationIdentity');
 const profiles = require('./memoryProfileProjection');
 
 function inspect(db, targetType, targetId) {
-    if (targetType === 'claim') {
+    if (targetType === 'claim' || targetType === 'fragment') {
         const claim = protocol.readClaim(db, targetId);
-        return { claim, duty: db.prepare('SELECT * FROM memory_claim_duties WHERE claim_id=?').get(targetId) || null,
+        return { claim, duty: { claim_revision: claim.revision, duty: claim.duty,
+            context_scope: claim.context_scope, basis: claim.basis, state: claim.duty_state },
             classification: db.prepare('SELECT * FROM memory_claim_classification WHERE claim_id=?').get(targetId) || null,
             evidence: evidence.current(db, targetId) };
     }

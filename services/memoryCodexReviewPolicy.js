@@ -3,15 +3,12 @@
 const protocol = require('./memoryProtocol');
 
 const ACTIONS = Object.freeze({
-    review_claim: ['claimId', 'expectedRevision', 'inputHash', 'pass', 'support', 'attribution', 'reviewer'],
-    set_claim_duty: ['claimId', 'expectedRevision', 'inputHash', 'duty', 'contextScope', 'basis', 'state', 'reviewer'],
     classify_claim: ['claimId', 'expectedRevision', 'inputHash', 'outcome', 'reviewer'],
     review_node: ['claimId', 'entityId', 'role', 'expectedRevision', 'inputHash', 'verdict', 'reviewer'],
     resolve_identity: ['candidateId', 'outcome', 'reviewer'],
     admit_constellation: ['candidateId', 'outcome', 'basis', 'reviewer'],
     publish_episode: ['candidateId', 'draft', 'producer', 'reviewer'],
     publish_profile_field: ['entityId', 'field', 'draft', 'producer', 'modelRole'],
-    recover_claims: ['fragmentId', 'inputHash', 'outcome', 'reviewer'],
     discover_constellation: ['claimId', 'expectedRevision', 'inputHash', 'outcome', 'name', 'category', 'basis', 'reviewer'],
     review_correction: ['receiptId', 'inputHash', 'outcome', 'reviewer'],
 });

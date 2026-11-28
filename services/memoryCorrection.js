@@ -28,7 +28,15 @@ function submit(db, input) {
     if (Number(input.chatId) !== Number(message.chat_id)) protocol.fail('correction_chat_mismatch');
     const correction = String(input.correction || '').trim();
     if (!correction) protocol.fail('correction_body_required');
-    const targetClaimId = input.targetClaimId == null ? null : Number(input.targetClaimId);
+    let targetClaimId = input.targetClaimId == null ? null : Number(input.targetClaimId);
+    if (input.targetFragmentId != null) {
+        const fragmentId = Number(input.targetFragmentId);
+        if (!Number.isSafeInteger(fragmentId) || fragmentId <= 0) protocol.fail('correction_target_invalid');
+        const evidence = require('./memoryFragmentEvidence').forFragment(db, fragmentId);
+        if (evidence.length > 1) protocol.fail('correction_target_ambiguous');
+        targetClaimId = evidence[0]?.id ?? null;
+        if (targetClaimId === null) protocol.fail('correction_target_invalid');
+    }
     if (targetClaimId !== null && (!Number.isSafeInteger(targetClaimId) || targetClaimId <= 0))
         protocol.fail('correction_target_invalid');
     const inputHash = protocol.hash({ chat_id: Number(input.chatId), source, correction, target_claim_id: targetClaimId });
@@ -71,19 +79,33 @@ function review(db, decision) {
         || decision.targetInputHash !== input.target.input_hash) protocol.fail('correction_target_cas_failed');
     return db.transaction(() => {
         const source = input.source;
-        const replacement = protocol.createClaim(db, {
-            fragmentId: input.target.fragment_id,
-            claimKey: `correction:${input.id}:${protocol.hash(input.correction)}`,
-            body: input.correction, domain: 'correction', subjectKind: input.target.subject_kind || 'unknown',
-            temporal: { state: decision.temporalState || input.target.temporal_state,
-                event_from: input.target.event_from, event_until: input.target.event_until,
-                precision: input.target.time_precision }, sources: [source], priority: protocol.LIVE_JOB_PRIORITY,
-        });
+        const temporal = { state: decision.temporalState || input.target.temporal_state,
+            event_from: input.target.event_from, event_until: input.target.event_until,
+            precision: input.target.time_precision };
+        const memoryType = {
+            preference: 'preference', event: 'event', current_state: 'state',
+            opinion: 'reflection', fiction: 'reflection', unresolved: 'reflection',
+        }[input.target.duty] || 'fact';
+        const contentHash = protocol.hash({ contract: 'fragment-correction-v1', receipt_id: input.id,
+            body: input.correction, source });
+        const inserted = db.prepare(`INSERT INTO memory_fragments(
+            type,entity,content,emotional_weight,source,source_date,status,source_msg_ids,
+            observation_json,observation_state,content_hash)
+            VALUES('observation','unassigned',?,0.5,'chat',?,'active',?,?,'quoted',?)`).run(
+            input.correction, String(source.source_time || '').slice(0, 10) || null,
+            JSON.stringify([source.message_id]), JSON.stringify({ contract: 'fragment-correction-v1',
+                memory_type: memoryType, subject: input.target.subject_kind || 'unknown',
+                domain: 'correction', sensitivity: 'none',
+                temporal, evidence: [source] }), contentHash);
+        const replacement = require('./memoryFragmentEvidence').enqueueDirect(
+            db, Number(inserted.lastInsertRowid), protocol.LIVE_JOB_PRIORITY);
+        if (!replacement) protocol.fail('correction_fragment_persist_failed');
         protocol.supersedeClaim(db, input.target.id, { expectedRevision: input.target.revision,
             inputHash: input.target.input_hash, actor: decision.reviewer });
         db.prepare(`UPDATE memory_correction_inbox SET status='applied',reviewer=?,replacement_claim_id=?,updated_at=?
             WHERE id=? AND input_hash=?`).run(decision.reviewer, replacement.id, Date.now(), input.id, input.input_hash);
-        return { outcome: 'applied', replacement_claim_id: replacement.id };
+        return { outcome: 'applied', replacement_claim_id: replacement.id,
+            replacement_fragment_id: replacement.fragment_id };
     })();
 }
 

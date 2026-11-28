@@ -33,6 +33,25 @@ function runMigration(version, name, sql, options = {}) {
     }
 }
 
+function runFunctionMigration(version, name, migrate, options = {}) {
+    const recorded = db.prepare('SELECT 1 FROM schema_version WHERE version = ?').get(version);
+    if (recorded) return;
+    try {
+        db.pragma('foreign_keys = OFF');
+        db.transaction(() => {
+            migrate(db);
+            db.prepare('INSERT INTO schema_version (version,name,applied_at) VALUES(?,?,?)')
+                .run(version, name, sqlNow());
+        })();
+        if (!options.silent) console.log(`[DB] v${version} ${name} ✓`);
+    } catch (error) {
+        console.error(`[DB] v${version} ${name} 失败:`, error.message);
+        if (options.critical) throw error;
+    } finally {
+        db.pragma('foreign_keys = ON');
+    }
+}
+
 function initDatabase() {
     // 单例缓存：避免重复连接 + 重复跑迁移
     if (_initialized && db) return db;
@@ -1355,6 +1374,8 @@ function initDatabase() {
     runMigration(124, 'claim recovery contract version',
         `ALTER TABLE memory_claim_recoveries ADD COLUMN contract_version TEXT NOT NULL DEFAULT 'claim-recovery-v2';`,
         { critical: true });
+    runFunctionMigration(125, 'fragment-first evidence and Claim retirement',
+        require('./services/memoryFragmentEvidence').migrate, { critical: true });
 
     // 种子数据：初始本体论类别（仅当表为空时插入）
     try {

@@ -195,6 +195,8 @@ function claimInput(body, domain, temporal, sources, subjectEntityId = null, sub
 }
 
 function createClaim(db, input) {
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_claims'").get())
+        fail('memory_claim_layer_retired');
     if (!Number.isSafeInteger(input.fragmentId) || input.fragmentId <= 0) fail('memory_fragment_invalid');
     if (!DOMAINS.includes(input.domain)) fail('memory_domain_invalid');
     if (!TEMPORAL_STATES.includes(input.temporal?.state || 'unknown')) fail('memory_temporal_invalid');
@@ -237,6 +239,12 @@ function createClaim(db, input) {
 }
 
 function readClaim(db, claimId) {
+    const hasClaims = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_claims'").get();
+    if (!hasClaims) {
+        const evidence = require('./memoryFragmentEvidence').read(db, claimId);
+        if (!evidence) fail('memory_fragment_evidence_missing');
+        return evidence;
+    }
     const row = db.prepare('SELECT * FROM memory_claims WHERE id=?').get(claimId);
     if (!row) fail('memory_claim_missing');
     const sources = db.prepare('SELECT * FROM memory_claim_sources WHERE claim_id=? ORDER BY message_id').all(claimId).map(source => ({
@@ -256,6 +264,8 @@ function sourcesCurrent(db, claim) {
 }
 
 function reviewClaim(db, claimId, decision) {
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_claims'").get())
+        fail('memory_claim_layer_retired');
     const claim = readClaim(db, claimId);
     if (decision.expectedRevision !== claim.revision || decision.inputHash !== claim.input_hash) fail('memory_claim_cas_failed');
     if (!sourcesCurrent(db, claim)) fail('memory_claim_source_changed');
@@ -293,6 +303,8 @@ function reviewClaim(db, claimId, decision) {
 }
 
 function setDuty(db, claimId, decision) {
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_claims'").get())
+        fail('memory_claim_layer_retired');
     const claim = readClaim(db, claimId);
     if (decision.expectedRevision !== claim.revision || decision.inputHash !== claim.input_hash) fail('memory_claim_cas_failed');
     if (!sourcesCurrent(db, claim)) fail('memory_claim_source_changed');
@@ -311,6 +323,8 @@ function setDuty(db, claimId, decision) {
 }
 
 function eligible(db, claimId) {
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_claims'").get())
+        return require('./memoryFragmentEvidence').eligible(db, claimId);
     const claim = readClaim(db, claimId);
     const duty = db.prepare('SELECT * FROM memory_claim_duties WHERE claim_id=?').get(claimId);
     const manual = claim.manual_locked === 1 || /^(?:manual:|test-|fixture-)/.test(String(claim.reviewer || ''));
@@ -332,6 +346,14 @@ function eligible(db, claimId) {
 
 function supersedeClaim(db, claimId, { expectedRevision, inputHash, actor = 'host' } = {}) {
     const claim = readClaim(db, claimId);
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_claims'").get()) {
+        if (Number(expectedRevision) !== Number(claim.revision) || inputHash !== claim.input_hash)
+            fail('memory_fragment_evidence_cas_failed');
+        if (!require('./memoryFragmentEvidence').supersede(db, claimId)) fail('memory_fragment_evidence_cas_failed');
+        recordAction(db, 'fragment_evidence', claimId, claim.revision, 'supersede', claim,
+            { ...claim, claim_status: 'superseded' }, actor);
+        return { ...claim, claim_status: 'superseded' };
+    }
     if (claim.manual_locked) fail('memory_claim_manual_locked');
     if (Number(expectedRevision) !== Number(claim.revision) || inputHash !== claim.input_hash)
         fail('memory_claim_cas_failed');
@@ -428,10 +450,18 @@ function tracked(db, stage, fn) {
     });
 }
 
+function claimsForFragment(db, fragmentId) {
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_claims'").get())
+        return require('./memoryFragmentEvidence').forFragment(db, fragmentId);
+    return db.prepare(`SELECT id FROM memory_claims WHERE fragment_id=? AND claim_status='active' ORDER BY id`)
+        .all(fragmentId).map(row => readClaim(db, row.id));
+}
+
 module.exports = {
     SCHEMA, SCOPE, LIVE_JOB_PRIORITY, BACKFILL_JOB_PRIORITY, DOMAINS, SUBJECT_KINDS, TEMPORAL_STATES,
     DUTIES, CONTEXT_SCOPES, fail, hash, encrypt, decrypt,
     messageText, messageFingerprint, normalizeSpeaker, captureSource, createClaim, readClaim,
-    sourcesCurrent, reviewClaim, setDuty, eligible, supersedeClaim, enqueueJob, resolveJobPriority, leaseJobs,
+    sourcesCurrent, reviewClaim, setDuty, eligible, supersedeClaim, claimsForFragment,
+    enqueueJob, resolveJobPriority, leaseJobs,
     finishJob, recordAction, tracked,
 };

@@ -9,12 +9,9 @@ async function main() {
     const db = initDatabase();
     const protocol = require('../services/memoryProtocol');
     const scribe = require('../services/memoryScribe');
-    const claimReview = require('../services/memoryClaimReview');
-    const claimDuty = require('../services/memoryClaimDuty');
     const classification = require('../services/memoryClassification');
     const nodeReview = require('../services/memoryNodeReview');
     const evidence = require('../services/memoryEvidenceResolution');
-    const recovery = require('../services/memoryClaimRecovery');
     const discovery = require('../services/memoryConstellationDiscovery');
     const identity = require('../services/memoryConstellationIdentity');
     const corrections = require('../services/memoryCorrection');
@@ -29,7 +26,7 @@ async function main() {
     const codex = require('../services/memoryCodexExecutor');
     const pipeline = require('../services/memoryPipeline');
 
-    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 124);
+    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 125);
     db.prepare("INSERT INTO chats(id,name) VALUES(1,'Fictional Pipeline Test')").run();
 
     let minute = 0;
@@ -41,20 +38,15 @@ async function main() {
     }
 
     async function observe(messageId, entry) {
-        const before = db.prepare('SELECT COALESCE(MAX(id),0) id FROM memory_claims').get().id;
+        const before = db.prepare('SELECT COALESCE(MAX(id),0) id FROM memory_fragments').get().id;
         await scribe.runBatch(db.prepare('SELECT * FROM messages WHERE id=?').all(messageId), scribe.lastCursor(db), {
             extractEntries: async () => [{ ...entry, evidence: [{ message_id: messageId, quote: entry.quote }] }],
         });
-        const row = db.prepare('SELECT id FROM memory_claims WHERE id>? ORDER BY id DESC LIMIT 1').get(before);
-        return protocol.readClaim(db, row.id);
+        const row = db.prepare("SELECT id FROM memory_fragments WHERE id>? AND status='active' ORDER BY id DESC LIMIT 1").get(before);
+        return protocol.readClaim(db, require('../services/memoryFragmentEvidence').syntheticId(row.id));
     }
 
-    function reviewSupported(claim, duty, entityId = null) {
-        claimReview.commit(db, { claimId: claim.id, expectedRevision: claim.revision, inputHash: claim.input_hash,
-            support: 'supported', attribution: 'supported', temporalState: claim.temporal_state,
-            reviewer: 'fixture-reviewer' });
-        claimDuty.commit(db, { claimId: claim.id, expectedRevision: claim.revision, inputHash: claim.input_hash,
-            duty, contextScope: 'general', basis: 'exact_quote', state: 'supported', reviewer: 'fixture-reviewer' });
+    function reviewSupported(claim, _duty, entityId = null) {
         classification.commit(db, { claimId: claim.id, expectedRevision: claim.revision, inputHash: claim.input_hash,
             outcome: entityId ? 'linked' : 'no_independent_node',
             links: entityId ? [{ entity_id: entityId, role: 'subject' }] : [], topics: [], reviewer: 'fixture-reviewer' });
@@ -64,26 +56,7 @@ async function main() {
         return evidence.reconcile(db, claim.id);
     }
 
-    const rejectedMessage = addMessage('user', 'River mentioned mint tea and a cedar notebook.');
-    const rejectedClaim = await observe(rejectedMessage, { body: 'River has several unrelated preferences.',
-        subject: 'user', domain: 'user_statement', temporal_state: 'unknown', quote: 'mint tea and a cedar notebook' });
-    claimReview.commit(db, { claimId: rejectedClaim.id, expectedRevision: rejectedClaim.revision,
-        inputHash: rejectedClaim.input_hash, support: 'rejected', attribution: 'supported',
-        temporalState: 'unknown', reviewer: 'fixture-reviewer' });
-    const recoveryInput = recovery.snapshot(db, rejectedClaim.fragment_id);
-    assert.equal(recoveryInput.messages[0].text, 'River mentioned mint tea and a cedar notebook.');
-    assert.equal(db.prepare("SELECT input_hash FROM memory_jobs WHERE stage='claim_recovery' AND target_id=?")
-        .get(rejectedClaim.fragment_id).input_hash, recoveryInput.input_hash);
-    const recovered = recovery.commit(db, { fragmentId: rejectedClaim.fragment_id,
-        inputHash: recoveryInput.input_hash, outcome: 'recovered', reviewer: 'fixture-reviewer', claims: [
-            { body: 'River mentioned mint tea.', subject: 'user', domain: 'user_statement',
-                temporal: { state: 'unknown' }, evidence: [{ message_id: rejectedMessage, quote: 'mint tea' }] },
-            { body: 'River mentioned a cedar notebook.', subject: 'user', domain: 'user_statement',
-                temporal: { state: 'unknown' }, evidence: [{ message_id: rejectedMessage, quote: 'cedar notebook' }] },
-        ] });
-    assert.equal(recovered.claim_ids.length, 2);
-    assert.equal(protocol.readClaim(db, rejectedClaim.id).claim_status, 'superseded');
-    assert.ok(recovered.claim_ids.every(id => !protocol.readClaim(db, id).body.includes('several unrelated')));
+    assert.equal(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_claims'").get(), undefined);
 
     const replayMessage = addMessage('ai', 'I find River’s careful note-taking endearing.');
     const cursorBeforeReplay = scribe.lastCursor(db);
@@ -97,12 +70,13 @@ async function main() {
     }] });
     assert.equal(replayed.replay, true);
     assert.deepEqual(scribe.lastCursor(db), cursorBeforeReplay);
-    const attitudeClaim = protocol.readClaim(db, db.prepare('SELECT MAX(id) id FROM memory_claims').get().id);
+    const attitudeFragment = db.prepare('SELECT MAX(id) id FROM memory_fragments').get().id;
+    const attitudeClaim = protocol.readClaim(db, require('../services/memoryFragmentEvidence').syntheticId(attitudeFragment));
 
     const entityId = Number(db.prepare(`INSERT INTO entity_profiles(name,category,status,aliases,memory_scope)
         VALUES('River','person','active','[]','default')`).run().lastInsertRowid);
     const mintMessage = addMessage('user', 'River prefers mint tea.');
-    const mintClaim = await observe(mintMessage, { body: 'River prefers mint tea.', subject: 'user',
+    const mintClaim = await observe(mintMessage, { body: 'River prefers mint tea.', memory_type: 'preference', subject: 'user',
         domain: 'user_statement', temporal_state: 'unknown', quote: 'prefers mint tea' });
     assert.equal(reviewSupported(mintClaim, 'preference', entityId).state, 'grounded');
     const notebookMessage = addMessage('user', 'River keeps a blue notebook.');
@@ -120,12 +94,6 @@ async function main() {
     const ambiguousMessage = addMessage('user', 'River mentioned a workshop without identifying it.');
     const ambiguousClaim = await observe(ambiguousMessage, { body: 'River mentioned an unidentified workshop.',
         subject: 'user', domain: 'user_statement', temporal_state: 'unknown', quote: 'a workshop without identifying it' });
-    claimReview.commit(db, { claimId: ambiguousClaim.id, expectedRevision: ambiguousClaim.revision,
-        inputHash: ambiguousClaim.input_hash, support: 'supported', attribution: 'supported',
-        temporalState: 'unknown', reviewer: 'fixture-reviewer' });
-    claimDuty.commit(db, { claimId: ambiguousClaim.id, expectedRevision: ambiguousClaim.revision,
-        inputHash: ambiguousClaim.input_hash, duty: 'event', contextScope: 'specific_event', basis: 'exact_quote',
-        state: 'supported', reviewer: 'fixture-reviewer' });
     classification.commit(db, { claimId: ambiguousClaim.id, expectedRevision: ambiguousClaim.revision,
         inputHash: ambiguousClaim.input_hash, outcome: 'needs_resolution', links: [], topics: [],
         reviewer: 'fixture-reviewer' });
@@ -162,7 +130,7 @@ async function main() {
 
     const correctionMessage = addMessage('user', 'Correction: River prefers cedar tea.');
     const receipt = corrections.submit(db, { chatId: 1, messageId: correctionMessage,
-        quote: 'prefers cedar tea', correction: 'River prefers cedar tea.', targetClaimId: mintClaim.id });
+        quote: 'prefers cedar tea', correction: 'River prefers cedar tea.', targetFragmentId: mintClaim.fragment_id });
     assert.equal(receipt.status, 'queued');
     assert.ok(db.prepare("SELECT COUNT(*) count FROM memory_jobs WHERE stage='correction_review' AND target_id=?")
         .get(receipt.id).count >= 1);
@@ -172,8 +140,9 @@ async function main() {
         outcome: 'applied', expectedRevision: mintClaim.revision, targetInputHash: mintClaim.input_hash,
         temporalState: 'unknown', reviewer: 'fixture-reviewer' });
     const correctedClaim = protocol.readClaim(db, applied.replacement_claim_id);
+    assert.equal(correctedClaim.duty, 'preference');
     assert.equal(reviewSupported(correctedClaim, 'preference', entityId).state, 'grounded');
-    const correctionReviewJob = db.prepare("SELECT * FROM memory_jobs WHERE stage='claim_review_a' AND target_id=?")
+    const correctionReviewJob = db.prepare("SELECT * FROM memory_jobs WHERE stage='fragment_classification' AND target_id=?")
         .get(correctedClaim.id);
     const agentPacket = codex.snapshotForJob(db, correctionReviewJob);
     assert.equal(agentPacket.input.claim_id, correctedClaim.id);
@@ -248,7 +217,7 @@ async function main() {
     assert.throws(() => budget.reserve(db, 'fixture', { limit: 1, now: Date.UTC(2026, 10, 1) }),
     /memory_model_budget_exhausted/);
 
-    db.prepare("UPDATE memory_jobs SET status='skipped',lease_token=NULL,lease_until=NULL WHERE stage IN('claim_review_a','claim_review_b')").run();
+    db.prepare("UPDATE memory_jobs SET status='skipped',lease_token=NULL,lease_until=NULL WHERE stage='fragment_classification'").run();
     const agentMessage = addMessage('user', 'River uses a green index card.');
     const agentClaim = await observe(agentMessage, { body: 'River uses a green index card.', subject: 'user',
         domain: 'user_statement', temporal_state: 'unknown', quote: 'uses a green index card' });
@@ -256,19 +225,16 @@ async function main() {
     const reviewer = { propose: async packet => {
         assert.equal(packet.input.claim_id, agentClaim.id);
         assert.equal(packet.input.sources[0].quote, 'uses a green index card');
-        return { type: 'review_claim', claimId: packet.job.target_id,
+        return { type: 'classify_claim', claimId: packet.job.target_id,
             expectedRevision: packet.job.input_revision, inputHash: packet.job.input_hash,
-            pass: packet.input.review_pass, support: 'supported', attribution: 'supported',
-            reviewer: `fixture-agent-${packet.input.review_pass}` };
+            outcome: 'no_independent_node', links: [], topics: [], reviewer: 'fixture-agent' };
     } };
-    const firstPass = await codex.runLeased(db, 'claim_review_a', reviewer,
-        { limit: 1, priorityBand: 'current', targetId: agentClaim.id });
-    const agentResults = await codex.runLeased(db, 'claim_review_b', reviewer,
+    const agentResults = await codex.runLeased(db, 'fragment_classification', reviewer,
         { limit: 1, priorityBand: 'current', targetId: agentClaim.id });
     delete process.env.MEMORY_MAINTENANCE_DAILY_CALL_LIMIT;
-    assert.equal(firstPass[0].status, 'done');
     assert.equal(agentResults[0].status, 'done');
-    assert.equal(protocol.readClaim(db, agentClaim.id).support_state, 'supported');
+    assert.equal(db.prepare('SELECT outcome FROM memory_claim_classification WHERE claim_id=?')
+        .get(agentClaim.id).outcome, 'no_independent_node');
 
     db.prepare("UPDATE memory_jobs SET status='skipped',lease_token=NULL,lease_until=NULL").run();
     db.prepare(`INSERT INTO scribe_runs(processed_until,processed_until_id,messages_processed,fragments_written,status)
@@ -279,7 +245,7 @@ async function main() {
     assert.deepEqual(overlapping, { outcome: 'skipped', reason: 'single_flight_active' });
     await firstRun;
 
-    protocol.enqueueJob(db, { stage: 'fixture_lease', targetType: 'claim', targetId: correctedClaim.id,
+    protocol.enqueueJob(db, { stage: 'fixture_lease', targetType: 'fragment', targetId: correctedClaim.id,
         inputRevision: correctedClaim.revision, inputHash: correctedClaim.input_hash });
     const leased = protocol.leaseJobs(db, 'fixture_lease', { now: 1000, leaseMs: 10 });
     assert.equal(leased.length, 1);
@@ -288,7 +254,7 @@ async function main() {
     assert.equal(expired.status, 'retry');
     assert.equal(expired.error_code, 'lease_expired');
 
-    console.log(JSON.stringify({ ok: true, schema: 124, recovered_claims: recovered.claim_ids.length,
+    console.log(JSON.stringify({ ok: true, schema: 125, claim_tables_retired: true,
         facts_revision: revisedFacts.revision, vector_receipts: vectors.manifest(db).rows.length }));
 }
 

@@ -68,12 +68,12 @@ function commit(db, decision) {
             claim.id, claim.revision, claim.input_hash, decision.outcome, JSON.stringify(links),
             JSON.stringify(decision.topics || []), decision.reviewer,
         );
-        const priority = protocol.resolveJobPriority(db, 'claim_classification', claim.id,
+        const priority = protocol.resolveJobPriority(db, 'fragment_classification', claim.id,
             claim.revision, claim.input_hash, decision.priority);
         for (const link of links) protocol.enqueueJob(db, { stage: 'node_review',
-            targetType: `claim_node:${link.entity_id}:${link.role}`, targetId: claim.id,
+            targetType: `fragment_node:${link.entity_id}:${link.role}`, targetId: claim.id,
             inputRevision: claim.revision, inputHash: claim.input_hash, priority });
-        protocol.enqueueJob(db, { stage: 'evidence_resolution', targetType: 'claim', targetId: claim.id,
+        protocol.enqueueJob(db, { stage: 'evidence_resolution', targetType: 'fragment', targetId: claim.id,
             inputRevision: claim.revision, inputHash: claim.input_hash, priority });
     })();
     return { claim_id: claim.id, outcome: decision.outcome, links };

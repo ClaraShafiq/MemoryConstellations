@@ -20,15 +20,13 @@
 
 失败批次不会推进游标。连续稳定失败会缩为 30、15 并冷却一小时；先修输入或模型合同，不要通过手改游标跳过消息。
 
-## Claim 停在 review/duty/classification
+## Fragment 停在 classification/node review
 
 查看 `/api/health` 的 backlog 和 job `error_code`。若 runner 报 `reviewer_required`，说明只启动了确定性调度，没有配置 `maintenanceBackend` 或启用 Codex 适配器。若错误为 `memory_model_calls_disabled/exhausted`，设置或提高明确的每日上限；不要绕过预算表。
 
-Review 现在分为 `claim_review_a` 和 `claim_review_b`。只有一个 pass 完成时是正常等待；`independent_review_disagreement` 表示两个独立判断不一致，Claim 不会发布。不要手工把其中一个覆盖成另一个；应补充/纠正来源，或在审核合同真实升级后重新形成案件。
+v125 不再调度 `claim_review_a/b`、`claim_duty` 或 `claim_recovery`。新写入应直接产生 active/quoted Fragment 和 `fragment_classification` job；若仍出现这些旧 stage，先确认 v125 迁移已执行。迁移会把旧审核任务终止为 `no_change`，并把旧分类任务改成 Fragment 分类。
 
-被拒、失效或来源变化的 Claim 本来就不会调用 Duty/Classification 模型。被拒项应进入 `claim_recovery`，并且只能从原消息恢复。
-
-Recovery 若报 `claim_recovery_disputed_claims_required`，说明没有明确争议闭集；不能用“重跑整个 Fragment”代替。恢复后应检查 `preserved_claim_ids_json`，确认已通过兄弟 Claim 没有被连带撤回。
+来源指纹变化的 Fragment 本来就不会调用 Classification 模型。应通过带逐字证据的纠错收件箱创建 replacement Fragment，不要手工恢复 Claim 表。
 
 ## 后台维护一直显示 foreground cooldown
 
@@ -36,19 +34,19 @@ Recovery 若报 `claim_recovery_disputed_claims_required`，说明没有明确�
 
 ## 证据池长期 needs_resolution/deferred
 
-查看 `reason_code`。相同 evidence fingerprint 不会因重启或等待而重新开放；必须增加/纠正来源、Duty、Classification 或 Node Review。`deferred` 是防止重复消耗的正常状态。
+查看 `reason_code`。相同 evidence fingerprint 不会因重启或等待而重新开放；必须增加/纠正来源、Classification 或 Node Review。`deferred` 是防止重复消耗的正常状态。
 
 ## 星座没有创建
 
-检查 Claim 是否已 grounded/unassigned/topic_only、候选名称是否真的出现在 Claim/引文中，以及类别和导航价值 basis 是否在闭集内。核心 user/assistant 身份不会作为普通第三方星座创建。identity resolved 仍需 admission；普通细节不能单独 admitted。
+检查 Fragment 证据是否已 grounded/unassigned/topic_only、候选名称是否真的出现在正文/引文中，以及类别和导航价值 basis 是否在闭集内。核心 user/assistant 身份不会作为普通第三方星座创建。identity resolved 仍需 admission；普通细节不能单独 admitted。
 
 ## 纠错没有直接改变 Profile
 
-这是设计行为。纠错 API 只创建 receipt 和审查 job。必须先生成 correction Claim、让旧 Claim superseded，再由 Facts/Status 的 `revise/withdraw` 差量发布。对话角色没有成品 Profile 直写权限。
+这是设计行为。纠错 API 只创建 receipt 和审查 job。必须先生成 domain=`correction` 的 replacement Fragment、让旧证据锚 superseded，再由 Facts/Status 的 `revise/withdraw` 差量发布。对话角色没有成品 Profile 直写权限。
 
 ## Judgment 没有生成
 
-这是安全默认。普通事实数量不能建立第一人称态度。非空 Judgment 需要 assistant 原始 `companion_opinion` Claim 或审核 seed、persona writer、`companion_persona` role 和 persona hash。结构化 Agent/Codex 的 Judgment action 会被拒绝。调用或解析失败不应触发 publish，因此旧值必须保留。
+这是安全默认。普通事实数量不能建立第一人称态度。非空 Judgment 需要 assistant 原始 `companion_opinion` Fragment 证据或审核 seed、persona writer、`companion_persona` role 和 persona hash。结构化 Agent/Codex 的 Judgment action 会被拒绝。调用或解析失败不应触发 publish，因此旧值必须保留。
 
 ## verified prepare 失败
 
@@ -78,7 +76,7 @@ release manifest 在激活后发生了变化，或 receipt 不再完整。读取
 
 ## 旧 FTS、SQL 投影和向量状态不一致
 
-不要把三份数据直接合并。权威来源取决于部署模式：legacy 模式的旧 FTS 只索引 active Fragment/legacy Memory；modern 模式的 SQL/向量投影只从正式 Claim/Episode/Saga/Profile publication 重建。`memory:health:repair -- --execute` 会按当前模式修复对应派生层，不会调用模型或反向生成事实。
+不要把三份数据直接合并。权威来源取决于部署模式：legacy 模式的旧 FTS 只索引 active Fragment/legacy Memory；modern 模式的 SQL/向量投影只从活跃 Fragment 证据和正式 Episode/Saga/Profile publication 重建。`memory:health:repair -- --execute` 会按当前模式修复对应派生层，不会调用模型或反向生成事实。
 
 ## Codex 运行期适配器失败
 

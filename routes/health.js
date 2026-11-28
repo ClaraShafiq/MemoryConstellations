@@ -15,7 +15,7 @@ router.get('/health', (_req, res) => {
         const db = getDb();
         const version = db.prepare('SELECT MAX(version) version FROM schema_version').get().version || 0;
         const counts = Object.fromEntries([
-            ['claims', 'memory_claims'], ['evidence', 'memory_evidence_pool'],
+            ['fragments', 'memory_fragments'], ['fragment_evidence', 'memory_evidence_pool'],
             ['episodes', 'memory_episode_publications'], ['profile_fields', 'memory_profile_field_publications'],
             ['search_units', 'memory_search_projection'],
         ].map(([key, table]) => [key, db.prepare(`SELECT COUNT(*) count FROM ${table}`).get().count]));

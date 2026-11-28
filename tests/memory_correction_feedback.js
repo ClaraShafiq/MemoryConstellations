@@ -10,7 +10,7 @@ async function main() {
     const correction = require('../services/correction');
     const lifecycle = require('../services/lifecycle');
 
-    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 124);
+    assert.equal(db.prepare('SELECT MAX(version) version FROM schema_version').get().version, 125);
     const addFragment = (content, sourceIds, weight = 0.8) => Number(db.prepare(`INSERT INTO memory_fragments(
         type,entity,content,emotional_weight,source,status,source_msg_ids,observation_state)
         VALUES('observation','unassigned',?,?,'fictional-test','active',?,'legacy')`)
@@ -55,7 +55,7 @@ async function main() {
     assert.ok(deferredReceipt.feedback_applied_at);
     assert.deepEqual(await lifecycle.runCorrectionFeedback(), { processed: 0, cascaded: 0 });
 
-    console.log(JSON.stringify({ ok: true, schema: 124, immediate_cascade: 1, deferred_cascade: stats.cascaded }));
+    console.log(JSON.stringify({ ok: true, schema: 125, immediate_cascade: 1, deferred_cascade: stats.cascaded }));
 }
 
 main().catch(error => {

@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS memory_evidence_resolution_history (
 
 function evidenceFingerprint(db, claimId) {
     const claim = protocol.readClaim(db, claimId);
-    const duty = db.prepare('SELECT * FROM memory_claim_duties WHERE claim_id=?').get(claimId) || null;
+    const duty = { claim_revision: claim.revision, duty: claim.duty,
+        context_scope: claim.context_scope, basis: claim.basis, state: claim.duty_state };
     const classification = db.prepare('SELECT * FROM memory_claim_classification WHERE claim_id=?').get(claimId) || null;
     const reviews = db.prepare('SELECT entity_id,role,verdict,input_hash FROM memory_node_reviews WHERE claim_id=? ORDER BY entity_id,role').all(claimId);
     return protocol.hash({ claim: { revision: claim.revision, input_hash: claim.input_hash,
@@ -43,9 +44,8 @@ function derive(db, claimId, now = Date.now()) {
     if (claim.claim_status === 'superseded') return { state: 'ineligible', reason: 'claim_superseded', entityIds: [] };
     if (!protocol.sourcesCurrent(db, claim)) return { state: 'ineligible', reason: 'source_changed', entityIds: [] };
     if (!protocol.eligible(db, claimId)) {
-        const duty = db.prepare('SELECT state,duty FROM memory_claim_duties WHERE claim_id=?').get(claimId);
-        if (!duty) return { state: 'ineligible', reason: 'duty_missing', entityIds: [] };
-        return { state: 'ineligible', reason: 'claim_not_verified', entityIds: [] };
+        if (!claim.duty) return { state: 'ineligible', reason: 'duty_missing', entityIds: [] };
+        return { state: 'ineligible', reason: 'fragment_not_eligible', entityIds: [] };
     }
     const classification = db.prepare('SELECT * FROM memory_claim_classification WHERE claim_id=?').get(claimId);
     const grouped = nodes.supported(db, claimId);
@@ -100,11 +100,11 @@ function reconcile(db, claimId, { now = Date.now(), priority = protocol.BACKFILL
         );
     }
     if (['grounded', 'unassigned', 'topic_only'].includes(next.state)) {
-        protocol.enqueueJob(db, { stage: 'constellation_discovery', targetType: 'claim', targetId: claimId,
+        protocol.enqueueJob(db, { stage: 'constellation_discovery', targetType: 'fragment', targetId: claimId,
             inputRevision: claim.revision, inputHash: fingerprint, priority });
     }
     if (next.state === 'grounded' || next.state === 'unassigned') {
-        protocol.enqueueJob(db, { stage: 'episode_candidate', targetType: 'claim', targetId: claimId,
+        protocol.enqueueJob(db, { stage: 'episode_candidate', targetType: 'fragment', targetId: claimId,
             inputRevision: claim.revision, inputHash: claim.input_hash, priority });
     }
     if (next.state === 'grounded') {

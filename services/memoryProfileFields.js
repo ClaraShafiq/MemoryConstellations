@@ -120,8 +120,8 @@ function selectedSeeds(db, entityId, ids) {
 
 function requireObjectiveEvidence(db, field, claims) {
     for (const claim of claims) {
-        const duty = db.prepare(`SELECT claim_revision,duty,context_scope,state FROM memory_claim_duties
-            WHERE claim_id=?`).get(claim.id);
+        const duty = { claim_revision: claim.revision, duty: claim.duty,
+            context_scope: claim.context_scope, state: claim.duty_state };
         if (duty?.state !== 'supported' || Number(duty.claim_revision) !== Number(claim.revision)
             || !CONTEXT_SCOPES.includes(duty.context_scope)) protocol.fail('profile_duty_missing');
         if (!claim.node_roles?.some(row => row.role === 'subject'

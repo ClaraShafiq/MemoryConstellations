@@ -12,6 +12,7 @@ router.post('/memory/corrections', (req, res) => {
             messageId: req.body?.message_id,
             quote: req.body?.quote,
             correction: req.body?.correction,
+            targetFragmentId: req.body?.target_fragment_id,
             targetClaimId: req.body?.target_claim_id,
         });
         res.status(202).json({ success: true, receipt });

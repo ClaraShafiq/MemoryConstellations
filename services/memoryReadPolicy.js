@@ -5,7 +5,8 @@ const protocol = require('./memoryProtocol');
 function readableClaim(db, claimId) {
     if (!protocol.eligible(db, claimId)) return false;
     const pool = db.prepare('SELECT * FROM memory_evidence_pool WHERE claim_id=?').get(claimId);
-    const claim = db.prepare('SELECT revision,input_hash FROM memory_claims WHERE id=?').get(claimId);
+    let claim;
+    try { claim = protocol.readClaim(db, claimId); } catch (_) { return false; }
     return !!pool && !!claim && ['grounded', 'unassigned'].includes(pool.state)
         && Number(pool.claim_revision) === Number(claim.revision) && pool.input_hash === claim.input_hash;
 }
@@ -50,9 +51,16 @@ function readableSaga(db, row) {
 function projectionCurrent(db, row) {
     if (!row) return false;
     if (row.target_type === 'claim') {
-        const claim = db.prepare('SELECT revision,input_hash FROM memory_claims WHERE id=?').get(row.target_id);
+        let claim;
+        try { claim = protocol.readClaim(db, row.target_id); } catch (_) { return false; }
         return readableClaim(db, row.target_id) && Number(row.revision) === Number(claim?.revision)
             && row.input_hash === claim?.input_hash;
+    }
+    if (row.target_type === 'fragment') {
+        let evidence;
+        try { evidence = protocol.readClaim(db, row.target_id); } catch (_) { return false; }
+        return readableClaim(db, row.target_id) && Number(row.revision) === Number(evidence.revision)
+            && row.input_hash === evidence.input_hash;
     }
     if (row.target_type === 'profile') {
         const publication = db.prepare(`SELECT * FROM memory_profile_field_publications
